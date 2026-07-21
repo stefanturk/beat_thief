@@ -19,7 +19,7 @@ Download all songs from a YouTube Music (or YouTube) playlist as MP3s.
 python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID"
 ```
 
-Songs are saved to `./downloads` by default, named `Title - Artist.mp3`.
+Songs are saved to `downloads/Song Downloads` (next to the script) by default, named `Title - Artist.mp3`.
 
 Use a custom output folder:
 

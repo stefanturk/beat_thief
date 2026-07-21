@@ -39,11 +39,14 @@ def main() -> None:
         description="Download a YouTube/YouTube Music playlist as MP3s."
     )
     parser.add_argument("url", help="YouTube Music (or YouTube) playlist URL")
+    default_output = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "downloads", "Song Downloads"
+    )
     parser.add_argument(
         "-o",
         "--output",
-        default="downloads",
-        help="Output directory (default: ./downloads)",
+        default=default_output,
+        help=f"Output directory (default: {default_output})",
     )
     args = parser.parse_args()
 
