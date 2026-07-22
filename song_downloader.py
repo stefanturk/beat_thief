@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Download all songs from a YouTube/YouTube Music playlist as MP3s."""
 
+from __future__ import annotations
+
 import argparse
 import os
 import sys
@@ -8,21 +10,33 @@ import sys
 import yt_dlp
 
 BAR_WIDTH = 30
+
 _active_title = None
+_song_number = 0
+_total_songs = None
+_downloaded_count = 0
+_failed_count = 0
 
 
-def _short(title: str, max_len: int = 40) -> str:
+def _short(title: str, max_len: int = 45) -> str:
     return title if len(title) <= max_len else title[: max_len - 1] + "…"
 
 
+def _song_label() -> str:
+    if _total_songs:
+        return f"song {_song_number} of {_total_songs}"
+    return f"song {_song_number}"
+
+
 def _progress_hook(d):
-    global _active_title
+    global _active_title, _song_number
     title = d.get("info_dict", {}).get("title", "Unknown")
 
     if d["status"] == "downloading":
         if title != _active_title:
             _active_title = title
-            print(f"Downloading: {_short(title)}")
+            _song_number += 1
+            print(f"Downloading {_song_label()}: {_short(title)}")
 
         total = d.get("total_bytes") or d.get("total_bytes_estimate")
         downloaded = d.get("downloaded_bytes", 0)
@@ -36,21 +50,63 @@ def _progress_hook(d):
         print(f"\r  [{'#' * BAR_WIDTH}] 100.0%")
 
     elif d["status"] == "error":
-        print(f"\nFailed: {_short(title)}")
+        global _failed_count
+        _failed_count += 1
+        print(f"  Could not download this one, skipping it: {_short(title)}")
         _active_title = None
 
 
 def _postprocessor_hook(d):
-    global _active_title
+    global _active_title, _downloaded_count
     if d["status"] == "finished" and d.get("postprocessor") == "ExtractAudio" and _active_title is not None:
         title = d.get("info_dict", {}).get("title", "Unknown")
-        print(f"Finished: {_short(title)}")
+        _downloaded_count += 1
+        print(f"Saved: {_short(title)}.mp3")
         _active_title = None
 
 
+class _SilentLogger:
+    def debug(self, msg):
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        pass
+
+
+def _count_playlist_entries(url: str) -> int | None:
+    """Return the number of songs in the playlist, or None if it can't be determined quickly."""
+    probe_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "extract_flat": True,
+        "skip_download": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
+        "logger": _SilentLogger(),
+    }
+    try:
+        with yt_dlp.YoutubeDL(probe_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception:
+        return None
+    entries = info.get("entries") if info else None
+    return len(entries) if entries is not None else 1
+
+
 def download_playlist(url: str, output_dir: str) -> int:
+    global _total_songs
     os.makedirs(output_dir, exist_ok=True)
     archive_path = os.path.join(output_dir, ".downloaded_archive.txt")
+
+    print("Looking up the playlist...")
+    _total_songs = _count_playlist_entries(url)
+    if _total_songs:
+        word = "song" if _total_songs == 1 else "songs"
+        print(f"Found {_total_songs} {word}. Songs already downloaded before will be skipped automatically.\n")
+    else:
+        print("Found the playlist. Songs already downloaded before will be skipped automatically.\n")
 
     ydl_opts = {
         "format": "bestaudio/best",
@@ -108,8 +164,18 @@ def main() -> None:
                 file=sys.stderr,
             )
         else:
-            print(f"Error: {message}", file=sys.stderr)
+            print(f"Something went wrong: {message}", file=sys.stderr)
         sys.exit(1)
+
+    print()
+    skipped = max((_total_songs or 0) - _downloaded_count - _failed_count, 0)
+    parts = [f"downloaded {_downloaded_count} new song{'s' if _downloaded_count != 1 else ''}"]
+    if skipped:
+        parts.append(f"skipped {skipped} already downloaded")
+    if _failed_count:
+        parts.append(f"{_failed_count} failed")
+    print(f"All done! {', '.join(parts)}.")
+    print(f"Your music is in: {args.output}")
 
     sys.exit(0 if result == 0 else 1)
 
