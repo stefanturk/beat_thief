@@ -95,6 +95,7 @@ def _count_playlist_entries(url: str) -> int | None:
         "no_warnings": True,
         "extract_flat": True,
         "skip_download": True,
+        "noplaylist": True,
         "extractor_args": {"youtube": {"player_client": ["android"]}},
         "logger": _SilentLogger(),
     }
@@ -125,7 +126,7 @@ def download_playlist(url: str, output_dir: str) -> int:
         "outtmpl": os.path.join(output_dir, "%(title)s - %(uploader)s.%(ext)s"),
         "download_archive": archive_path,
         "ignoreerrors": True,
-        "noplaylist": False,
+        "noplaylist": True,
         "extractor_args": {"youtube": {"player_client": ["android"]}},
         "quiet": True,
         "no_warnings": True,
