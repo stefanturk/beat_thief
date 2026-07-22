@@ -7,6 +7,46 @@ import sys
 
 import yt_dlp
 
+BAR_WIDTH = 30
+_active_title = None
+
+
+def _short(title: str, max_len: int = 40) -> str:
+    return title if len(title) <= max_len else title[: max_len - 1] + "…"
+
+
+def _progress_hook(d):
+    global _active_title
+    title = d.get("info_dict", {}).get("title", "Unknown")
+
+    if d["status"] == "downloading":
+        if title != _active_title:
+            _active_title = title
+            print(f"Downloading: {_short(title)}")
+
+        total = d.get("total_bytes") or d.get("total_bytes_estimate")
+        downloaded = d.get("downloaded_bytes", 0)
+        if total:
+            frac = min(downloaded / total, 1.0)
+            filled = int(BAR_WIDTH * frac)
+            bar = "#" * filled + "-" * (BAR_WIDTH - filled)
+            print(f"\r  [{bar}] {frac * 100:5.1f}%", end="", flush=True)
+
+    elif d["status"] == "finished":
+        print(f"\r  [{'#' * BAR_WIDTH}] 100.0%")
+
+    elif d["status"] == "error":
+        print(f"\nFailed: {_short(title)}")
+        _active_title = None
+
+
+def _postprocessor_hook(d):
+    global _active_title
+    if d["status"] == "finished" and d.get("postprocessor") == "ExtractAudio" and _active_title is not None:
+        title = d.get("info_dict", {}).get("title", "Unknown")
+        print(f"Finished: {_short(title)}")
+        _active_title = None
+
 
 def download_playlist(url: str, output_dir: str) -> int:
     os.makedirs(output_dir, exist_ok=True)
@@ -19,6 +59,11 @@ def download_playlist(url: str, output_dir: str) -> int:
         "ignoreerrors": True,
         "noplaylist": False,
         "extractor_args": {"youtube": {"player_client": ["android"]}},
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "progress_hooks": [_progress_hook],
+        "postprocessor_hooks": [_postprocessor_hook],
         "postprocessors": [
             {
                 "key": "FFmpegExtractAudio",
@@ -50,6 +95,9 @@ def main() -> None:
 
     try:
         result = download_playlist(args.url, args.output)
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        sys.exit(130)
     except yt_dlp.utils.DownloadError as e:
         message = str(e)
         if "ffprobe" in message.lower() or "ffmpeg" in message.lower():
