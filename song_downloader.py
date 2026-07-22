@@ -18,6 +18,18 @@ _downloaded_count = 0
 _failed_count = 0
 
 
+def _exit(code: int) -> None:
+    """Flush output and force the process closed immediately.
+
+    Plain sys.exit() can leave the shell prompt hanging if some dependency
+    (yt-dlp/ffmpeg/urllib3) leaves a resource open in the background, so we
+    force the OS-level exit once our own work is done.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 def _short(title: str, max_len: int = 45) -> str:
     return title if len(title) <= max_len else title[: max_len - 1] + "…"
 
@@ -153,7 +165,7 @@ def main() -> None:
         result = download_playlist(args.url, args.output)
     except KeyboardInterrupt:
         print("\nCancelled.")
-        sys.exit(130)
+        _exit(130)
     except yt_dlp.utils.DownloadError as e:
         message = str(e)
         if "ffprobe" in message.lower() or "ffmpeg" in message.lower():
@@ -165,7 +177,7 @@ def main() -> None:
             )
         else:
             print(f"Something went wrong: {message}", file=sys.stderr)
-        sys.exit(1)
+        _exit(1)
 
     print()
     skipped = max((_total_songs or 0) - _downloaded_count - _failed_count, 0)
@@ -177,7 +189,7 @@ def main() -> None:
     print(f"All done! {', '.join(parts)}.")
     print(f"Your music is in: {args.output}")
 
-    sys.exit(0 if result == 0 else 1)
+    _exit(0 if result == 0 else 1)
 
 
 if __name__ == "__main__":
