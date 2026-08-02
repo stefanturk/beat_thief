@@ -454,6 +454,7 @@ def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list
     if not (needs_trim or needs_normalize or name_changed or new_flags):
         # Nothing about this file needs fixing — leave it exactly as it is.
         mark_sanitized(output_dir, filename)
+        print(f"{filename}: already good, no changes needed.")
         return new_flags
 
     preferred_stem = canonical_stem
@@ -488,6 +489,15 @@ def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list
         flag["filename"] = final_filename
 
     mark_sanitized(output_dir, final_filename)
+
+    if replace:
+        if final_filename == filename:
+            print(f"{filename}: cleaned up.")
+        else:
+            print(f"{filename}: cleaned up and renamed to '{final_filename}'.")
+    else:
+        print(f"{filename}: saved cleaned-up copy as '{final_filename}'.")
+
     return new_flags
 
 
@@ -516,14 +526,18 @@ def sanitize_folder(output_dir: str, replace: bool = False) -> None:
     mp3_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
 
     all_flags = load_flagged(output_dir)
+    processed_count = 0
+    skipped_count = 0
     for filename in mp3_files:
         if filename in archive:
+            skipped_count += 1
             continue
         try:
             new_flags = sanitize_file(filename, output_dir, replace=replace)
         except Exception as e:
             print(f"  Could not sanitize {filename}, skipping: {e}")
             continue
+        processed_count += 1
         all_flags.extend(new_flags)
 
     save_flagged(output_dir, all_flags)
@@ -533,6 +547,11 @@ def sanitize_folder(output_dir: str, replace: bool = False) -> None:
     if flagged:
         print(f"\n{len(flagged)} song section(s) need your input.")
         review_flagged(output_dir)
+    elif not mp3_files:
+        print("No MP3s found to sanitize.")
+    elif processed_count == 0:
+        word = "song" if skipped_count == 1 else "songs"
+        print(f"Nothing to do — {skipped_count} {word} already sanitized.")
 
 
 def sanitize_single_file(path: str, replace: bool = False) -> None:
@@ -541,7 +560,9 @@ def sanitize_single_file(path: str, replace: bool = False) -> None:
 
     archive = load_sanitized_archive(output_dir)
     all_flags = load_flagged(output_dir)
-    if filename not in archive:
+    if filename in archive:
+        print(f"{filename}: already sanitized previously, nothing to do.")
+    else:
         try:
             new_flags = sanitize_file(filename, output_dir, replace=replace)
             all_flags.extend(new_flags)
