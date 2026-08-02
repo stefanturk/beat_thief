@@ -133,6 +133,7 @@ NORMALIZE_TARGET_DBFS = -1.0
 NORMALIZE_TRIGGER_HEADROOM_DB = 3.0
 SCAN_CHUNK_MS = 500
 SNIPPET_WINDOW_MS = 5000
+SUSTAINED_LOUD_CHUNKS = 4  # ~2s of continuous non-quiet audio before we consider the song "started"
 
 
 def load_audio(path: str) -> AudioSegment:
@@ -148,28 +149,47 @@ def _region_dbfs(audio: AudioSegment, start_ms: int, end_ms: int) -> float:
     return region.dBFS if region.dBFS != float("-inf") else -120.0
 
 
+def _is_quiet_chunk(level: float, avg_dbfs: float) -> bool:
+    return level < SILENCE_DBFS or level < avg_dbfs - AMBIGUOUS_DB_BELOW_AVERAGE
+
+
 def _find_cut_from_start(audio: AudioSegment, avg_dbfs: float) -> int:
+    # A brief loud blip (a knock, a single kick hit) surrounded by silence
+    # shouldn't count as "the song has started" — only a sustained run of
+    # non-quiet chunks does. This lets a sparse, mostly-silent intro (e.g. a
+    # few isolated drum hits) get flagged as one ambiguous region instead of
+    # stopping at the very first blip.
     duration_ms = len(audio)
     pos = 0
+    consecutive_loud = 0
     while pos < duration_ms:
         level = _region_dbfs(audio, pos, pos + SCAN_CHUNK_MS)
-        if level < SILENCE_DBFS or level < avg_dbfs - AMBIGUOUS_DB_BELOW_AVERAGE:
-            pos += SCAN_CHUNK_MS
-            continue
-        break
-    return min(pos, duration_ms)
+        if _is_quiet_chunk(level, avg_dbfs):
+            consecutive_loud = 0
+        else:
+            consecutive_loud += 1
+            if consecutive_loud >= SUSTAINED_LOUD_CHUNKS:
+                cut_ms = pos - (consecutive_loud - 1) * SCAN_CHUNK_MS
+                return max(cut_ms, 0)
+        pos += SCAN_CHUNK_MS
+    return duration_ms
 
 
 def _find_cut_from_end(audio: AudioSegment, avg_dbfs: float) -> int:
     duration_ms = len(audio)
     pos = duration_ms
+    consecutive_loud = 0
     while pos > 0:
         level = _region_dbfs(audio, max(0, pos - SCAN_CHUNK_MS), pos)
-        if level < SILENCE_DBFS or level < avg_dbfs - AMBIGUOUS_DB_BELOW_AVERAGE:
-            pos -= SCAN_CHUNK_MS
-            continue
-        break
-    return max(pos, 0)
+        if _is_quiet_chunk(level, avg_dbfs):
+            consecutive_loud = 0
+        else:
+            consecutive_loud += 1
+            if consecutive_loud >= SUSTAINED_LOUD_CHUNKS:
+                cut_ms = pos + (consecutive_loud - 1) * SCAN_CHUNK_MS
+                return min(cut_ms, duration_ms)
+        pos -= SCAN_CHUNK_MS
+    return 0
 
 
 def analyze_cut_candidates(audio: AudioSegment) -> dict:

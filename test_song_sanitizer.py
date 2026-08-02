@@ -146,6 +146,25 @@ class TestAnalyzeCutCandidates(unittest.TestCase):
         self.assertNotIn("start", result)
         self.assertNotIn("end", result)
 
+    def test_flags_sparse_loud_blips_in_mostly_silent_intro(self):
+        # A few isolated drum hits (or knocks) surrounded by silence shouldn't
+        # be mistaken for "the song has started" — real-world case found by
+        # testing against an actual downloaded track (Childish Gambino -
+        # Redbone), which opens with a sparse kick drum hit at 0:00 that a
+        # naive "stop at the first loud chunk" scan treated as no intro at all.
+        blip = _tone(500, dbfs_gain=-10)
+        gap = AudioSegment.silent(duration=1000)
+        loud_body = _tone(3000, dbfs_gain=-3)
+        track = blip + gap + blip + gap + blip + gap + loud_body
+
+        result = sanitizer.analyze_cut_candidates(track)
+
+        self.assertIn("start", result)
+        self.assertEqual(result["start"]["classification"], "ambiguous")
+        # The cut point should land where the loud body actually begins
+        # (4500ms), not at 0 (stopping at the very first blip).
+        self.assertEqual(result["start"]["cut_ms"], 4500)
+
 
 class TestTrim(unittest.TestCase):
     def test_trims_start_and_end(self):
