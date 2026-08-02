@@ -352,9 +352,10 @@ def backup_original(path: str, output_dir: str) -> None:
         shutil.copy2(path, dest)
 
 
-def sanitize_file(filename: str, output_dir: str) -> list[dict]:
+def sanitize_file(filename: str, output_dir: str, backup: bool = True) -> list[dict]:
     path = os.path.join(output_dir, filename)
-    backup_original(path, output_dir)
+    if backup:
+        backup_original(path, output_dir)
 
     audio = load_audio(path)
     candidates = analyze_cut_candidates(audio)
@@ -392,15 +393,24 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
     if cleaned_stem and cleaned_stem != stem:
         final_filename = cleaned_stem + ext
         new_path = os.path.join(output_dir, final_filename)
-        if os.path.exists(new_path) and not os.path.samefile(path, new_path):
-            backup_original(new_path, output_dir)
+        collision = os.path.exists(new_path) and not os.path.samefile(path, new_path)
+        if collision and not backup:
             print(
                 f"  '{filename}' cleans up to the same name as an existing file "
-                f"('{final_filename}'). Keeping the cleaned-title version and "
-                f"backing up the other to .originals/."
+                f"('{final_filename}'). Skipping the rename to avoid overwriting it "
+                f"(re-run without --no-backup to resolve this automatically)."
             )
-        os.rename(path, new_path)
-        path = new_path
+            final_filename = filename
+        else:
+            if collision:
+                backup_original(new_path, output_dir)
+                print(
+                    f"  '{filename}' cleans up to the same name as an existing file "
+                    f"('{final_filename}'). Keeping the cleaned-title version and "
+                    f"backing up the other to .originals/."
+                )
+            os.rename(path, new_path)
+            path = new_path
         for flag in new_flags:
             flag["filename"] = final_filename
 
@@ -430,7 +440,7 @@ def _run_dedup(output_dir: str) -> None:
         print(f"Removed duplicate: {loser}")
 
 
-def sanitize_folder(output_dir: str) -> None:
+def sanitize_folder(output_dir: str, backup: bool = True) -> None:
     os.makedirs(output_dir, exist_ok=True)
     archive = load_sanitized_archive(output_dir)
     mp3_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
@@ -440,7 +450,7 @@ def sanitize_folder(output_dir: str) -> None:
         if filename in archive:
             continue
         try:
-            new_flags = sanitize_file(filename, output_dir)
+            new_flags = sanitize_file(filename, output_dir, backup=backup)
         except Exception as e:
             print(f"  Could not sanitize {filename}, skipping: {e}")
             continue
@@ -455,6 +465,34 @@ def sanitize_folder(output_dir: str) -> None:
         review_flagged(output_dir)
 
 
+def sanitize_single_file(path: str, backup: bool = True) -> None:
+    output_dir = os.path.dirname(os.path.abspath(path)) or "."
+    filename = os.path.basename(path)
+
+    archive = load_sanitized_archive(output_dir)
+    all_flags = load_flagged(output_dir)
+    if filename not in archive:
+        try:
+            new_flags = sanitize_file(filename, output_dir, backup=backup)
+            all_flags.extend(new_flags)
+        except Exception as e:
+            print(f"  Could not sanitize {filename}, skipping: {e}")
+
+    save_flagged(output_dir, all_flags)
+
+    flagged = load_flagged(output_dir)
+    if flagged:
+        print(f"\n{len(flagged)} song section(s) need your input.")
+        review_flagged(output_dir)
+
+
+def sanitize_path(path: str, backup: bool = True) -> None:
+    if os.path.isfile(path):
+        sanitize_single_file(path, backup=backup)
+    else:
+        sanitize_folder(path, backup=backup)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Clean up downloaded MP3s: trim dead air, fix volume, tidy titles/tags, remove duplicates."
@@ -463,12 +501,17 @@ def main() -> None:
         "path",
         nargs="?",
         default=DEFAULT_OUTPUT,
-        help=f"Folder of MP3s to sanitize (default: {DEFAULT_OUTPUT})",
+        help=f"Folder of MP3s (or a single MP3 file) to sanitize (default: {DEFAULT_OUTPUT})",
     )
     parser.add_argument(
         "--review",
         action="store_true",
         help="Skip processing and resolve any previously-flagged ambiguous cuts",
+    )
+    parser.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="Don't back up originals to .originals/ before modifying them",
     )
     args = parser.parse_args()
 
@@ -476,7 +519,7 @@ def main() -> None:
         if args.review:
             review_flagged(args.path)
         else:
-            sanitize_folder(args.path)
+            sanitize_path(args.path, backup=not args.no_backup)
     except KeyboardInterrupt:
         print("\nStopped. Run python3 song_sanitizer.py --review to finish reviewing.")
         sys.exit(130)
