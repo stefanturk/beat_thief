@@ -344,6 +344,109 @@ class TestSanitizeFile(unittest.TestCase):
         self.assertLess(len(result_audio), 8000)
 
 
+class TestSanitizeFileEdgeCases(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_fully_silent_track_is_not_reduced_to_empty_file(self):
+        filename = "Silent - Artist.mp3"
+        track = AudioSegment.silent(duration=4000)
+        sanitizer.export_audio(track, os.path.join(self.tmp_dir, filename))
+
+        # Should not raise (e.g. from applying infinite gain) and should not
+        # collapse the file to zero/near-zero length.
+        sanitizer.sanitize_file(filename, self.tmp_dir)
+
+        result_path = os.path.join(self.tmp_dir, filename)
+        self.assertTrue(os.path.exists(result_path))
+        result_audio = sanitizer.load_audio(result_path)
+        self.assertGreater(len(result_audio), 1000)
+
+    def test_rename_collision_backs_up_loser_instead_of_clobbering(self):
+        f1 = "Song Name (Official Video) - Artist.mp3"
+        f2 = "Song Name - Artist.mp3"
+        sanitizer.export_audio(_tone(2000, dbfs_gain=-3), os.path.join(self.tmp_dir, f1))
+        sanitizer.export_audio(_tone(2000, dbfs_gain=-3, freq=880), os.path.join(self.tmp_dir, f2))
+
+        # Sanitize the already-clean-titled file first so it occupies the
+        # target filename, then sanitize the junky one so its rename collides.
+        sanitizer.sanitize_file(f2, self.tmp_dir)
+        sanitizer.sanitize_file(f1, self.tmp_dir)
+
+        final_path = os.path.join(self.tmp_dir, "Song Name - Artist.mp3")
+        backup_path = os.path.join(self.tmp_dir, ".originals", "Song Name - Artist.mp3")
+        self.assertTrue(os.path.exists(final_path))
+        self.assertTrue(os.path.exists(backup_path))
+
+    def test_all_junk_title_keeps_original_filename(self):
+        filename = "HD (Official Video).mp3"
+        sanitizer.export_audio(_tone(2000, dbfs_gain=-3), os.path.join(self.tmp_dir, filename))
+
+        sanitizer.sanitize_file(filename, self.tmp_dir)
+
+        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, filename)))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, ".mp3")))
+
+
+class TestReviewFlaggedEdgeCases(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @mock.patch("song_sanitizer.play_snippet")
+    @mock.patch("builtins.input", side_effect=["c", "k"])
+    def test_resolving_start_cut_adjusts_stale_end_flag_cut_ms(self, mock_input, mock_play):
+        filename = "Song - Artist.mp3"
+        track = _tone(10000, dbfs_gain=-6)
+        sanitizer.export_audio(track, os.path.join(self.tmp_dir, filename))
+        start_cut_ms = 2000
+        end_cut_ms = 8000
+        sanitizer.save_flagged(
+            self.tmp_dir,
+            [
+                {"filename": filename, "end": "start", "cut_ms": start_cut_ms},
+                {"filename": filename, "end": "end", "cut_ms": end_cut_ms},
+            ],
+        )
+
+        sanitizer.review_flagged(self.tmp_dir)
+
+        # Only the "keep" for the end flag remains to be applied; review
+        # should have completed without crashing and cleared both flags.
+        self.assertEqual(sanitizer.load_flagged(self.tmp_dir), [])
+        result_audio = sanitizer.load_audio(os.path.join(self.tmp_dir, filename))
+        # The start cut removed ~2000ms, so the file should be shorter than
+        # the original but still a sensible, non-trivial length.
+        self.assertLess(len(result_audio), 10000)
+        self.assertGreater(len(result_audio), 1000)
+
+    @mock.patch("song_sanitizer.play_snippet")
+    @mock.patch("builtins.input", return_value="k")
+    def test_bad_flag_is_skipped_without_stopping_the_rest(self, mock_input, mock_play):
+        good_filename = "Song - Artist.mp3"
+        sanitizer.export_audio(_tone(2000, dbfs_gain=-6), os.path.join(self.tmp_dir, good_filename))
+        bad_path = os.path.join(self.tmp_dir, "Corrupt - Artist.mp3")
+        with open(bad_path, "wb") as f:
+            f.write(b"not a real mp3")
+
+        sanitizer.save_flagged(
+            self.tmp_dir,
+            [
+                {"filename": "Corrupt - Artist.mp3", "end": "start", "cut_ms": 500},
+                {"filename": good_filename, "end": "start", "cut_ms": 500},
+            ],
+        )
+
+        sanitizer.review_flagged(self.tmp_dir)
+
+        self.assertEqual(sanitizer.load_flagged(self.tmp_dir), [])
+
+
 class TestSanitizeFolder(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()

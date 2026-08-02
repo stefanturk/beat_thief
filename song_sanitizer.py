@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 from mutagen.easyid3 import EasyID3
@@ -175,13 +177,13 @@ def analyze_cut_candidates(audio: AudioSegment) -> dict:
     result: dict = {}
 
     start_cut_ms = _find_cut_from_start(audio, avg_dbfs)
-    if start_cut_ms > 0:
+    if 0 < start_cut_ms < len(audio):
         region_level = _region_dbfs(audio, 0, start_cut_ms)
         classification = "silent" if region_level < SILENCE_DBFS else "ambiguous"
         result["start"] = {"classification": classification, "cut_ms": start_cut_ms}
 
     end_cut_ms = _find_cut_from_end(audio, avg_dbfs)
-    if end_cut_ms < len(audio):
+    if 0 < end_cut_ms < len(audio):
         region_level = _region_dbfs(audio, end_cut_ms, len(audio))
         classification = "silent" if region_level < SILENCE_DBFS else "ambiguous"
         result["end"] = {"classification": classification, "cut_ms": end_cut_ms}
@@ -197,17 +199,24 @@ def trim(audio: AudioSegment, start_ms: int | None, end_ms: int | None) -> Audio
 
 def apply_fade(audio: AudioSegment, end: str, cut_ms: int) -> AudioSegment:
     if end == "start":
-        return audio.fade_in(cut_ms)
-    duration = len(audio) - cut_ms
+        return audio.fade_in(max(0, cut_ms))
+    duration = max(0, len(audio) - cut_ms)
     return audio.fade_out(duration)
 
 
 def needs_normalization(audio: AudioSegment) -> bool:
-    return audio.max_dBFS < NORMALIZE_TARGET_DBFS - NORMALIZE_TRIGGER_HEADROOM_DB
+    max_dbfs = audio.max_dBFS
+    if not math.isfinite(max_dbfs):
+        # Silence/near-silence has no finite peak to normalize against.
+        return False
+    return max_dbfs < NORMALIZE_TARGET_DBFS - NORMALIZE_TRIGGER_HEADROOM_DB
 
 
 def peak_normalize(audio: AudioSegment) -> AudioSegment:
-    gain = NORMALIZE_TARGET_DBFS - audio.max_dBFS
+    max_dbfs = audio.max_dBFS
+    if not math.isfinite(max_dbfs):
+        return audio
+    gain = NORMALIZE_TARGET_DBFS - max_dbfs
     return audio.apply_gain(gain)
 
 
@@ -257,42 +266,57 @@ def review_flagged(output_dir: str) -> None:
         filename = flag["filename"]
         path = os.path.join(output_dir, filename)
 
-        if not os.path.exists(path):
+        try:
+            if not os.path.exists(path):
+                remaining.pop(0)
+                save_flagged(output_dir, remaining)
+                continue
+
+            audio = load_audio(path)
+            cut_ms = flag["cut_ms"]
+            end = flag["end"]
+
+            label = "intro" if end == "start" else "outro"
+            print(f"\n{filename} — possible {label} at {cut_ms / 1000:.1f}s")
+            snippet = extract_snippet(audio, cut_ms)
+            play_snippet(snippet)
+
+            choice = _prompt_choice()
+
+            if choice == "a":
+                delta_seconds = _prompt_adjust_seconds()
+                cut_ms = max(0, min(len(audio), cut_ms + int(delta_seconds * 1000)))
+                flag["cut_ms"] = cut_ms
+                save_flagged(output_dir, remaining)
+                continue
+
+            if choice == "c":
+                result_audio = trim(
+                    audio,
+                    cut_ms if end == "start" else None,
+                    cut_ms if end == "end" else None,
+                )
+                export_audio(result_audio, path)
+
+                # Cutting shortens the audio, which invalidates absolute
+                # cut_ms offsets stored by any other pending flag for this
+                # same file. A start-cut shifts everything earlier by cut_ms;
+                # an end-cut only removes trailing audio, which doesn't
+                # affect earlier offsets.
+                if end == "start":
+                    for other in remaining[1:]:
+                        if other["filename"] == filename and other["end"] == "end":
+                            other["cut_ms"] = max(0, other["cut_ms"] - cut_ms)
+            elif choice == "f":
+                result_audio = apply_fade(audio, end, cut_ms)
+                export_audio(result_audio, path)
+
             remaining.pop(0)
             save_flagged(output_dir, remaining)
-            continue
-
-        audio = load_audio(path)
-        cut_ms = flag["cut_ms"]
-        end = flag["end"]
-
-        label = "intro" if end == "start" else "outro"
-        print(f"\n{filename} — possible {label} at {cut_ms / 1000:.1f}s")
-        snippet = extract_snippet(audio, cut_ms)
-        play_snippet(snippet)
-
-        choice = _prompt_choice()
-
-        if choice == "a":
-            delta_seconds = _prompt_adjust_seconds()
-            cut_ms = max(0, min(len(audio), cut_ms + int(delta_seconds * 1000)))
-            flag["cut_ms"] = cut_ms
+        except Exception as e:
+            print(f"  Could not review {filename}, skipping: {e}")
+            remaining.pop(0)
             save_flagged(output_dir, remaining)
-            continue
-
-        if choice == "c":
-            result_audio = trim(
-                audio,
-                cut_ms if end == "start" else None,
-                cut_ms if end == "end" else None,
-            )
-            export_audio(result_audio, path)
-        elif choice == "f":
-            result_audio = apply_fade(audio, end, cut_ms)
-            export_audio(result_audio, path)
-
-        remaining.pop(0)
-        save_flagged(output_dir, remaining)
 
 
 # --- Per-file / per-folder orchestration ------------------------------------
@@ -345,9 +369,16 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
     stem, ext = os.path.splitext(filename)
     cleaned_stem = clean_title(stem)
     final_filename = filename
-    if cleaned_stem != stem:
+    if cleaned_stem and cleaned_stem != stem:
         final_filename = cleaned_stem + ext
         new_path = os.path.join(output_dir, final_filename)
+        if os.path.exists(new_path) and not os.path.samefile(path, new_path):
+            backup_original(new_path, output_dir)
+            print(
+                f"  '{filename}' cleans up to the same name as an existing file "
+                f"('{final_filename}'). Keeping the cleaned-title version and "
+                f"backing up the other to .originals/."
+            )
         os.rename(path, new_path)
         path = new_path
         for flag in new_flags:
@@ -421,10 +452,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    if args.review:
-        review_flagged(args.path)
-    else:
-        sanitize_folder(args.path)
+    try:
+        if args.review:
+            review_flagged(args.path)
+        else:
+            sanitize_folder(args.path)
+    except KeyboardInterrupt:
+        print("\nStopped. Run python3 song_sanitizer.py --review to finish reviewing.")
+        sys.exit(130)
 
 
 if __name__ == "__main__":
