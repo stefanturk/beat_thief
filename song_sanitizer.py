@@ -13,6 +13,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import termios
+import tty
 
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3NoHeaderError
@@ -153,7 +155,7 @@ AMBIGUOUS_DB_BELOW_AVERAGE = 25.0
 NORMALIZE_TARGET_DBFS = -1.0
 NORMALIZE_TRIGGER_HEADROOM_DB = 3.0
 SCAN_CHUNK_MS = 500
-SNIPPET_WINDOW_MS = 5000
+SNIPPET_DURATION_MS = 5000
 SUSTAINED_LOUD_CHUNKS = 4  # ~2s of continuous non-quiet audio before we consider the song "started"
 
 
@@ -261,10 +263,18 @@ def peak_normalize(audio: AudioSegment) -> AudioSegment:
     return audio.apply_gain(gain)
 
 
-def extract_snippet(audio: AudioSegment, center_ms: int, window_ms: int = SNIPPET_WINDOW_MS) -> AudioSegment:
-    start = max(0, center_ms - window_ms)
-    end = min(len(audio), center_ms + window_ms)
-    return audio[start:end]
+def extract_snippet(audio: AudioSegment, anchor_ms: int, end: str, duration_ms: int = SNIPPET_DURATION_MS) -> AudioSegment:
+    """Extract `duration_ms` of audio anchored exactly where the sanitized
+    track would begin or end at this cut point — not centered on it, so what
+    plays is exactly what the cut would sound like, not a preview that
+    straddles material that's about to be removed."""
+    if end == "start":
+        start = max(0, anchor_ms)
+        stop = min(len(audio), start + duration_ms)
+    else:
+        stop = min(len(audio), anchor_ms)
+        start = max(0, stop - duration_ms)
+    return audio[start:stop]
 
 
 def play_snippet(audio: AudioSegment) -> None:
@@ -275,6 +285,24 @@ def play_snippet(audio: AudioSegment) -> None:
         subprocess.run(["afplay", tmp_path], check=False)
     finally:
         os.remove(tmp_path)
+
+
+def _wait_for_space(prompt: str) -> None:
+    if not sys.stdin.isatty():
+        # Not a real terminal (piped input, non-interactive run) — raw
+        # cbreak mode isn't available, so fall back to a plain Enter-to-continue.
+        input(prompt)
+        return
+    print(prompt, end="", flush=True)
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while sys.stdin.read(1) != " ":
+            pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    print()
 
 
 # --- Interactive review of ambiguous cut points -----------------------------
@@ -318,8 +346,10 @@ def review_flagged(output_dir: str) -> None:
             end = flag["end"]
 
             label = "intro" if end == "start" else "outro"
+            verb = "start" if end == "start" else "end"
             print(f"\n{filename} — possible {label} at {cut_ms / 1000:.1f}s")
-            snippet = extract_snippet(audio, cut_ms)
+            _wait_for_space(f"  Ready? Press space to hear where the sanitized song would {verb}... ")
+            snippet = extract_snippet(audio, cut_ms, end)
             play_snippet(snippet)
 
             choice = _prompt_choice()
@@ -378,10 +408,15 @@ def _unique_path(output_dir: str, stem: str, ext: str, taken: str | None = None)
         counter += 1
 
 
-def sanitize_file(filename: str, output_dir: str) -> list[dict]:
+def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list[dict]:
     """Produce a cleaned-up copy of filename next to it, if it needs one. The
     original file at filename is never opened for writing — only ever read
-    from. If nothing about it needs fixing, no new file is created at all."""
+    from. If nothing about it needs fixing, no new file is created at all.
+
+    If replace is True, the original is deleted once the cleaned-up copy has
+    been written successfully (used for automatic post-download cleanup,
+    where there's no reason to keep the raw download around). If False, the
+    original is kept alongside the new copy (used for one-off/manual runs)."""
     path = os.path.join(output_dir, filename)
 
     audio = load_audio(path)
@@ -422,10 +457,12 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
         return new_flags
 
     preferred_stem = canonical_stem
-    if preferred_stem + ext == filename:
+    self_collision = preferred_stem + ext == filename
+    if self_collision:
         # The cleaned-up name is identical to the original, but we still need
         # a modified copy (trim/normalize/pending review) — never overwrite
-        # the original, so this one gets a distinguishing suffix.
+        # the original while it still exists, so this one gets a
+        # distinguishing suffix.
         preferred_stem = f"{canonical_stem} (sanitized)"
 
     output_path = _unique_path(output_dir, preferred_stem, ext, taken=filename)
@@ -434,10 +471,22 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
     export_audio(audio, output_path)
     write_id3_tags(output_path, title, artist)
 
+    if replace:
+        os.remove(path)
+        if self_collision:
+            # The original is gone now, so its name is free — drop the
+            # "(sanitized)" suffix and use the clean canonical name.
+            canonical_path = os.path.join(output_dir, canonical_stem + ext)
+            if not os.path.exists(canonical_path):
+                os.rename(output_path, canonical_path)
+                output_path = canonical_path
+                final_filename = os.path.basename(output_path)
+    else:
+        mark_sanitized(output_dir, filename)
+
     for flag in new_flags:
         flag["filename"] = final_filename
 
-    mark_sanitized(output_dir, filename)
     mark_sanitized(output_dir, final_filename)
     return new_flags
 
@@ -461,7 +510,7 @@ def _run_dedup(output_dir: str) -> None:
         print(f"Removed duplicate: {loser}")
 
 
-def sanitize_folder(output_dir: str) -> None:
+def sanitize_folder(output_dir: str, replace: bool = False) -> None:
     os.makedirs(output_dir, exist_ok=True)
     archive = load_sanitized_archive(output_dir)
     mp3_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
@@ -471,7 +520,7 @@ def sanitize_folder(output_dir: str) -> None:
         if filename in archive:
             continue
         try:
-            new_flags = sanitize_file(filename, output_dir)
+            new_flags = sanitize_file(filename, output_dir, replace=replace)
         except Exception as e:
             print(f"  Could not sanitize {filename}, skipping: {e}")
             continue
@@ -486,7 +535,7 @@ def sanitize_folder(output_dir: str) -> None:
         review_flagged(output_dir)
 
 
-def sanitize_single_file(path: str) -> None:
+def sanitize_single_file(path: str, replace: bool = False) -> None:
     output_dir = os.path.dirname(os.path.abspath(path)) or "."
     filename = os.path.basename(path)
 
@@ -494,7 +543,7 @@ def sanitize_single_file(path: str) -> None:
     all_flags = load_flagged(output_dir)
     if filename not in archive:
         try:
-            new_flags = sanitize_file(filename, output_dir)
+            new_flags = sanitize_file(filename, output_dir, replace=replace)
             all_flags.extend(new_flags)
         except Exception as e:
             print(f"  Could not sanitize {filename}, skipping: {e}")
@@ -507,11 +556,11 @@ def sanitize_single_file(path: str) -> None:
         review_flagged(output_dir)
 
 
-def sanitize_path(path: str) -> None:
+def sanitize_path(path: str, replace: bool = False) -> None:
     if os.path.isfile(path):
-        sanitize_single_file(path)
+        sanitize_single_file(path, replace=replace)
     else:
-        sanitize_folder(path)
+        sanitize_folder(path, replace=replace)
 
 
 def main() -> None:
