@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import json
 import math
 import os
 import re
@@ -17,12 +16,11 @@ import termios
 import tty
 
 from mutagen.easyid3 import EasyID3
-from mutagen.id3 import ID3NoHeaderError
+from mutagen.id3 import ID3, ID3NoHeaderError, TXXX
 
 from pydub import AudioSegment
 
-SANITIZED_ARCHIVE_NAME = ".sanitized_archive.txt"
-FLAGGED_FILE_NAME = ".sanitizer_flagged.json"
+DUPLICATES_DIR_NAME = "Duplicates"
 
 _JUNK_PATTERNS = [
     r"\(\s*official\s+video\s*\)",
@@ -51,36 +49,6 @@ _JUNK_PATTERNS = [
 _JUNK_RE = re.compile("|".join(_JUNK_PATTERNS), re.IGNORECASE)
 
 DEDUP_THRESHOLD = 0.9
-
-
-# --- State tracking ---------------------------------------------------------
-
-def load_sanitized_archive(output_dir: str) -> set[str]:
-    path = os.path.join(output_dir, SANITIZED_ARCHIVE_NAME)
-    if not os.path.exists(path):
-        return set()
-    with open(path) as f:
-        return {line.strip() for line in f if line.strip()}
-
-
-def mark_sanitized(output_dir: str, filename: str) -> None:
-    path = os.path.join(output_dir, SANITIZED_ARCHIVE_NAME)
-    with open(path, "a") as f:
-        f.write(filename + "\n")
-
-
-def load_flagged(output_dir: str) -> list[dict]:
-    path = os.path.join(output_dir, FLAGGED_FILE_NAME)
-    if not os.path.exists(path):
-        return []
-    with open(path) as f:
-        return json.load(f)
-
-
-def save_flagged(output_dir: str, flagged: list[dict]) -> None:
-    path = os.path.join(output_dir, FLAGGED_FILE_NAME)
-    with open(path, "w") as f:
-        json.dump(flagged, f, indent=2)
 
 
 # --- Title cleanup and ID3 tags ---------------------------------------------
@@ -125,6 +93,30 @@ def write_id3_tags(path: str, title: str, artist: str) -> None:
     id3_tags["title"] = title
     id3_tags["artist"] = artist
     id3_tags.save()
+
+
+_SANITIZED_TAG_DESC = "song_sanitizer"
+
+
+def _mark_as_sanitized(path: str) -> None:
+    """Embed a marker in the file's own ID3 tags identifying it as output
+    already produced by this tool — not a separate file/folder, so a run
+    never has to guess whether a file it's looking at is a finished result
+    or something that still needs processing."""
+    try:
+        tags = ID3(path)
+    except ID3NoHeaderError:
+        tags = ID3()
+    tags.setall("TXXX:" + _SANITIZED_TAG_DESC, [TXXX(desc=_SANITIZED_TAG_DESC, text=["1"])])
+    tags.save(path)
+
+
+def _is_already_sanitized(path: str) -> bool:
+    try:
+        tags = ID3(path)
+    except Exception:
+        return False
+    return bool(tags.getall("TXXX:" + _SANITIZED_TAG_DESC))
 
 
 # --- Duplicate detection -----------------------------------------------------
@@ -324,11 +316,12 @@ def _prompt_adjust_seconds() -> float:
             print("  Please enter a number.")
 
 
-def review_flagged(output_dir: str) -> None:
-    remaining = load_flagged(output_dir)
-    if not remaining:
-        print("No ambiguous cuts to review.")
-        return
+def resolve_flags(flags: list[dict], output_dir: str) -> None:
+    """Interactively resolve ambiguous cut flags, one at a time, modifying
+    each flagged file in place. Purely in-memory — if interrupted partway
+    through, whatever wasn't resolved yet is simply left as-is in the
+    already-created copy; there's no separate state file to resume from."""
+    remaining = list(flags)
 
     while remaining:
         flag = remaining[0]
@@ -338,7 +331,6 @@ def review_flagged(output_dir: str) -> None:
         try:
             if not os.path.exists(path):
                 remaining.pop(0)
-                save_flagged(output_dir, remaining)
                 continue
 
             audio = load_audio(path)
@@ -358,8 +350,17 @@ def review_flagged(output_dir: str) -> None:
                 delta_seconds = _prompt_adjust_seconds()
                 cut_ms = max(0, min(len(audio), cut_ms + int(delta_seconds * 1000)))
                 flag["cut_ms"] = cut_ms
-                save_flagged(output_dir, remaining)
                 continue
+
+            if choice in ("c", "f"):
+                # Re-exporting drops any existing ID3 tags, so preserve
+                # title/artist across the re-export.
+                try:
+                    existing_tags = EasyID3(path)
+                    title = existing_tags.get("title", [""])[0]
+                    artist = existing_tags.get("artist", [""])[0]
+                except Exception:
+                    title, artist = "", ""
 
             if choice == "c":
                 result_audio = trim(
@@ -368,6 +369,7 @@ def review_flagged(output_dir: str) -> None:
                     cut_ms if end == "end" else None,
                 )
                 export_audio(result_audio, path)
+                write_id3_tags(path, title, artist)
 
                 # Cutting shortens the audio, which invalidates absolute
                 # cut_ms offsets stored by any other pending flag for this
@@ -381,13 +383,16 @@ def review_flagged(output_dir: str) -> None:
             elif choice == "f":
                 result_audio = apply_fade(audio, end, cut_ms)
                 export_audio(result_audio, path)
+                write_id3_tags(path, title, artist)
 
             remaining.pop(0)
-            save_flagged(output_dir, remaining)
+            if not any(f["filename"] == filename for f in remaining):
+                # No more pending flags for this file — mark it finished so
+                # a later run never re-flags or duplicates it.
+                _mark_as_sanitized(path)
         except Exception as e:
             print(f"  Could not review {filename}, skipping: {e}")
             remaining.pop(0)
-            save_flagged(output_dir, remaining)
 
 
 # --- Per-file / per-folder orchestration ------------------------------------
@@ -395,29 +400,52 @@ def review_flagged(output_dir: str) -> None:
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
 
-def _unique_path(output_dir: str, stem: str, ext: str, taken: str | None = None) -> str:
-    """Pick a path for stem+ext that doesn't collide with an existing file (other than `taken`)."""
-    candidate = stem + ext
-    if candidate != taken and not os.path.exists(os.path.join(output_dir, candidate)):
-        return os.path.join(output_dir, candidate)
-    counter = 2
-    while True:
-        candidate = f"{stem} ({counter}){ext}"
-        if candidate != taken and not os.path.exists(os.path.join(output_dir, candidate)):
-            return os.path.join(output_dir, candidate)
-        counter += 1
+
+
+def _derive_title_artist(filename: str) -> tuple[str, str, str]:
+    """Return (title, artist, canonical_stem) derived from filename."""
+    stem = os.path.splitext(filename)[0]
+    cleaned_stem = clean_title(stem)
+    title, artist = split_title_artist(cleaned_stem if cleaned_stem else stem)
+    canonical_stem = f"{title} - {artist}" if artist else (title or stem)
+    return title, artist, canonical_stem
+
+
+def _existing_companion(output_dir: str, filename: str) -> str | None:
+    """If a sanitized copy of filename already exists in output_dir (found
+    purely by looking for the filename it would have been given — no hidden
+    tracking file involved), return its name. Otherwise None."""
+    ext = os.path.splitext(filename)[1]
+    _, _, canonical_stem = _derive_title_artist(filename)
+    for candidate_stem in (canonical_stem, f"{canonical_stem} (sanitized)"):
+        candidate = candidate_stem + ext
+        if candidate != filename and os.path.exists(os.path.join(output_dir, candidate)):
+            return candidate
+    return None
 
 
 def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list[dict]:
     """Produce a cleaned-up copy of filename next to it, if it needs one. The
     original file at filename is never opened for writing — only ever read
     from. If nothing about it needs fixing, no new file is created at all.
+    If a sanitized copy already exists next to it, it's left alone (skipped).
 
     If replace is True, the original is deleted once the cleaned-up copy has
     been written successfully (used for automatic post-download cleanup,
     where there's no reason to keep the raw download around). If False, the
     original is kept alongside the new copy (used for one-off/manual runs)."""
+    companion = _existing_companion(output_dir, filename)
+    if companion:
+        print(f"{filename}: already sanitized as '{companion}', nothing to do.")
+        return []
+
     path = os.path.join(output_dir, filename)
+
+    if _is_already_sanitized(path):
+        # This file IS a previously-produced copy (e.g. from an earlier run,
+        # or already reviewed and kept as-is) — never re-flag or duplicate it.
+        print(f"{filename}: already sanitized, nothing to do.")
+        return []
 
     audio = load_audio(path)
     candidates = analyze_cut_candidates(audio)
@@ -446,14 +474,11 @@ def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list
         audio = peak_normalize(audio)
 
     stem, ext = os.path.splitext(filename)
-    cleaned_stem = clean_title(stem)
-    title, artist = split_title_artist(cleaned_stem if cleaned_stem else stem)
-    canonical_stem = f"{title} - {artist}" if artist else (title or stem)
+    title, artist, canonical_stem = _derive_title_artist(filename)
     name_changed = canonical_stem != stem
 
     if not (needs_trim or needs_normalize or name_changed or new_flags):
         # Nothing about this file needs fixing — leave it exactly as it is.
-        mark_sanitized(output_dir, filename)
         print(f"{filename}: already good, no changes needed.")
         return new_flags
 
@@ -466,7 +491,12 @@ def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list
         # distinguishing suffix.
         preferred_stem = f"{canonical_stem} (sanitized)"
 
-    output_path = _unique_path(output_dir, preferred_stem, ext, taken=filename)
+    output_path = os.path.join(output_dir, preferred_stem + ext)
+    if os.path.exists(output_path):
+        # Some other, unrelated song already has this exact cleaned-up name.
+        # Never overwrite it — leave this file as it is.
+        print(f"{filename}: '{os.path.basename(output_path)}' already exists, skipping to avoid overwriting it.")
+        return []
     final_filename = os.path.basename(output_path)
 
     export_audio(audio, output_path)
@@ -482,13 +512,15 @@ def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list
                 os.rename(output_path, canonical_path)
                 output_path = canonical_path
                 final_filename = os.path.basename(output_path)
-    else:
-        mark_sanitized(output_dir, filename)
+
+    if not new_flags:
+        # Only mark it finished once there's nothing left pending review —
+        # a flagged copy still needs resolve_flags() to touch it, and that
+        # happens right after sanitize_file() returns.
+        _mark_as_sanitized(output_path)
 
     for flag in new_flags:
         flag["filename"] = final_filename
-
-    mark_sanitized(output_dir, final_filename)
 
     if replace:
         if final_filename == filename:
@@ -507,8 +539,8 @@ def _run_dedup(output_dir: str) -> None:
     if not duplicate_pairs:
         return
 
-    originals_dir = os.path.join(output_dir, ".originals")
-    os.makedirs(originals_dir, exist_ok=True)
+    duplicates_dir = os.path.join(output_dir, DUPLICATES_DIR_NAME)
+    os.makedirs(duplicates_dir, exist_ok=True)
     for f1, f2 in duplicate_pairs:
         path1 = os.path.join(output_dir, f1)
         path2 = os.path.join(output_dir, f2)
@@ -516,65 +548,47 @@ def _run_dedup(output_dir: str) -> None:
             continue
         loser = f2 if os.path.getsize(path1) >= os.path.getsize(path2) else f1
         loser_path = os.path.join(output_dir, loser)
-        shutil.move(loser_path, os.path.join(originals_dir, loser))
-        print(f"Removed duplicate: {loser}")
+        shutil.move(loser_path, os.path.join(duplicates_dir, loser))
+        print(f"Moved duplicate to {DUPLICATES_DIR_NAME}/: {loser}")
 
 
 def sanitize_folder(output_dir: str, replace: bool = False) -> None:
     os.makedirs(output_dir, exist_ok=True)
-    archive = load_sanitized_archive(output_dir)
     mp3_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
 
-    all_flags = load_flagged(output_dir)
-    processed_count = 0
-    skipped_count = 0
+    if not mp3_files:
+        print("No MP3s found to sanitize.")
+        return
+
+    all_flags = []
     for filename in mp3_files:
-        if filename in archive:
-            skipped_count += 1
-            continue
         try:
             new_flags = sanitize_file(filename, output_dir, replace=replace)
         except Exception as e:
             print(f"  Could not sanitize {filename}, skipping: {e}")
             continue
-        processed_count += 1
         all_flags.extend(new_flags)
 
-    save_flagged(output_dir, all_flags)
     _run_dedup(output_dir)
 
-    flagged = load_flagged(output_dir)
-    if flagged:
-        print(f"\n{len(flagged)} song section(s) need your input.")
-        review_flagged(output_dir)
-    elif not mp3_files:
-        print("No MP3s found to sanitize.")
-    elif processed_count == 0:
-        word = "song" if skipped_count == 1 else "songs"
-        print(f"Nothing to do — {skipped_count} {word} already sanitized.")
+    if all_flags:
+        print(f"\n{len(all_flags)} song section(s) need your input.")
+        resolve_flags(all_flags, output_dir)
 
 
 def sanitize_single_file(path: str, replace: bool = False) -> None:
     output_dir = os.path.dirname(os.path.abspath(path)) or "."
     filename = os.path.basename(path)
 
-    archive = load_sanitized_archive(output_dir)
-    all_flags = load_flagged(output_dir)
-    if filename in archive:
-        print(f"{filename}: already sanitized previously, nothing to do.")
-    else:
-        try:
-            new_flags = sanitize_file(filename, output_dir, replace=replace)
-            all_flags.extend(new_flags)
-        except Exception as e:
-            print(f"  Could not sanitize {filename}, skipping: {e}")
+    try:
+        flags = sanitize_file(filename, output_dir, replace=replace)
+    except Exception as e:
+        print(f"  Could not sanitize {filename}, skipping: {e}")
+        return
 
-    save_flagged(output_dir, all_flags)
-
-    flagged = load_flagged(output_dir)
-    if flagged:
-        print(f"\n{len(flagged)} song section(s) need your input.")
-        review_flagged(output_dir)
+    if flags:
+        print(f"\n{len(flags)} song section(s) need your input.")
+        resolve_flags(flags, output_dir)
 
 
 def sanitize_path(path: str, replace: bool = False) -> None:
@@ -594,20 +608,12 @@ def main() -> None:
         default=DEFAULT_OUTPUT,
         help=f"Folder of MP3s (or a single MP3 file) to sanitize (default: {DEFAULT_OUTPUT})",
     )
-    parser.add_argument(
-        "--review",
-        action="store_true",
-        help="Skip processing and resolve any previously-flagged ambiguous cuts",
-    )
     args = parser.parse_args()
 
     try:
-        if args.review:
-            review_flagged(args.path)
-        else:
-            sanitize_path(args.path)
+        sanitize_path(args.path)
     except KeyboardInterrupt:
-        print("\nStopped. Run python3 song_sanitizer.py --review to finish reviewing.")
+        print("\nStopped.")
         sys.exit(130)
 
 

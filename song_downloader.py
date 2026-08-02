@@ -195,7 +195,7 @@ def main() -> None:
     try:
         song_sanitizer.sanitize_folder(args.output, replace=True)
     except KeyboardInterrupt:
-        print("\nStopped. Run python3 song_sanitizer.py --review to finish reviewing.")
+        print("\nStopped reviewing. Whatever was already cleaned up is safe.")
         _exit(130)
     except Exception as e:
         print(f"Sanitizing hit a snag, but your downloads are safe: {e}")
