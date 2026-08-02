@@ -33,26 +33,29 @@ Re-running the script on the same playlist skips songs you've already downloaded
 
 Every download run automatically cleans up the songs it just downloaded:
 trimming dead air from the start/end, boosting volume on quiet tracks,
-tidying up junky YouTube titles (removing things like "(Official Video)"),
-writing proper Title/Artist tags, and removing duplicate downloads.
+tidying up junky YouTube titles (removing things like "Official Video"),
+writing proper Title/Artist tags, and removing duplicate downloads. The raw
+download is replaced by the cleaned-up version — you won't end up with two
+copies of the same song.
 
 If a song's intro or outro is quiet but not silent (e.g. a lone instrument or
-ambient sound), it's held for your review at the end of the run — you'll hear
-the section played and can choose to cut it, fade it instead, keep it as-is,
-or adjust exactly where the cut happens.
+ambient sound), it's held for your review at the end of the run — it'll ask
+you to press space when ready, then play exactly the 5 seconds where the
+sanitized song would start or end, and you can choose to cut it, fade it
+instead, keep it as-is, or adjust exactly where the cut happens.
 
-You can also run the cleanup on its own, any time, against any folder:
-
-```
-python3 song_sanitizer.py ["path/to/folder"]
-```
-
-If you don't finish reviewing ambiguous cuts (e.g. you Ctrl+C partway
-through), resume later with:
+You can also run the cleanup on its own, any time, against a folder or a
+single MP3 file:
 
 ```
-python3 song_sanitizer.py --review
+python3 song_sanitizer.py ["path/to/folder-or-file.mp3"]
 ```
 
-Original files are backed up untouched to a hidden `.originals/` folder
-before anything is changed.
+Run this way (not from an automatic download), the original file is always
+kept — you get the cleaned-up copy saved right next to it, side by side, so
+nothing is ever overwritten. If you run it again on the same file, it just
+notices the cleaned-up copy is already there and leaves it alone — there's no
+hidden tracking file, it just looks at what's in the folder.
+
+Duplicate downloads that get found and removed are moved into a visible
+`Duplicates` folder next to your songs, not deleted outright.

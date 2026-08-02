@@ -1,8 +1,6 @@
 downloads/
 .downloaded_archive.txt
-.sanitized_archive.txt
-.sanitizer_flagged.json
-.originals/
+Duplicates/
 __pycache__/
 *.pyc
 .venv/
