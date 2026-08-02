@@ -226,15 +226,28 @@ class TestNormalize(unittest.TestCase):
 
 
 class TestExtractSnippet(unittest.TestCase):
-    def test_extracts_window_around_center(self):
+    def test_start_anchor_begins_exactly_at_cut_point(self):
         track = _tone(10000, dbfs_gain=-6)
-        snippet = sanitizer.extract_snippet(track, center_ms=5000, window_ms=1000)
+        snippet = sanitizer.extract_snippet(track, 4000, "start", duration_ms=2000)
         self.assertEqual(len(snippet), 2000)
+        # Should match audio[4000:6000] exactly, not audio centered on 4000.
+        self.assertEqual(snippet.raw_data, track[4000:6000].raw_data)
 
-    def test_clamps_at_track_boundaries(self):
+    def test_end_anchor_finishes_exactly_at_cut_point(self):
+        track = _tone(10000, dbfs_gain=-6)
+        snippet = sanitizer.extract_snippet(track, 6000, "end", duration_ms=2000)
+        self.assertEqual(len(snippet), 2000)
+        self.assertEqual(snippet.raw_data, track[4000:6000].raw_data)
+
+    def test_start_anchor_clamps_at_track_end(self):
         track = _tone(3000, dbfs_gain=-6)
-        snippet = sanitizer.extract_snippet(track, center_ms=200, window_ms=1000)
-        self.assertEqual(len(snippet), 1200)
+        snippet = sanitizer.extract_snippet(track, 2000, "start", duration_ms=2000)
+        self.assertEqual(len(snippet), 1000)
+
+    def test_end_anchor_clamps_at_track_start(self):
+        track = _tone(3000, dbfs_gain=-6)
+        snippet = sanitizer.extract_snippet(track, 1000, "end", duration_ms=2000)
+        self.assertEqual(len(snippet), 1000)
 
 
 class TestLoadExportRoundtrip(unittest.TestCase):
@@ -263,6 +276,15 @@ class TestPlaySnippet(unittest.TestCase):
         self.assertFalse(os.path.exists(args[1]))  # temp file cleaned up
 
 
+class TestWaitForSpace(unittest.TestCase):
+    @mock.patch("song_sanitizer.sys.stdin")
+    def test_falls_back_to_enter_when_not_a_tty(self, mock_stdin):
+        mock_stdin.isatty.return_value = False
+        with mock.patch("builtins.input", return_value="") as mock_input:
+            sanitizer._wait_for_space("Ready? ")
+        mock_input.assert_called_once_with("Ready? ")
+
+
 class TestReviewFlagged(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
@@ -275,9 +297,10 @@ class TestReviewFlagged(unittest.TestCase):
     def test_no_flags_does_nothing(self):
         sanitizer.review_flagged(self.tmp_dir)  # should not raise
 
+    @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
     @mock.patch("builtins.input", return_value="k")
-    def test_keep_choice_leaves_file_and_clears_flag(self, mock_input, mock_play):
+    def test_keep_choice_leaves_file_and_clears_flag(self, mock_input, mock_play, mock_wait):
         sanitizer.save_flagged(self.tmp_dir, [{"filename": self.filename, "end": "start", "cut_ms": 1000}])
         original_size = os.path.getsize(os.path.join(self.tmp_dir, self.filename))
 
@@ -286,9 +309,10 @@ class TestReviewFlagged(unittest.TestCase):
         self.assertEqual(sanitizer.load_flagged(self.tmp_dir), [])
         self.assertEqual(os.path.getsize(os.path.join(self.tmp_dir, self.filename)), original_size)
 
+    @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
     @mock.patch("builtins.input", return_value="c")
-    def test_cut_choice_shortens_file_and_clears_flag(self, mock_input, mock_play):
+    def test_cut_choice_shortens_file_and_clears_flag(self, mock_input, mock_play, mock_wait):
         sanitizer.save_flagged(self.tmp_dir, [{"filename": self.filename, "end": "start", "cut_ms": 1000}])
 
         sanitizer.review_flagged(self.tmp_dir)
@@ -297,9 +321,10 @@ class TestReviewFlagged(unittest.TestCase):
         result_audio = sanitizer.load_audio(os.path.join(self.tmp_dir, self.filename))
         self.assertLess(len(result_audio), 5000)
 
+    @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
     @mock.patch("builtins.input", side_effect=["a", "1.0", "k"])
-    def test_adjust_then_keep_updates_cut_ms_and_clears_flag(self, mock_input, mock_play):
+    def test_adjust_then_keep_updates_cut_ms_and_clears_flag(self, mock_input, mock_play, mock_wait):
         sanitizer.save_flagged(self.tmp_dir, [{"filename": self.filename, "end": "start", "cut_ms": 1000}])
 
         sanitizer.review_flagged(self.tmp_dir)
@@ -307,9 +332,10 @@ class TestReviewFlagged(unittest.TestCase):
         self.assertEqual(sanitizer.load_flagged(self.tmp_dir), [])
         self.assertEqual(mock_play.call_count, 2)  # replayed after adjusting
 
+    @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
     @mock.patch("builtins.input", return_value="k")
-    def test_missing_file_skips_flag_without_error(self, mock_input, mock_play):
+    def test_missing_file_skips_flag_without_error(self, mock_input, mock_play, mock_wait):
         sanitizer.save_flagged(self.tmp_dir, [{"filename": "Missing.mp3", "end": "start", "cut_ms": 1000}])
 
         sanitizer.review_flagged(self.tmp_dir)
@@ -456,9 +482,10 @@ class TestReviewFlaggedEdgeCases(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
+    @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
     @mock.patch("builtins.input", side_effect=["c", "k"])
-    def test_resolving_start_cut_adjusts_stale_end_flag_cut_ms(self, mock_input, mock_play):
+    def test_resolving_start_cut_adjusts_stale_end_flag_cut_ms(self, mock_input, mock_play, mock_wait):
         filename = "Song - Artist.mp3"
         track = _tone(10000, dbfs_gain=-6)
         sanitizer.export_audio(track, os.path.join(self.tmp_dir, filename))
@@ -483,9 +510,10 @@ class TestReviewFlaggedEdgeCases(unittest.TestCase):
         self.assertLess(len(result_audio), 10000)
         self.assertGreater(len(result_audio), 1000)
 
+    @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
     @mock.patch("builtins.input", return_value="k")
-    def test_bad_flag_is_skipped_without_stopping_the_rest(self, mock_input, mock_play):
+    def test_bad_flag_is_skipped_without_stopping_the_rest(self, mock_input, mock_play, mock_wait):
         good_filename = "Song - Artist.mp3"
         sanitizer.export_audio(_tone(2000, dbfs_gain=-6), os.path.join(self.tmp_dir, good_filename))
         bad_path = os.path.join(self.tmp_dir, "Corrupt - Artist.mp3")
@@ -535,6 +563,51 @@ class TestSanitizeFolder(unittest.TestCase):
         remaining = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")]
         self.assertEqual(len(remaining), 1)
         mock_review.assert_not_called()  # no ambiguous flags in this scenario
+
+
+class TestSanitizeFileReplace(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_replace_false_keeps_both_files(self):
+        filename = "Song - Artist.mp3"
+        original_path = os.path.join(self.tmp_dir, filename)
+        silent_intro = AudioSegment.silent(duration=3000)
+        loud_body = _tone(5000, dbfs_gain=-3)
+        sanitizer.export_audio(silent_intro + loud_body, original_path)
+
+        sanitizer.sanitize_file(filename, self.tmp_dir, replace=False)
+
+        self.assertTrue(os.path.exists(original_path))
+        other_files = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3") and f != filename]
+        self.assertEqual(len(other_files), 1)
+
+    def test_replace_true_deletes_original_and_uses_clean_name(self):
+        filename = "Song - Artist.mp3"
+        original_path = os.path.join(self.tmp_dir, filename)
+        silent_intro = AudioSegment.silent(duration=3000)
+        loud_body = _tone(5000, dbfs_gain=-3)
+        sanitizer.export_audio(silent_intro + loud_body, original_path)
+
+        sanitizer.sanitize_file(filename, self.tmp_dir, replace=True)
+
+        # Original name is reused (nothing left behind), original bytes gone.
+        mp3_files = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")]
+        self.assertEqual(mp3_files, [filename])
+        result_audio = sanitizer.load_audio(original_path)
+        self.assertLess(len(result_audio), 8000)  # intro was trimmed
+
+    def test_replace_true_with_title_change_leaves_only_cleaned_file(self):
+        filename = "Song Name (Official Video) - Artist.mp3"
+        sanitizer.export_audio(_tone(2000, dbfs_gain=-3), os.path.join(self.tmp_dir, filename))
+
+        sanitizer.sanitize_file(filename, self.tmp_dir, replace=True)
+
+        mp3_files = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")]
+        self.assertEqual(mp3_files, ["Song Name - Artist.mp3"])
 
 
 if __name__ == "__main__":

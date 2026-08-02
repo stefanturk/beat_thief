@@ -193,7 +193,7 @@ def main() -> None:
     print(f"Your music is in: {args.output}")
 
     try:
-        song_sanitizer.sanitize_folder(args.output)
+        song_sanitizer.sanitize_folder(args.output, replace=True)
     except KeyboardInterrupt:
         print("\nStopped. Run python3 song_sanitizer.py --review to finish reviewing.")
         _exit(130)
