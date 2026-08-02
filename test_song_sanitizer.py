@@ -67,6 +67,16 @@ class TestCleanTitle(unittest.TestCase):
     def test_leaves_clean_title_unchanged(self):
         self.assertEqual(sanitizer.clean_title("Song Name - Artist"), "Song Name - Artist")
 
+    def test_strips_bare_junk_without_brackets(self):
+        self.assertEqual(
+            sanitizer.clean_title("Song Name Official Audio - Artist"),
+            "Song Name - Artist",
+        )
+        self.assertEqual(
+            sanitizer.clean_title("Song Name Official Video HD - Artist"),
+            "Song Name - Artist",
+        )
+
 
 class TestSplitTitleArtist(unittest.TestCase):
     def test_splits_on_last_dash(self):
@@ -77,6 +87,21 @@ class TestSplitTitleArtist(unittest.TestCase):
 
     def test_no_dash_returns_empty_artist(self):
         self.assertEqual(sanitizer.split_title_artist("Song Name"), ("Song Name", ""))
+
+    def test_pipe_separator_takes_precedence_over_uploader(self):
+        # "Artist｜Title ... - Uploader" is a common YouTube channel naming
+        # convention — the pipe-derived artist is more reliable than whatever
+        # comes after " - " (often just the uploader/channel name).
+        self.assertEqual(
+            sanitizer.split_title_artist("Childish Gambino｜Redbone - SirSoloDolo"),
+            ("Redbone", "Childish Gambino"),
+        )
+
+    def test_ascii_pipe_also_works(self):
+        self.assertEqual(
+            sanitizer.split_title_artist("Artist Name|Song Title - Uploader"),
+            ("Song Title", "Artist Name"),
+        )
 
 
 class TestWriteId3Tags(unittest.TestCase):
@@ -293,28 +318,6 @@ class TestReviewFlagged(unittest.TestCase):
         mock_play.assert_not_called()
 
 
-class TestBackupOriginal(unittest.TestCase):
-    def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp()
-        self.path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
-        sanitizer.export_audio(_tone(1000, dbfs_gain=-3), self.path)
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_copies_file_into_originals(self):
-        sanitizer.backup_original(self.path, self.tmp_dir)
-        backup_path = os.path.join(self.tmp_dir, ".originals", "Song - Artist.mp3")
-        self.assertTrue(os.path.exists(backup_path))
-
-    def test_does_not_overwrite_existing_backup(self):
-        sanitizer.backup_original(self.path, self.tmp_dir)
-        backup_path = os.path.join(self.tmp_dir, ".originals", "Song - Artist.mp3")
-        first_mtime = os.path.getmtime(backup_path)
-        sanitizer.backup_original(self.path, self.tmp_dir)
-        self.assertEqual(os.path.getmtime(backup_path), first_mtime)
-
-
 class TestSanitizeFile(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
@@ -322,45 +325,75 @@ class TestSanitizeFile(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def test_renames_junky_title_and_writes_tags(self):
+    def test_junky_title_creates_new_file_and_leaves_original_untouched(self):
         filename = "Song Name (Official Video) - Artist.mp3"
-        sanitizer.export_audio(_tone(3000, dbfs_gain=-3), os.path.join(self.tmp_dir, filename))
+        original_path = os.path.join(self.tmp_dir, filename)
+        sanitizer.export_audio(_tone(3000, dbfs_gain=-3), original_path)
+        original_bytes = open(original_path, "rb").read()
 
         new_flags = sanitizer.sanitize_file(filename, self.tmp_dir)
 
         self.assertEqual(new_flags, [])
-        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, filename)))
-        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, "Song Name - Artist.mp3")))
+        # The original is never opened for writing — byte-for-byte untouched.
+        self.assertEqual(open(original_path, "rb").read(), original_bytes)
+        cleaned_path = os.path.join(self.tmp_dir, "Song Name - Artist.mp3")
+        self.assertTrue(os.path.exists(cleaned_path))
         archive = sanitizer.load_sanitized_archive(self.tmp_dir)
+        self.assertIn(filename, archive)
         self.assertIn("Song Name - Artist.mp3", archive)
 
-    def test_flags_ambiguous_intro_without_modifying_audio(self):
+    def test_flags_ambiguous_intro_without_modifying_original(self):
         filename = "Song - Artist.mp3"
+        original_path = os.path.join(self.tmp_dir, filename)
         quiet_intro = _tone(3000, dbfs_gain=-45)
         loud_body = _tone(5000, dbfs_gain=-3)
         track = quiet_intro + loud_body
         original_len = len(track)
-        sanitizer.export_audio(track, os.path.join(self.tmp_dir, filename))
+        sanitizer.export_audio(track, original_path)
 
         new_flags = sanitizer.sanitize_file(filename, self.tmp_dir)
 
         self.assertEqual(len(new_flags), 1)
         self.assertEqual(new_flags[0]["end"], "start")
-        result_audio = sanitizer.load_audio(os.path.join(self.tmp_dir, filename))
-        self.assertAlmostEqual(len(result_audio), original_len, delta=200)
+        # Original is untouched; the flag points at a newly-created copy.
+        self.assertEqual(len(sanitizer.load_audio(original_path)), original_len)
+        copy_path = os.path.join(self.tmp_dir, new_flags[0]["filename"])
+        self.assertNotEqual(copy_path, original_path)
+        self.assertTrue(os.path.exists(copy_path))
+        self.assertAlmostEqual(len(sanitizer.load_audio(copy_path)), original_len, delta=200)
 
-    def test_auto_trims_silent_intro(self):
+    def test_auto_trims_silent_intro_into_a_new_file(self):
         filename = "Song - Artist.mp3"
+        original_path = os.path.join(self.tmp_dir, filename)
         silent_intro = AudioSegment.silent(duration=3000)
         loud_body = _tone(5000, dbfs_gain=-3)
         track = silent_intro + loud_body
-        sanitizer.export_audio(track, os.path.join(self.tmp_dir, filename))
+        sanitizer.export_audio(track, original_path)
 
         new_flags = sanitizer.sanitize_file(filename, self.tmp_dir)
 
         self.assertEqual(new_flags, [])
-        result_audio = sanitizer.load_audio(os.path.join(self.tmp_dir, filename))
+        # Original stays at its full original length.
+        self.assertEqual(len(sanitizer.load_audio(original_path)), len(track))
+        trimmed_files = [
+            f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3") and f != filename
+        ]
+        self.assertEqual(len(trimmed_files), 1)
+        result_audio = sanitizer.load_audio(os.path.join(self.tmp_dir, trimmed_files[0]))
         self.assertLess(len(result_audio), 8000)
+
+    def test_nothing_to_fix_leaves_folder_untouched(self):
+        filename = "Song Name - Artist.mp3"
+        original_path = os.path.join(self.tmp_dir, filename)
+        sanitizer.export_audio(_tone(3000, dbfs_gain=-3), original_path)
+
+        new_flags = sanitizer.sanitize_file(filename, self.tmp_dir)
+
+        self.assertEqual(new_flags, [])
+        mp3_files = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")]
+        self.assertEqual(mp3_files, [filename])
+        archive = sanitizer.load_sanitized_archive(self.tmp_dir)
+        self.assertEqual(archive, {filename})
 
 
 class TestSanitizeFileEdgeCases(unittest.TestCase):
@@ -384,21 +417,27 @@ class TestSanitizeFileEdgeCases(unittest.TestCase):
         result_audio = sanitizer.load_audio(result_path)
         self.assertGreater(len(result_audio), 1000)
 
-    def test_rename_collision_backs_up_loser_instead_of_clobbering(self):
+    def test_name_collision_gets_a_distinct_name_instead_of_clobbering(self):
         f1 = "Song Name (Official Video) - Artist.mp3"
         f2 = "Song Name - Artist.mp3"
-        sanitizer.export_audio(_tone(2000, dbfs_gain=-3), os.path.join(self.tmp_dir, f1))
-        sanitizer.export_audio(_tone(2000, dbfs_gain=-3, freq=880), os.path.join(self.tmp_dir, f2))
+        f1_path = os.path.join(self.tmp_dir, f1)
+        f2_path = os.path.join(self.tmp_dir, f2)
+        sanitizer.export_audio(_tone(2000, dbfs_gain=-3), f1_path)
+        sanitizer.export_audio(_tone(2000, dbfs_gain=-3, freq=880), f2_path)
+        f1_bytes = open(f1_path, "rb").read()
+        f2_bytes = open(f2_path, "rb").read()
 
-        # Sanitize the already-clean-titled file first so it occupies the
-        # target filename, then sanitize the junky one so its rename collides.
+        # f2 is already clean (nothing to do, left alone); f1's cleaned-up
+        # name then collides with f2's existing filename.
         sanitizer.sanitize_file(f2, self.tmp_dir)
         sanitizer.sanitize_file(f1, self.tmp_dir)
 
-        final_path = os.path.join(self.tmp_dir, "Song Name - Artist.mp3")
-        backup_path = os.path.join(self.tmp_dir, ".originals", "Song Name - Artist.mp3")
-        self.assertTrue(os.path.exists(final_path))
-        self.assertTrue(os.path.exists(backup_path))
+        # Neither original was ever opened for writing.
+        self.assertEqual(open(f1_path, "rb").read(), f1_bytes)
+        self.assertEqual(open(f2_path, "rb").read(), f2_bytes)
+        # f1's output got a disambiguated name rather than overwriting f2.
+        disambiguated_path = os.path.join(self.tmp_dir, "Song Name - Artist (2).mp3")
+        self.assertTrue(os.path.exists(disambiguated_path))
 
     def test_all_junk_title_keeps_original_filename(self):
         filename = "HD (Official Video).mp3"
