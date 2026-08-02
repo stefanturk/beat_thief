@@ -9,6 +9,8 @@ import sys
 
 import yt_dlp
 
+import song_sanitizer
+
 BAR_WIDTH = 30
 
 _active_title = None
@@ -189,6 +191,11 @@ def main() -> None:
         parts.append(f"{_failed_count} failed")
     print(f"All done! {', '.join(parts)}.")
     print(f"Your music is in: {args.output}")
+
+    try:
+        song_sanitizer.sanitize_folder(args.output)
+    except Exception as e:
+        print(f"Sanitizing hit a snag, but your downloads are safe: {e}")
 
     _exit(0 if result == 0 else 1)
 
