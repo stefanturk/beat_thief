@@ -3,10 +3,19 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from mutagen.easyid3 import EasyID3
 
+from pydub import AudioSegment
+from pydub.generators import Sine
+
 import song_sanitizer as sanitizer
+
+
+def _tone(duration_ms, dbfs_gain=0.0, freq=440):
+    tone = Sine(freq).to_audio_segment(duration=duration_ms)
+    return tone.apply_gain(dbfs_gain - tone.max_dBFS)
 
 
 class TestSanitizedArchive(unittest.TestCase):
@@ -111,6 +120,103 @@ class TestFindDuplicatePairs(unittest.TestCase):
     def test_no_duplicates_returns_empty_list(self):
         files = ["Song One - Artist.mp3", "Song Two - Other Artist.mp3"]
         self.assertEqual(sanitizer.find_duplicate_pairs(files), [])
+
+
+class TestAnalyzeCutCandidates(unittest.TestCase):
+    def test_detects_silent_intro(self):
+        silent_intro = AudioSegment.silent(duration=3000)
+        loud_body = _tone(5000, dbfs_gain=-3)
+        track = silent_intro + loud_body
+        result = sanitizer.analyze_cut_candidates(track)
+        self.assertIn("start", result)
+        self.assertEqual(result["start"]["classification"], "silent")
+        self.assertGreater(result["start"]["cut_ms"], 2000)
+
+    def test_detects_ambiguous_quiet_intro(self):
+        quiet_intro = _tone(3000, dbfs_gain=-45)
+        loud_body = _tone(5000, dbfs_gain=-3)
+        track = quiet_intro + loud_body
+        result = sanitizer.analyze_cut_candidates(track)
+        self.assertIn("start", result)
+        self.assertEqual(result["start"]["classification"], "ambiguous")
+
+    def test_no_flag_for_consistent_volume_track(self):
+        track = _tone(5000, dbfs_gain=-6)
+        result = sanitizer.analyze_cut_candidates(track)
+        self.assertNotIn("start", result)
+        self.assertNotIn("end", result)
+
+
+class TestTrim(unittest.TestCase):
+    def test_trims_start_and_end(self):
+        track = _tone(5000, dbfs_gain=-6)
+        trimmed = sanitizer.trim(track, start_ms=1000, end_ms=4000)
+        self.assertEqual(len(trimmed), 3000)
+
+
+class TestApplyFade(unittest.TestCase):
+    def test_fade_start_reduces_early_volume(self):
+        track = _tone(5000, dbfs_gain=-6)
+        faded = sanitizer.apply_fade(track, "start", 2000)
+        self.assertLess(faded[0:100].dBFS, track[0:100].dBFS)
+
+    def test_fade_end_reduces_late_volume(self):
+        track = _tone(5000, dbfs_gain=-6)
+        faded = sanitizer.apply_fade(track, "end", 3000)
+        self.assertLess(faded[4900:5000].dBFS, track[4900:5000].dBFS)
+
+
+class TestNormalize(unittest.TestCase):
+    def test_needs_normalization_true_for_quiet_track(self):
+        quiet = _tone(2000, dbfs_gain=-20)
+        self.assertTrue(sanitizer.needs_normalization(quiet))
+
+    def test_needs_normalization_false_for_loud_track(self):
+        loud = _tone(2000, dbfs_gain=-1.5)
+        self.assertFalse(sanitizer.needs_normalization(loud))
+
+    def test_peak_normalize_brings_peak_near_target(self):
+        quiet = _tone(2000, dbfs_gain=-20)
+        normalized = sanitizer.peak_normalize(quiet)
+        self.assertAlmostEqual(normalized.max_dBFS, sanitizer.NORMALIZE_TARGET_DBFS, delta=0.5)
+
+
+class TestExtractSnippet(unittest.TestCase):
+    def test_extracts_window_around_center(self):
+        track = _tone(10000, dbfs_gain=-6)
+        snippet = sanitizer.extract_snippet(track, center_ms=5000, window_ms=1000)
+        self.assertEqual(len(snippet), 2000)
+
+    def test_clamps_at_track_boundaries(self):
+        track = _tone(3000, dbfs_gain=-6)
+        snippet = sanitizer.extract_snippet(track, center_ms=200, window_ms=1000)
+        self.assertEqual(len(snippet), 1200)
+
+
+class TestLoadExportRoundtrip(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_export_then_load_preserves_duration(self):
+        track = _tone(1000, dbfs_gain=-6)
+        path = os.path.join(self.tmp_dir, "test.mp3")
+        sanitizer.export_audio(track, path)
+        loaded = sanitizer.load_audio(path)
+        self.assertAlmostEqual(len(loaded), len(track), delta=100)
+
+
+class TestPlaySnippet(unittest.TestCase):
+    @mock.patch("song_sanitizer.subprocess.run")
+    def test_calls_afplay_with_temp_file(self, mock_run):
+        track = _tone(500, dbfs_gain=-6)
+        sanitizer.play_snippet(track)
+        self.assertTrue(mock_run.called)
+        args = mock_run.call_args[0][0]
+        self.assertEqual(args[0], "afplay")
+        self.assertFalse(os.path.exists(args[1]))  # temp file cleaned up
 
 
 if __name__ == "__main__":
