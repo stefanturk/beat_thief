@@ -372,17 +372,17 @@ class TestSanitizeFile(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def test_junky_title_creates_new_file_and_leaves_original_untouched(self):
+    def test_junky_title_creates_cleaned_file_and_removes_the_original(self):
         filename = "Song Name (Official Video) - Artist.mp3"
         original_path = os.path.join(self.tmp_dir, filename)
         sanitizer.export_audio(_tone(3000, dbfs_gain=-3), original_path)
-        original_bytes = open(original_path, "rb").read()
 
         new_flags = sanitizer.sanitize_file(filename, self.tmp_dir)
 
         self.assertEqual(new_flags, [])
-        # The original is never opened for writing — byte-for-byte untouched.
-        self.assertEqual(open(original_path, "rb").read(), original_bytes)
+        # The original is only ever read from, and removed once its
+        # replacement is written — never opened for writing itself.
+        self.assertFalse(os.path.exists(original_path))
         cleaned_path = os.path.join(self.tmp_dir, "Song Name - Artist.mp3")
         self.assertTrue(os.path.exists(cleaned_path))
 
@@ -398,7 +398,7 @@ class TestSanitizeFile(unittest.TestCase):
         self.assertEqual(new_flags, [])
         self.assertEqual(before, after)  # no extra copy created on the re-run
 
-    def test_flags_ambiguous_intro_without_modifying_original(self):
+    def test_flags_ambiguous_intro_on_the_replacement_copy(self):
         filename = "Song - Artist.mp3"
         original_path = os.path.join(self.tmp_dir, filename)
         quiet_intro = _tone(3000, dbfs_gain=-45)
@@ -411,14 +411,14 @@ class TestSanitizeFile(unittest.TestCase):
 
         self.assertEqual(len(new_flags), 1)
         self.assertEqual(new_flags[0]["end"], "start")
-        # Original is untouched; the flag points at a newly-created copy.
-        self.assertEqual(len(sanitizer.load_audio(original_path)), original_len)
+        # The name is unchanged, so the replacement reuses it — the flag
+        # points at whatever now lives at that path (the replacement copy).
         copy_path = os.path.join(self.tmp_dir, new_flags[0]["filename"])
-        self.assertNotEqual(copy_path, original_path)
+        self.assertEqual(copy_path, original_path)
         self.assertTrue(os.path.exists(copy_path))
         self.assertAlmostEqual(len(sanitizer.load_audio(copy_path)), original_len, delta=200)
 
-    def test_auto_trims_silent_intro_into_a_new_file(self):
+    def test_auto_trims_silent_intro_and_replaces_the_original(self):
         filename = "Song - Artist.mp3"
         original_path = os.path.join(self.tmp_dir, filename)
         silent_intro = AudioSegment.silent(duration=3000)
@@ -429,13 +429,9 @@ class TestSanitizeFile(unittest.TestCase):
         new_flags = sanitizer.sanitize_file(filename, self.tmp_dir)
 
         self.assertEqual(new_flags, [])
-        # Original stays at its full original length.
-        self.assertEqual(len(sanitizer.load_audio(original_path)), len(track))
-        trimmed_files = [
-            f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3") and f != filename
-        ]
-        self.assertEqual(len(trimmed_files), 1)
-        result_audio = sanitizer.load_audio(os.path.join(self.tmp_dir, trimmed_files[0]))
+        mp3_files = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")]
+        self.assertEqual(mp3_files, [filename])  # replaced in place, same name reused
+        result_audio = sanitizer.load_audio(original_path)
         self.assertLess(len(result_audio), 8000)
 
     def test_nothing_to_fix_leaves_folder_untouched(self):
@@ -617,27 +613,14 @@ class TestSanitizeFileReplace(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def test_replace_false_keeps_both_files(self):
+    def test_deletes_original_and_reuses_its_name_when_untitled_change(self):
         filename = "Song - Artist.mp3"
         original_path = os.path.join(self.tmp_dir, filename)
         silent_intro = AudioSegment.silent(duration=3000)
         loud_body = _tone(5000, dbfs_gain=-3)
         sanitizer.export_audio(silent_intro + loud_body, original_path)
 
-        sanitizer.sanitize_file(filename, self.tmp_dir, replace=False)
-
-        self.assertTrue(os.path.exists(original_path))
-        other_files = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3") and f != filename]
-        self.assertEqual(len(other_files), 1)
-
-    def test_replace_true_deletes_original_and_uses_clean_name(self):
-        filename = "Song - Artist.mp3"
-        original_path = os.path.join(self.tmp_dir, filename)
-        silent_intro = AudioSegment.silent(duration=3000)
-        loud_body = _tone(5000, dbfs_gain=-3)
-        sanitizer.export_audio(silent_intro + loud_body, original_path)
-
-        sanitizer.sanitize_file(filename, self.tmp_dir, replace=True)
+        sanitizer.sanitize_file(filename, self.tmp_dir)
 
         # Original name is reused (nothing left behind), original bytes gone.
         mp3_files = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")]
@@ -645,11 +628,11 @@ class TestSanitizeFileReplace(unittest.TestCase):
         result_audio = sanitizer.load_audio(original_path)
         self.assertLess(len(result_audio), 8000)  # intro was trimmed
 
-    def test_replace_true_with_title_change_leaves_only_cleaned_file(self):
+    def test_title_change_leaves_only_the_cleaned_file(self):
         filename = "Song Name (Official Video) - Artist.mp3"
         sanitizer.export_audio(_tone(2000, dbfs_gain=-3), os.path.join(self.tmp_dir, filename))
 
-        sanitizer.sanitize_file(filename, self.tmp_dir, replace=True)
+        sanitizer.sanitize_file(filename, self.tmp_dir)
 
         mp3_files = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")]
         self.assertEqual(mp3_files, ["Song Name - Artist.mp3"])

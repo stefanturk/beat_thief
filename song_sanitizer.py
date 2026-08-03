@@ -459,16 +459,13 @@ def _existing_companion(output_dir: str, filename: str) -> str | None:
     return None
 
 
-def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list[dict]:
-    """Produce a cleaned-up copy of filename next to it, if it needs one. The
-    original file at filename is never opened for writing — only ever read
-    from. If nothing about it needs fixing, no new file is created at all.
-    If a sanitized copy already exists next to it, it's left alone (skipped).
-
-    If replace is True, the original is deleted once the cleaned-up copy has
-    been written successfully (used for automatic post-download cleanup,
-    where there's no reason to keep the raw download around). If False, the
-    original is kept alongside the new copy (used for one-off/manual runs)."""
+def sanitize_file(filename: str, output_dir: str) -> list[dict]:
+    """Produce a cleaned-up copy of filename next to it, if it needs one, then
+    delete the original — the raw file is never opened for writing, only
+    ever read from, and only removed once its replacement has been written
+    successfully. If nothing about it needs fixing, the original is left
+    exactly as it is (no replacement needed). If a sanitized copy already
+    exists next to it, it's left alone (skipped)."""
     companion = _existing_companion(output_dir, filename)
     if companion:
         print(f"{filename}: already sanitized as '{companion}', nothing to do.")
@@ -537,16 +534,15 @@ def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list
     export_audio(audio, output_path)
     write_id3_tags(output_path, title, artist)
 
-    if replace:
-        os.remove(path)
-        if self_collision:
-            # The original is gone now, so its name is free — drop the
-            # "(sanitized)" suffix and use the clean canonical name.
-            canonical_path = os.path.join(output_dir, canonical_stem + ext)
-            if not os.path.exists(canonical_path):
-                os.rename(output_path, canonical_path)
-                output_path = canonical_path
-                final_filename = os.path.basename(output_path)
+    os.remove(path)
+    if self_collision:
+        # The original is gone now, so its name is free — drop the
+        # "(sanitized)" suffix and use the clean canonical name.
+        canonical_path = os.path.join(output_dir, canonical_stem + ext)
+        if not os.path.exists(canonical_path):
+            os.rename(output_path, canonical_path)
+            output_path = canonical_path
+            final_filename = os.path.basename(output_path)
 
     if not new_flags:
         # Only mark it finished once there's nothing left pending review —
@@ -557,13 +553,10 @@ def sanitize_file(filename: str, output_dir: str, replace: bool = False) -> list
     for flag in new_flags:
         flag["filename"] = final_filename
 
-    if replace:
-        if final_filename == filename:
-            print(f"{filename}: cleaned up.")
-        else:
-            print(f"{filename}: cleaned up and renamed to '{final_filename}'.")
+    if final_filename == filename:
+        print(f"{filename}: cleaned up.")
     else:
-        print(f"{filename}: saved cleaned-up copy as '{final_filename}'.")
+        print(f"{filename}: cleaned up and renamed to '{final_filename}'.")
 
     return new_flags
 
@@ -587,7 +580,7 @@ def _run_dedup(output_dir: str) -> None:
         print(f"Moved duplicate to {DUPLICATES_DIR_NAME}/: {loser}")
 
 
-def sanitize_folder(output_dir: str, replace: bool = False) -> None:
+def sanitize_folder(output_dir: str) -> None:
     os.makedirs(output_dir, exist_ok=True)
     mp3_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
 
@@ -598,7 +591,7 @@ def sanitize_folder(output_dir: str, replace: bool = False) -> None:
     all_flags = []
     for filename in mp3_files:
         try:
-            new_flags = sanitize_file(filename, output_dir, replace=replace)
+            new_flags = sanitize_file(filename, output_dir)
         except Exception as e:
             print(f"  Could not sanitize {filename}, skipping: {e}")
             continue
@@ -611,12 +604,12 @@ def sanitize_folder(output_dir: str, replace: bool = False) -> None:
         resolve_flags(all_flags, output_dir)
 
 
-def sanitize_single_file(path: str, replace: bool = False) -> None:
+def sanitize_single_file(path: str) -> None:
     output_dir = os.path.dirname(os.path.abspath(path)) or "."
     filename = os.path.basename(path)
 
     try:
-        flags = sanitize_file(filename, output_dir, replace=replace)
+        flags = sanitize_file(filename, output_dir)
     except Exception as e:
         print(f"  Could not sanitize {filename}, skipping: {e}")
         return
@@ -626,11 +619,11 @@ def sanitize_single_file(path: str, replace: bool = False) -> None:
         resolve_flags(flags, output_dir)
 
 
-def sanitize_path(path: str, replace: bool = False) -> None:
+def sanitize_path(path: str) -> None:
     if os.path.isfile(path):
-        sanitize_single_file(path, replace=replace)
+        sanitize_single_file(path)
     else:
-        sanitize_folder(path, replace=replace)
+        sanitize_folder(path)
 
 
 def main() -> None:
