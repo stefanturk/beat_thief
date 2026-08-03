@@ -51,11 +51,11 @@ single MP3 file:
 python3 song_sanitizer.py ["path/to/folder-or-file.mp3"]
 ```
 
-Run this way (not from an automatic download), the original file is always
-kept — you get the cleaned-up copy saved right next to it, side by side, so
-nothing is ever overwritten. If you run it again on the same file, it just
-notices the cleaned-up copy is already there and leaves it alone — there's no
-hidden tracking file, it just looks at what's in the folder.
+The original is deleted once its cleaned-up replacement has been written
+successfully — you never end up with two copies of the same song. If you run
+it again on an already-cleaned file, it just notices there's nothing left to
+do and leaves it alone — there's no hidden tracking file, it just looks at
+what's in the folder.
 
 Duplicate downloads that get found and removed are moved into a visible
 `Duplicates` folder next to your songs, not deleted outright.
