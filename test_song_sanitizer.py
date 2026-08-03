@@ -256,14 +256,43 @@ class TestLoadExportRoundtrip(unittest.TestCase):
 
 
 class TestPlaySnippet(unittest.TestCase):
-    @mock.patch("song_sanitizer.subprocess.run")
-    def test_calls_afplay_with_temp_file(self, mock_run):
+    @mock.patch("song_sanitizer.sys.stdin")
+    @mock.patch("song_sanitizer.subprocess.Popen")
+    def test_calls_afplay_with_temp_file(self, mock_popen, mock_stdin):
+        mock_stdin.isatty.return_value = False
+        mock_proc = mock.Mock()
+        mock_popen.return_value = mock_proc
+
         track = _tone(500, dbfs_gain=-6)
         sanitizer.play_snippet(track)
-        self.assertTrue(mock_run.called)
-        args = mock_run.call_args[0][0]
+
+        self.assertTrue(mock_popen.called)
+        args = mock_popen.call_args[0][0]
         self.assertEqual(args[0], "afplay")
         self.assertFalse(os.path.exists(args[1]))  # temp file cleaned up
+        mock_proc.wait.assert_called_once()
+
+    @mock.patch("song_sanitizer.select.select")
+    @mock.patch("song_sanitizer.termios.tcgetattr")
+    @mock.patch("song_sanitizer.termios.tcsetattr")
+    @mock.patch("song_sanitizer.tty.setcbreak")
+    @mock.patch("song_sanitizer.sys.stdin")
+    @mock.patch("song_sanitizer.subprocess.Popen")
+    def test_space_press_stops_playback_early(
+        self, mock_popen, mock_stdin, mock_setcbreak, mock_tcsetattr, mock_tcgetattr, mock_select
+    ):
+        mock_stdin.isatty.return_value = True
+        mock_stdin.read.return_value = " "
+        mock_select.return_value = ([mock_stdin], [], [])
+        mock_proc = mock.Mock()
+        mock_proc.poll.return_value = None  # still "playing"
+        mock_popen.return_value = mock_proc
+
+        track = _tone(500, dbfs_gain=-6)
+        sanitizer.play_snippet(track)
+
+        mock_proc.terminate.assert_called_once()
+        mock_proc.wait.assert_called_once()
 
 
 class TestWaitForSpace(unittest.TestCase):
@@ -289,8 +318,8 @@ class TestResolveFlags(unittest.TestCase):
 
     @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
-    @mock.patch("builtins.input", return_value="k")
-    def test_keep_choice_leaves_audio_unchanged_but_marks_it_sanitized(self, mock_input, mock_play, mock_wait):
+    @mock.patch("song_sanitizer._prompt_choice", return_value="k")
+    def test_keep_choice_leaves_audio_unchanged_but_marks_it_sanitized(self, mock_choice, mock_play, mock_wait):
         path = os.path.join(self.tmp_dir, self.filename)
         original_audio_len = len(sanitizer.load_audio(path))
 
@@ -305,8 +334,8 @@ class TestResolveFlags(unittest.TestCase):
 
     @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
-    @mock.patch("builtins.input", return_value="c")
-    def test_cut_choice_shortens_file(self, mock_input, mock_play, mock_wait):
+    @mock.patch("song_sanitizer._prompt_choice", return_value="c")
+    def test_cut_choice_shortens_file(self, mock_choice, mock_play, mock_wait):
         sanitizer.resolve_flags(
             [{"filename": self.filename, "end": "start", "cut_ms": 1000}], self.tmp_dir
         )
@@ -316,8 +345,9 @@ class TestResolveFlags(unittest.TestCase):
 
     @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
-    @mock.patch("builtins.input", side_effect=["a", "1.0", "k"])
-    def test_adjust_then_keep_replays(self, mock_input, mock_play, mock_wait):
+    @mock.patch("song_sanitizer._prompt_adjust_seconds", return_value=1.0)
+    @mock.patch("song_sanitizer._prompt_choice", side_effect=["a", "k"])
+    def test_adjust_then_keep_replays(self, mock_choice, mock_adjust, mock_play, mock_wait):
         sanitizer.resolve_flags(
             [{"filename": self.filename, "end": "start", "cut_ms": 1000}], self.tmp_dir
         )
@@ -326,8 +356,8 @@ class TestResolveFlags(unittest.TestCase):
 
     @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
-    @mock.patch("builtins.input", return_value="k")
-    def test_missing_file_skips_flag_without_error(self, mock_input, mock_play, mock_wait):
+    @mock.patch("song_sanitizer._prompt_choice", return_value="k")
+    def test_missing_file_skips_flag_without_error(self, mock_choice, mock_play, mock_wait):
         sanitizer.resolve_flags(
             [{"filename": "Missing.mp3", "end": "start", "cut_ms": 1000}], self.tmp_dir
         )
@@ -484,8 +514,8 @@ class TestResolveFlagsEdgeCases(unittest.TestCase):
 
     @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
-    @mock.patch("builtins.input", side_effect=["c", "k"])
-    def test_resolving_start_cut_adjusts_stale_end_flag_cut_ms(self, mock_input, mock_play, mock_wait):
+    @mock.patch("song_sanitizer._prompt_choice", side_effect=["c", "k"])
+    def test_resolving_start_cut_adjusts_stale_end_flag_cut_ms(self, mock_choice, mock_play, mock_wait):
         filename = "Song - Artist.mp3"
         track = _tone(10000, dbfs_gain=-6)
         sanitizer.export_audio(track, os.path.join(self.tmp_dir, filename))
@@ -509,8 +539,8 @@ class TestResolveFlagsEdgeCases(unittest.TestCase):
 
     @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
-    @mock.patch("builtins.input", return_value="k")
-    def test_bad_flag_is_skipped_without_stopping_the_rest(self, mock_input, mock_play, mock_wait):
+    @mock.patch("song_sanitizer._prompt_choice", return_value="k")
+    def test_bad_flag_is_skipped_without_stopping_the_rest(self, mock_choice, mock_play, mock_wait):
         good_filename = "Song - Artist.mp3"
         sanitizer.export_audio(_tone(2000, dbfs_gain=-6), os.path.join(self.tmp_dir, good_filename))
         bad_path = os.path.join(self.tmp_dir, "Corrupt - Artist.mp3")
@@ -548,8 +578,8 @@ class TestSanitizeFolder(unittest.TestCase):
 
     @mock.patch("song_sanitizer._wait_for_space")
     @mock.patch("song_sanitizer.play_snippet")
-    @mock.patch("builtins.input", return_value="k")
-    def test_rerun_after_resolving_a_flag_does_not_duplicate_the_copy(self, mock_input, mock_play, mock_wait):
+    @mock.patch("song_sanitizer._prompt_choice", return_value="k")
+    def test_rerun_after_resolving_a_flag_does_not_duplicate_the_copy(self, mock_choice, mock_play, mock_wait):
         # Regression test: a produced copy whose ambiguous flag was resolved
         # via "keep" must not be mistaken for a fresh original on a later
         # scan and spawn a second "(sanitized)" copy of itself.

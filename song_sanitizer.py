@@ -8,6 +8,7 @@ import difflib
 import math
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -274,9 +275,40 @@ def play_snippet(audio: AudioSegment) -> None:
     os.close(fd)
     try:
         audio.export(tmp_path, format="wav")
-        subprocess.run(["afplay", tmp_path], check=False)
+        proc = subprocess.Popen(["afplay", tmp_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _play_until_done_or_space(proc)
     finally:
         os.remove(tmp_path)
+
+
+def _play_until_done_or_space(proc: subprocess.Popen) -> None:
+    if not sys.stdin.isatty():
+        proc.wait()
+        return
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while proc.poll() is None:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if ready and sys.stdin.read(1) == " ":
+                proc.terminate()
+                break
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    proc.wait()
+
+
+def _raw_read_char() -> str:
+    """Read exactly one character from stdin in raw (cbreak) terminal mode,
+    with no need to press Enter first."""
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        return sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
 def _wait_for_space(prompt: str) -> None:
@@ -286,22 +318,25 @@ def _wait_for_space(prompt: str) -> None:
         input(prompt)
         return
     print(prompt, end="", flush=True)
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        while sys.stdin.read(1) != " ":
-            pass
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    while _raw_read_char() != " ":
+        pass
     print()
 
 
 # --- Interactive review of ambiguous cut points -----------------------------
 
 def _prompt_choice() -> str:
+    prompt = "  (c)ut / (f)ade / (k)eep / (a)djust? "
     while True:
-        choice = input("  (c)ut / (f)ade / (k)eep / (a)djust? ").strip().lower()
+        if not sys.stdin.isatty():
+            # No raw single-keypress mode without a real terminal — fall
+            # back to a normal line of input.
+            raw = input(prompt).strip().lower()
+            choice = raw[:1] if raw else ""
+        else:
+            print(prompt, end="", flush=True)
+            choice = _raw_read_char().lower()
+            print(choice)
         if choice in ("c", "f", "k", "a"):
             return choice
         print("  Please enter c, f, k, or a.")
