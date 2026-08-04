@@ -26,14 +26,14 @@ class TestMapDrumsepStemName(unittest.TestCase):
         self.assertEqual(drum_isolator._map_drumsep_stem_name("kick.wav"), "kick")
         self.assertEqual(drum_isolator._map_drumsep_stem_name("snare.wav"), "snare")
         self.assertEqual(drum_isolator._map_drumsep_stem_name("toms.wav"), "toms")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("cymbals.wav"), "cymbals_hihat")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("hihat.wav"), "cymbals_hihat")
+        self.assertEqual(drum_isolator._map_drumsep_stem_name("cymbals.wav"), "cymbals")
+        self.assertEqual(drum_isolator._map_drumsep_stem_name("hihat.wav"), "cymbals")
 
     def test_maps_spanish_checkpoint_names(self):
         self.assertEqual(drum_isolator._map_drumsep_stem_name("bombo.wav"), "kick")
         self.assertEqual(drum_isolator._map_drumsep_stem_name("redoblante.wav"), "snare")
         self.assertEqual(drum_isolator._map_drumsep_stem_name("caja.wav"), "snare")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("platillos.wav"), "cymbals_hihat")
+        self.assertEqual(drum_isolator._map_drumsep_stem_name("platillos.wav"), "cymbals")
 
     def test_case_insensitive(self):
         self.assertEqual(drum_isolator._map_drumsep_stem_name("KICK.WAV"), "kick")
@@ -76,8 +76,9 @@ class TestIsolateDrums(unittest.TestCase):
 
     @mock.patch("drum_isolator._write_drum_midi")
     @mock.patch("drum_isolator._ensure_drumsep_model")
+    @mock.patch("drum_isolator._trim_leading_silence", side_effect=lambda path: path)
     @mock.patch("drum_isolator._run_demucs")
-    def test_produces_all_stems_and_midi(self, mock_run_demucs, mock_ensure_model, mock_write_midi):
+    def test_produces_all_stems_and_midi(self, mock_run_demucs, mock_trim, mock_ensure_model, mock_write_midi):
         mock_run_demucs.side_effect = self._fake_run_demucs
         mock_write_midi.side_effect = self._fake_write_drum_midi
 
@@ -107,8 +108,9 @@ class TestIsolateDrums(unittest.TestCase):
 
     @mock.patch("drum_isolator._write_drum_midi")
     @mock.patch("drum_isolator._ensure_drumsep_model")
+    @mock.patch("drum_isolator._trim_leading_silence", side_effect=lambda path: path)
     @mock.patch("drum_isolator._run_demucs")
-    def test_reruns_when_the_midi_file_is_missing(self, mock_run_demucs, mock_ensure_model, mock_write_midi):
+    def test_reruns_when_the_midi_file_is_missing(self, mock_run_demucs, mock_trim, mock_ensure_model, mock_write_midi):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         os.makedirs(song_dir)
         for name in drum_isolator._STEM_NAMES:
@@ -166,7 +168,7 @@ class TestWriteDrumMidi(unittest.TestCase):
     def test_combines_all_present_stems_into_one_file(self):
         _hits(3).export(os.path.join(self.tmp_dir, "kick.wav"), format="wav")
         _hits(2, freq=800).export(os.path.join(self.tmp_dir, "snare.wav"), format="wav")
-        # toms.wav / cymbals_hihat.wav intentionally absent
+        # toms.wav / cymbals.wav intentionally absent
 
         drum_isolator._write_drum_midi(self.tmp_dir)
 
@@ -183,6 +185,37 @@ class TestWriteDrumMidi(unittest.TestCase):
         # Notes should be written in start-time order.
         starts = [note.start for note in midi.instruments[0].notes]
         self.assertEqual(starts, sorted(starts))
+
+
+class TestTrimLeadingSilence(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_trims_a_silent_intro_so_the_beat_starts_near_zero(self):
+        silent_intro = AudioSegment.silent(duration=3000)
+        beat = Sine(200).to_audio_segment(duration=3000)
+        track = silent_intro + beat
+        wav_path = os.path.join(self.tmp_dir, "drums.wav")
+        track.export(wav_path, format="wav")
+
+        trimmed_path = drum_isolator._trim_leading_silence(wav_path)
+
+        self.assertNotEqual(trimmed_path, wav_path)
+        trimmed_audio = AudioSegment.from_wav(trimmed_path)
+        # The ~3s silent intro should be gone, leaving mostly just the beat.
+        self.assertLess(len(trimmed_audio), len(track) - 1500)
+
+    def test_no_intro_to_trim_leaves_the_file_alone(self):
+        beat = Sine(200).to_audio_segment(duration=3000)
+        wav_path = os.path.join(self.tmp_dir, "drums.wav")
+        beat.export(wav_path, format="wav")
+
+        trimmed_path = drum_isolator._trim_leading_silence(wav_path)
+
+        self.assertEqual(trimmed_path, wav_path)
 
 
 class TestIsolateDrumsForFolder(unittest.TestCase):
