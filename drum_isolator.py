@@ -122,10 +122,14 @@ def _detect_note_events(wav_path: str) -> list[pretty_midi.Note]:
     to make that split meaningful.
 
     Velocity is derived from the waveform's peak amplitude just after each
-    onset, normalized against the loudest hit in the file — not from the
-    onset-strength envelope's own peak, which is dominated by rare outlier
-    spikes (e.g. a single unusually sharp transient) and made everything
-    else round down to the minimum velocity when used directly."""
+    onset, normalized against the loudest *hit* in the file (not the raw
+    waveform's global peak sample, which can sit outside any detected onset
+    window and would then mean no hit ever reaches full velocity) — so the
+    hardest-hit note in the song always lands at 127 and every other note is
+    scaled relative to it. Not from the onset-strength envelope's own peak,
+    which is dominated by rare outlier spikes (e.g. a single unusually sharp
+    transient) and made everything else round down to the minimum velocity
+    when used directly."""
     y, sr = librosa.load(wav_path, sr=None, mono=True)
     onset_env = librosa.onset.onset_strength(y=y, sr=sr)
     if onset_env.size == 0 or not np.isfinite(onset_env).any() or onset_env.max() <= 0:
@@ -134,21 +138,25 @@ def _detect_note_events(wav_path: str) -> list[pretty_midi.Note]:
     onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, backtrack=True)
     onset_times = librosa.frames_to_time(onset_frames, sr=sr)
 
-    peak_amplitude = np.abs(y).max()
-    if peak_amplitude <= 0:
-        return []
-
     velocity_window_samples = max(1, int(_VELOCITY_WINDOW_SEC * sr))
     classify_window_samples = max(1, int(_CLASSIFY_WINDOW_SEC * sr))
 
-    hits = []
+    raw_hits = []
     for start in onset_times:
         start_sample = int(start * sr)
         velocity_window = y[start_sample:start_sample + velocity_window_samples]
         classify_window = y[start_sample:start_sample + classify_window_samples]
         hit_amplitude = np.abs(velocity_window).max() if velocity_window.size else 0.0
-        velocity = int(np.clip(hit_amplitude / peak_amplitude * 127, 1, 127))
         centroid = _hit_centroid(classify_window, sr)
+        raw_hits.append((start, hit_amplitude, centroid))
+
+    peak_hit_amplitude = max((amp for _, amp, _ in raw_hits), default=0.0)
+    if peak_hit_amplitude <= 0:
+        return []
+
+    hits = []
+    for start, hit_amplitude, centroid in raw_hits:
+        velocity = int(np.clip(hit_amplitude / peak_hit_amplitude * 127, 1, 127))
         hits.append((start, velocity, centroid))
 
     centroids = np.array([c for _, _, c in hits if c is not None], dtype=np.float64)
