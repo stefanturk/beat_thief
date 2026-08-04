@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Isolate drum stems from downloaded MP3s: a full drums.wav, then a first
-pass at splitting it into individual kit pieces (kick/snare/toms), with
-cymbals and hi-hat still bundled together as one file for now — the free
-local model this uses doesn't separate those two yet."""
+"""Isolate drum stems from downloaded MP3s: a full drums.wav, a first pass
+at splitting it into individual kit pieces (kick/snare/toms), with cymbals
+and hi-hat still bundled together as one file for now (the free local model
+this uses doesn't separate those two yet), and a combined drums.mid built by
+detecting hits in each isolated stem — no manual per-stem MIDI conversion
+or combining needed."""
 
 from __future__ import annotations
 
@@ -12,6 +14,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+import librosa
+import numpy as np
+import pretty_midi
 
 DRUMS_DIR_NAME = "Drums"
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
@@ -27,6 +33,22 @@ _DRUMSEP_GDRIVE_FILE_ID = "1-Dm666ScPkg8Gt2-lK3Ua0xOudWHZBGC"
 _DRUMSEP_MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drumsep_model")
 
 _STEM_NAMES = ("drums.wav", "kick.wav", "snare.wav", "toms.wav", "cymbals_hihat.wav")
+
+MIDI_FILENAME = "drums.mid"
+_NOTE_DURATION_SEC = 0.05
+
+# GM drum map notes, matching Ableton's own default Drum Rack mapping — a
+# MIDI file built from these can be dropped straight onto a stock drum rack.
+# cymbals_hihat and toms are each a single note for now since those stems
+# aren't split any further than one file per instrument group.
+_MIDI_NOTE_MAP = {
+    "kick": 36,           # Bass Drum 1
+    "snare": 38,          # Acoustic Snare
+    "cymbals_hihat": 42,  # Closed Hi-Hat
+    "toms": 45,           # Low Tom
+}
+
+_EXPECTED_OUTPUTS = _STEM_NAMES + (MIDI_FILENAME,)
 
 
 def _map_drumsep_stem_name(filename: str) -> str | None:
@@ -73,14 +95,66 @@ def _run_demucs(input_path: str, out_dir: str, model_name: str, repo: str | None
     return os.path.join(out_dir, model_name, track_name)
 
 
+_VELOCITY_WINDOW_SEC = 0.03
+
+
+def _detect_note_events(wav_path: str, midi_note: int) -> list[pretty_midi.Note]:
+    """Detect hit onsets in a single isolated drum stem and turn each one
+    into a MIDI note. This is a much easier problem than transcribing drums
+    from a full mix — the stem already isolates one instrument, so a plain
+    onset detector does a solid job on timing.
+
+    Velocity is derived from the waveform's peak amplitude just after each
+    onset, normalized against the loudest hit in the stem — not from the
+    onset-strength envelope's own peak, which is dominated by rare outlier
+    spikes (e.g. a single unusually sharp transient) and made everything
+    else round down to the minimum velocity when used directly."""
+    y, sr = librosa.load(wav_path, sr=None, mono=True)
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    if onset_env.size == 0 or not np.isfinite(onset_env).any() or onset_env.max() <= 0:
+        return []
+
+    onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, backtrack=True)
+    onset_times = librosa.frames_to_time(onset_frames, sr=sr)
+
+    peak_amplitude = np.abs(y).max()
+    if peak_amplitude <= 0:
+        return []
+
+    window_samples = max(1, int(_VELOCITY_WINDOW_SEC * sr))
+    notes = []
+    for start in onset_times:
+        start_sample = int(start * sr)
+        window = y[start_sample:start_sample + window_samples]
+        hit_amplitude = np.abs(window).max() if window.size else 0.0
+        velocity = int(np.clip(hit_amplitude / peak_amplitude * 127, 1, 127))
+        notes.append(pretty_midi.Note(velocity=velocity, pitch=midi_note, start=float(start), end=float(start) + _NOTE_DURATION_SEC))
+    return notes
+
+
+def _write_drum_midi(song_dir: str) -> None:
+    """Combine hits detected across all the isolated stems into a single
+    drums.mid, so there's one file to drag onto one MIDI track instead of
+    converting and merging each stem by hand."""
+    midi = pretty_midi.PrettyMIDI()
+    drum_track = pretty_midi.Instrument(program=0, is_drum=True, name="Drums")
+    for stem_name, midi_note in _MIDI_NOTE_MAP.items():
+        wav_path = os.path.join(song_dir, stem_name + ".wav")
+        if os.path.exists(wav_path):
+            drum_track.notes.extend(_detect_note_events(wav_path, midi_note))
+    drum_track.notes.sort(key=lambda note: note.start)
+    midi.instruments.append(drum_track)
+    midi.write(os.path.join(song_dir, MIDI_FILENAME))
+
+
 def isolate_drums(mp3_path: str, drums_root: str) -> bool:
-    """Produce drums.wav, kick.wav, snare.wav, toms.wav, and cymbals_hihat.wav
-    for a single song under drums_root/<title>/. Returns False (skipped)
-    if all of those already exist."""
+    """Produce drums.wav, kick.wav, snare.wav, toms.wav, cymbals_hihat.wav,
+    and a combined drums.mid for a single song under drums_root/<title>/.
+    Returns False (skipped) if all of those already exist."""
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = os.path.join(drums_root, title)
 
-    if os.path.isdir(song_dir) and all(os.path.exists(os.path.join(song_dir, f)) for f in _STEM_NAMES):
+    if os.path.isdir(song_dir) and all(os.path.exists(os.path.join(song_dir, f)) for f in _EXPECTED_OUTPUTS):
         print(f"{title}: drum stems already exist, nothing to do.")
         return False
 
@@ -101,10 +175,13 @@ def isolate_drums(mp3_path: str, drums_root: str) -> bool:
             our_name = _map_drumsep_stem_name(filename)
             if our_name:
                 shutil.copy(os.path.join(kit_stem_dir, filename), os.path.join(song_dir, our_name + ".wav"))
+
+        print(f"{title}: transcribing stems to MIDI...")
+        _write_drum_midi(song_dir)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    print(f"{title}: drum stems saved to {song_dir}")
+    print(f"{title}: drum stems and MIDI saved to {song_dir}")
     return True
 
 
