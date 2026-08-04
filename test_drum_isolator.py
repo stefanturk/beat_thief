@@ -138,6 +138,14 @@ class TestDetectNoteEvents(unittest.TestCase):
 
         self.assertEqual(notes, [])
 
+    def test_loudest_hit_reaches_full_velocity(self):
+        wav_path = os.path.join(self.tmp_dir, "drums.wav")
+        _hits(4).export(wav_path, format="wav")
+
+        notes = drum_isolator._detect_note_events(wav_path)
+
+        self.assertTrue(any(note.velocity == 127 for note in notes))
+
 
 class TestHitCentroid(unittest.TestCase):
     def _window(self, freq, sr=44100, duration_sec=0.03):
