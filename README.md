@@ -73,12 +73,18 @@ python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIS
 For each song this produces a `Drums/<Song Title>/` folder containing
 `drums.wav` (the isolated drum mix) and `drums.mid` — a MIDI file built by
 detecting hits directly in `drums.wav` and writing them all onto one drum
-track, using Ableton's default Drum Rack note for a drum hit (36). Drag
-`drums.mid` straight onto a MIDI track with a drum rack loaded. Any dead
-air or drum-less intro is trimmed off the front first (reusing the same
-intro-cut detection as the sanitizer), so both the wav and the MIDI start
-right on beat 1 instead of however many seconds into the file the original
-intro happened to be.
+track. Drag `drums.mid` straight onto a MIDI track with a drum rack
+loaded. Any dead air or drum-less intro is trimmed off the front first
+(reusing the same intro-cut detection as the sanitizer), so both the wav
+and the MIDI start right on beat 1 instead of however many seconds into
+the file the original intro happened to be.
+
+Each hit is guessed as kick, snare, or cymbal/hi-hat from its spectral
+centroid (low-frequency hits are kicks, mid is snare, high is
+cymbal/hi-hat) and written to Ableton's default Drum Rack note for that
+piece (kick=36, snare=38, cymbal=42) — a cheap heuristic rather than a
+second ML model, so expect it to be right most of the time on clean hits
+and to need some manual cleanup on busier or more layered passages.
 
 The MIDI file's own tempo is detected, then precisely refined by fitting a
 constant grid through every hit across the whole song (averaging over
@@ -95,11 +101,6 @@ it picked very precise, but doesn't fix the octave itself. If the grid
 looks twice as fast or half as slow as it should, that's the usual cause;
 halving or doubling the tempo in Ableton fixes it without needing to touch
 the notes.
-
-Because every hit lands on the same note, kick/snare/hi-hat aren't told
-apart — expect to manually reassign notes to different drum-rack pads (or
-just play the whole track back as one sampled hit) rather than getting a
-ready-split kit.
 
 This is off by default because it's slow (each song runs through a
 machine-learning model). It also runs standalone against an existing
