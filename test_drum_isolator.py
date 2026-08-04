@@ -120,23 +120,58 @@ class TestDetectNoteEvents(unittest.TestCase):
         wav_path = os.path.join(self.tmp_dir, "drums.wav")
         _hits(4).export(wav_path, format="wav")
 
-        notes = drum_isolator._detect_note_events(wav_path, midi_note=36)
+        notes = drum_isolator._detect_note_events(wav_path)
 
         # Onset detection on synthetic tones won't be pixel-perfect, but it
         # should land in the ballpark of the four hits we actually made.
         self.assertGreaterEqual(len(notes), 2)
         self.assertLessEqual(len(notes), 6)
         for note in notes:
-            self.assertEqual(note.pitch, 36)
+            self.assertIn(note.pitch, (36, 38, 42))
             self.assertTrue(1 <= note.velocity <= 127)
 
     def test_silence_produces_no_notes(self):
         wav_path = os.path.join(self.tmp_dir, "silence.wav")
         AudioSegment.silent(duration=2000).export(wav_path, format="wav")
 
-        notes = drum_isolator._detect_note_events(wav_path, midi_note=36)
+        notes = drum_isolator._detect_note_events(wav_path)
 
         self.assertEqual(notes, [])
+
+
+class TestHitCentroid(unittest.TestCase):
+    def _window(self, freq, sr=44100, duration_sec=0.03):
+        t = np.linspace(0, duration_sec, int(sr * duration_sec), endpoint=False)
+        return np.sin(2 * np.pi * freq * t).astype(np.float32), sr
+
+    def test_low_frequency_tone_has_low_centroid(self):
+        window, sr = self._window(100)
+        low_centroid = drum_isolator._hit_centroid(window, sr)
+
+        window, sr = self._window(6000)
+        high_centroid = drum_isolator._hit_centroid(window, sr)
+
+        self.assertLess(low_centroid, high_centroid)
+
+    def test_empty_window_returns_none(self):
+        self.assertIsNone(drum_isolator._hit_centroid(np.array([]), 44100))
+
+    def test_silent_window_returns_none(self):
+        self.assertIsNone(drum_isolator._hit_centroid(np.zeros(100), 44100))
+
+
+class TestNoteForCentroid(unittest.TestCase):
+    def test_below_kick_threshold_is_kick(self):
+        self.assertEqual(drum_isolator._note_for_centroid(100.0, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._KICK_NOTE)
+
+    def test_between_thresholds_is_snare(self):
+        self.assertEqual(drum_isolator._note_for_centroid(1000.0, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._SNARE_NOTE)
+
+    def test_above_snare_threshold_is_cymbal(self):
+        self.assertEqual(drum_isolator._note_for_centroid(5000.0, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._CYMBAL_NOTE)
+
+    def test_none_defaults_to_kick(self):
+        self.assertEqual(drum_isolator._note_for_centroid(None, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._KICK_NOTE)
 
 
 class TestDetectTempo(unittest.TestCase):
@@ -202,7 +237,7 @@ class TestWriteDrumMidi(unittest.TestCase):
         self.assertEqual(len(midi.instruments), 1)
         self.assertTrue(midi.instruments[0].is_drum)
         pitches = {note.pitch for note in midi.instruments[0].notes}
-        self.assertEqual(pitches, {36})
+        self.assertTrue(pitches.issubset({36, 38, 42}))
         self.assertGreater(len(midi.instruments[0].notes), 0)
         # Notes should be written in start-time order.
         starts = [note.start for note in midi.instruments[0].notes]
@@ -243,7 +278,7 @@ class TestWriteDrumMidi(unittest.TestCase):
         # rounds absolute times to the nearest tick (a couple of ms here),
         # regardless of any snapping logic - that's the file format, not us.
         expected_starts = sorted(n.start for n in drum_isolator._detect_note_events(
-            os.path.join(self.tmp_dir, "drums.wav"), midi_note=36))
+            os.path.join(self.tmp_dir, "drums.wav")))
         actual_starts = sorted(n.start for n in midi.instruments[0].notes)
         self.assertEqual(len(actual_starts), len(expected_starts))
         for actual, expected in zip(actual_starts, expected_starts):

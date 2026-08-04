@@ -32,10 +32,31 @@ DRUMS_WAV_FILENAME = "drums.wav"
 MIDI_FILENAME = "drums.mid"
 _NOTE_DURATION_SEC = 0.05
 
-# Ableton's default Drum Rack "Bass Drum 1" note. Without per-instrument
-# stems there's no way to tell a kick hit from a snare hit apart, so every
-# detected hit is written to this single note.
-_DRUM_HIT_NOTE = 36
+# Without per-instrument stems there's no ML model telling a kick hit from
+# a snare hit apart anymore, but the mixed drums.wav still carries enough
+# spectral information to guess: kick hits are almost all low-frequency
+# energy, snares and toms sit in the middle, and cymbals/hi-hats are
+# dominated by high-frequency energy. A hit's spectral centroid (the
+# "center of mass" of its frequency content, in Hz) right after each onset
+# is a simple, cheap way to tell those apart without a second model.
+# Notes match Ableton's default Drum Rack mapping.
+_KICK_NOTE = 36     # Bass Drum 1
+_SNARE_NOTE = 38    # Acoustic Snare
+_CYMBAL_NOTE = 42   # Closed Hi-Hat
+
+# Fallback absolute thresholds, used only when a song has too few onsets to
+# derive its own (see _detect_note_events) - real, in-context drum hits run
+# far hotter than these, since a mixed recording's attack transients carry
+# broadband energy that a clean isolated tone doesn't.
+_KICK_MAX_CENTROID_HZ = 300.0
+_SNARE_MAX_CENTROID_HZ = 2000.0
+
+# How many onsets are needed before classifying hits relative to the song's
+# own centroid distribution instead of falling back to the absolute
+# thresholds above.
+_MIN_ONSETS_FOR_RELATIVE_CLASSIFICATION = 12
+_KICK_PERCENTILE = 33  # bottom third of a song's onsets -> kick
+_SNARE_PERCENTILE = 67  # middle third -> snare, top third -> cymbal
 
 _EXPECTED_OUTPUTS = (DRUMS_WAV_FILENAME, MIDI_FILENAME)
 
@@ -52,11 +73,53 @@ def _run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str |
 
 
 _VELOCITY_WINDOW_SEC = 0.03
+_CLASSIFY_WINDOW_SEC = 0.06  # longer than the velocity window, to capture more of a kick's low-frequency sustain past its initial (broadband) attack click
 
 
-def _detect_note_events(wav_path: str, midi_note: int) -> list[pretty_midi.Note]:
+def _hit_centroid(window: np.ndarray, sr: int) -> float | None:
+    """Spectral centroid (the "center of mass" of frequency content, in Hz)
+    of a short hit window, or None if the window is silent/too small.
+
+    Computed directly with numpy rather than librosa.feature.spectral_
+    centroid, which defaults to n_fft=2048 - larger than our short hit
+    window, so it silently zero-pads. Zero-padding a signal with sharp
+    edges introduces spectral leakage (artificial high-frequency energy
+    from the abrupt discontinuity), which was skewing nearly every real
+    hit toward "cymbal" regardless of its actual pitch. A Hann window
+    tapers those edges instead of leaving them abrupt, and sizing the FFT
+    to the window itself avoids the padding altogether."""
+    if window.size < 2:
+        return None
+    windowed = window * np.hanning(window.size)
+    spectrum = np.abs(np.fft.rfft(windowed))
+    total_energy = spectrum.sum()
+    if total_energy <= 0:
+        return None
+    freqs = np.fft.rfftfreq(window.size, d=1.0 / sr)
+    return float(np.sum(freqs * spectrum) / total_energy)
+
+
+def _note_for_centroid(centroid: float | None, kick_threshold: float, snare_threshold: float) -> int:
+    if centroid is None or centroid < kick_threshold:
+        return _KICK_NOTE
+    if centroid < snare_threshold:
+        return _SNARE_NOTE
+    return _CYMBAL_NOTE
+
+
+def _detect_note_events(wav_path: str) -> list[pretty_midi.Note]:
     """Detect hit onsets in the isolated drum mix and turn each one into a
-    MIDI note.
+    MIDI note, guessing kick/snare/cymbal per hit from its spectral content
+    since there's no separate stem per instrument.
+
+    Classification is relative to the song's own onsets rather than fixed
+    Hz cutoffs: a mixed recording's attack transients carry broadband
+    energy no matter the instrument, so absolute thresholds tuned on clean
+    isolated tones read almost every real hit as "cymbal". Splitting a
+    song's own onsets into thirds by centroid (kick = lowest third, snare =
+    middle third, cymbal = top third) adapts to each song's own mix/EQ
+    instead. Falls back to fixed thresholds when there are too few onsets
+    to make that split meaningful.
 
     Velocity is derived from the waveform's peak amplitude just after each
     onset, normalized against the loudest hit in the file — not from the
@@ -75,14 +138,31 @@ def _detect_note_events(wav_path: str, midi_note: int) -> list[pretty_midi.Note]
     if peak_amplitude <= 0:
         return []
 
-    window_samples = max(1, int(_VELOCITY_WINDOW_SEC * sr))
-    notes = []
+    velocity_window_samples = max(1, int(_VELOCITY_WINDOW_SEC * sr))
+    classify_window_samples = max(1, int(_CLASSIFY_WINDOW_SEC * sr))
+
+    hits = []
     for start in onset_times:
         start_sample = int(start * sr)
-        window = y[start_sample:start_sample + window_samples]
-        hit_amplitude = np.abs(window).max() if window.size else 0.0
+        velocity_window = y[start_sample:start_sample + velocity_window_samples]
+        classify_window = y[start_sample:start_sample + classify_window_samples]
+        hit_amplitude = np.abs(velocity_window).max() if velocity_window.size else 0.0
         velocity = int(np.clip(hit_amplitude / peak_amplitude * 127, 1, 127))
-        notes.append(pretty_midi.Note(velocity=velocity, pitch=midi_note, start=float(start), end=float(start) + _NOTE_DURATION_SEC))
+        centroid = _hit_centroid(classify_window, sr)
+        hits.append((start, velocity, centroid))
+
+    centroids = np.array([c for _, _, c in hits if c is not None], dtype=np.float64)
+    if centroids.size >= _MIN_ONSETS_FOR_RELATIVE_CLASSIFICATION:
+        kick_threshold = float(np.percentile(centroids, _KICK_PERCENTILE))
+        snare_threshold = float(np.percentile(centroids, _SNARE_PERCENTILE))
+    else:
+        kick_threshold = _KICK_MAX_CENTROID_HZ
+        snare_threshold = _SNARE_MAX_CENTROID_HZ
+
+    notes = []
+    for start, velocity, centroid in hits:
+        pitch = _note_for_centroid(centroid, kick_threshold, snare_threshold)
+        notes.append(pretty_midi.Note(velocity=velocity, pitch=pitch, start=float(start), end=float(start) + _NOTE_DURATION_SEC))
     return notes
 
 
@@ -183,14 +263,15 @@ def _refine_tempo(onset_times: np.ndarray, initial_tempo: float) -> float:
 
 def _write_drum_midi(song_dir: str) -> None:
     """Detect hits in drums.wav and write them all to a single drums.mid
-    track. Notes keep their raw onset-detected times (no quantizing/
-    snapping) — instead, the file's own tempo is detected and then
-    precisely refined against every hit in the song, so the grid itself
-    lines up with the recording on import."""
+    track, each classified as kick/snare/cymbal (see _classify_hit). Notes
+    keep their raw onset-detected times (no quantizing/snapping) — instead,
+    the file's own tempo is detected and then precisely refined against
+    every hit in the song, so the grid itself lines up with the recording
+    on import."""
     drums_wav = os.path.join(song_dir, DRUMS_WAV_FILENAME)
     rough_tempo = _detect_tempo(drums_wav) if os.path.exists(drums_wav) else _DEFAULT_TEMPO
 
-    all_notes = _detect_note_events(drums_wav, _DRUM_HIT_NOTE) if os.path.exists(drums_wav) else []
+    all_notes = _detect_note_events(drums_wav) if os.path.exists(drums_wav) else []
 
     onset_times = np.array([note.start for note in all_notes], dtype=np.float64)
     tempo = _refine_tempo(onset_times, rough_tempo)
