@@ -71,10 +71,19 @@ python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIS
 ```
 
 For each song this produces a `Drums/<Song Title>/` folder containing
-`drums.wav` (the full drum mix), `kick.wav`, `snare.wav`, `toms.wav`, and
-`cymbals_hihat.wav`. Hi-hat and cymbals come out bundled together in one
-file for now — separating those two cleanly needs a heavier model that
-isn't wired up yet.
+`drums.wav` (the full drum mix), `kick.wav`, `snare.wav`, `toms.wav`,
+`cymbals_hihat.wav`, and `drums.mid` — a single combined MIDI file built by
+detecting hits in each isolated stem and writing them all onto one drum
+track, using the same note numbers as Ableton's default Drum Rack
+(kick=36, snare=38, hi-hat/cymbals=42, toms=45). Drag `drums.mid` straight
+onto a MIDI track with a drum rack loaded — no per-stem conversion or
+manual combining needed.
+
+Hi-hat and cymbals come out bundled together as one stem (and one MIDI
+note) for now — separating those two cleanly needs a heavier model that
+isn't wired up yet. Kick and snare transcribe well since they're clean,
+punchy hits; toms and the cymbals/hi-hat stem are noisier and more likely
+to need cleanup by hand.
 
 This is off by default because it's slow (each song runs through two
 machine-learning models) and downloads a one-time model file the first time
@@ -83,8 +92,3 @@ it's used. It also runs standalone against an existing folder or file:
 ```
 python3 drum_isolator.py ["path/to/folder-or-file.mp3"]
 ```
-
-Once you have the stems, drag them into Ableton and use Live's built-in
-"Convert Drums to New MIDI Track" per stem — that's the most reliable way
-to get from an isolated stem to editable MIDI right now, more reliable
-than anything that could be fully scripted.
