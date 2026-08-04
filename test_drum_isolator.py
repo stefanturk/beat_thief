@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import numpy as np
 from pydub import AudioSegment
 from pydub.generators import Sine
 
@@ -23,7 +24,7 @@ def _hits(count, hit_ms=80, gap_ms=400, freq=200):
 
 def _click_track(bpm, beats, hit_ms=30, freq=1000):
     """A steady metronome-like click at an exact tempo, for exercising tempo
-    detection and grid quantization against a known-correct answer."""
+    detection/refinement against a known-correct answer."""
     interval_ms = 60000.0 / bpm
     gap_ms = interval_ms - hit_ms
     beat_audio = Sine(freq).to_audio_segment(duration=hit_ms).fade_out(hit_ms // 2)
@@ -190,12 +191,27 @@ class TestDetectTempo(unittest.TestCase):
         self.assertTrue(any(abs(ratio - r) < 0.05 for r in (0.5, 1.0, 2.0)), tempo)
 
 
-class TestQuantizeTime(unittest.TestCase):
-    def test_snaps_to_the_nearest_sixteenth_note_at_120bpm(self):
-        # At 120 BPM a quarter note is 0.5s, so a 16th note is 0.125s.
-        self.assertAlmostEqual(drum_isolator._quantize_time(0.11, 120.0), 0.125)
-        self.assertAlmostEqual(drum_isolator._quantize_time(0.06, 120.0), 0.0)
-        self.assertAlmostEqual(drum_isolator._quantize_time(0.20, 120.0), 0.25)
+class TestRefineTempo(unittest.TestCase):
+    def test_recovers_precise_tempo_from_noisy_onsets(self):
+        true_bpm = 137.73
+        period = 60.0 / true_bpm
+        rng = np.random.default_rng(0)
+        n_hits = 300
+        onset_times = np.arange(n_hits) * period
+        onset_times += rng.normal(scale=0.004, size=n_hits)  # ~4ms onset-detection jitter
+
+        # Deliberately start from a rough/wrong initial estimate, matching
+        # how _detect_tempo's single windowed guess is only approximate.
+        refined = drum_isolator._refine_tempo(onset_times, initial_tempo=140.0)
+
+        self.assertAlmostEqual(refined, true_bpm, delta=0.1)
+
+    def test_too_few_onsets_returns_the_initial_estimate_unchanged(self):
+        onset_times = np.array([0.0, 0.5, 1.0])
+
+        refined = drum_isolator._refine_tempo(onset_times, initial_tempo=95.0)
+
+        self.assertEqual(refined, 95.0)
 
 
 class TestWriteDrumMidi(unittest.TestCase):
@@ -226,9 +242,11 @@ class TestWriteDrumMidi(unittest.TestCase):
         starts = [note.start for note in midi.instruments[0].notes]
         self.assertEqual(starts, sorted(starts))
 
-    def test_notes_are_snapped_to_the_detected_tempo_grid(self):
-        _click_track(bpm=120, beats=24).export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
-        _hits(4).export(os.path.join(self.tmp_dir, "kick.wav"), format="wav")
+    def test_embeds_a_precisely_refined_tempo_without_snapping_notes(self):
+        true_bpm = 123.4
+        click = _click_track(bpm=true_bpm, beats=200)
+        click.export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
+        click.export(os.path.join(self.tmp_dir, "kick.wav"), format="wav")
 
         drum_isolator._write_drum_midi(self.tmp_dir)
 
@@ -236,10 +254,25 @@ class TestWriteDrumMidi(unittest.TestCase):
         midi = pretty_midi.PrettyMIDI(os.path.join(self.tmp_dir, drum_isolator.MIDI_FILENAME))
         _, tempi = midi.get_tempo_changes()
         tempo = tempi[0]
-        grid_sec = 60.0 / tempo / 4
-        for note in midi.instruments[0].notes:
-            remainder = note.start % grid_sec
-            self.assertLess(min(remainder, grid_sec - remainder), 1e-6, note.start)
+
+        # Octave errors are a separate, accepted failure mode - check
+        # precision within whichever octave the rough estimate landed on.
+        targets = [octave * true_bpm for octave in (0.5, 1.0, 2.0)]
+        closest_target = min(targets, key=lambda target: abs(tempo - target))
+        self.assertLess(abs(tempo - closest_target), 0.1, tempo)
+
+        # Notes should keep their raw onset-detected times untouched - not
+        # snapped to any musical grid - matching what _detect_note_events
+        # alone would produce on the same file. A small tolerance accounts
+        # for MIDI's own tick resolution: writing/reading a .mid file always
+        # rounds absolute times to the nearest tick (a couple of ms here),
+        # regardless of any snapping logic - that's the file format, not us.
+        expected_starts = sorted(n.start for n in drum_isolator._detect_note_events(
+            os.path.join(self.tmp_dir, "kick.wav"), midi_note=36))
+        actual_kick_starts = sorted(n.start for n in midi.instruments[0].notes if n.pitch == 36)
+        self.assertEqual(len(actual_kick_starts), len(expected_starts))
+        for actual, expected in zip(actual_kick_starts, expected_starts):
+            self.assertAlmostEqual(actual, expected, delta=0.01)
 
 
 class TestTrimLeadingSilence(unittest.TestCase):

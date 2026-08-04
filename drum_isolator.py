@@ -6,8 +6,9 @@ this uses doesn't separate those two yet), and a combined drums.mid built by
 detecting hits in each isolated stem — no manual per-stem MIDI conversion
 or combining needed. Any dead air or drum-less intro is trimmed off the
 front first, so the stems and MIDI both start on beat 1, and the MIDI's own
-tempo is detected and its notes snapped to a 16th-note grid at that tempo,
-so it actually lands on the click instead of importing at the wrong BPM."""
+tempo is detected and then precisely refined against every hit across the
+whole song, so it actually lands on the grid on import instead of at the
+wrong BPM."""
 
 from __future__ import annotations
 
@@ -139,36 +140,110 @@ def _detect_note_events(wav_path: str, midi_note: int) -> list[pretty_midi.Note]
 
 
 _DEFAULT_TEMPO = 120.0
-_GRID_SUBDIVISION = 16  # snap hits to the nearest 16th note
+_MIN_ONSETS_FOR_REFINEMENT = 16
+_REFINEMENT_SUBDIVISION = 4  # fit against a 16th-note grid (beat / 4)
+_REFINEMENT_BOOTSTRAP_SPAN = 4  # short first pass, to sharpen the estimate before trusting longer spans
+_REFINEMENT_MAX_SPAN = 64  # how many onsets ahead to pair each onset with in the second pass
+_REFINEMENT_TOLERANCE = 0.15  # fraction of a grid unit a gap may be off by and still count
 
 
 def _detect_tempo(drums_wav_path: str) -> float:
-    """Estimate the song's tempo from the full isolated drums stem (a
-    clearer, more periodic signal to track than any single kit piece).
-    Without this, the MIDI file silently defaults to 120 BPM regardless of
-    the song's real tempo, which is exactly why a straight import lands off
-    the grid — the notes' absolute-time positions are correct, but nothing
-    ties them to the right bars/beats until the tempo is set to match."""
+    """Rough tempo estimate from the full isolated drums stem (a clearer,
+    more periodic signal to track than any single kit piece). This alone is
+    only accurate to within a few BPM — good enough as a starting point for
+    _refine_tempo(), not on its own precise enough to import on the grid."""
     y, sr = librosa.load(drums_wav_path, sr=None, mono=True)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     tempo = float(np.atleast_1d(tempo)[0])
     return tempo if tempo > 0 else _DEFAULT_TEMPO
 
 
-def _quantize_time(time_sec: float, tempo: float) -> float:
-    grid_sec = (60.0 / tempo) * (4.0 / _GRID_SUBDIVISION)
-    return round(time_sec / grid_sec) * grid_sec
+def _grid_unit_estimate(onset_times: np.ndarray, unit: float, max_span: int) -> float | None:
+    """One pass of the gap-ratio averaging described in _refine_tempo, for
+    onset pairs up to max_span apart. Returns None if nothing usable was
+    found (so the caller can fall back to the estimate it already has)."""
+    estimates = []
+    weights = []
+    for offset in range(1, max_span + 1):
+        gaps = onset_times[offset:] - onset_times[:-offset]
+        multiples = np.round(gaps / unit)
+        valid = multiples > 0
+        gaps, multiples = gaps[valid], multiples[valid]
+        if gaps.size == 0:
+            continue
+        per_unit = gaps / multiples
+        close_enough = np.abs(per_unit - unit) / unit < _REFINEMENT_TOLERANCE
+        if not np.any(close_enough):
+            continue
+        estimates.append(per_unit[close_enough])
+        weights.append(multiples[close_enough])  # longer spans -> more precise estimate
+
+    if not estimates:
+        return None
+    return float(np.average(np.concatenate(estimates), weights=np.concatenate(weights)))
+
+
+def _refine_tempo(onset_times: np.ndarray, initial_tempo: float) -> float:
+    """Turn a rough tempo estimate into a precise one using every detected
+    hit across the whole song. A single windowed estimate (_detect_tempo)
+    is only accurate to within a few BPM.
+
+    A naive single global fit (assign each onset an integer grid index from
+    the start of the song, then least-squares through all of them) turns
+    out to be unstable here: even a couple of BPM of initial error
+    accumulates across hundreds of onsets until the "nearest grid index"
+    rounding starts picking the wrong integer, and the fit locks onto that
+    wrong assignment instead of converging.
+
+    Instead, this looks at gaps between nearby pairs of onsets, works out
+    how many grid units each gap likely spans, and derives a small, direct,
+    low-drift period estimate from each one — then weight-averages all of
+    them. But that alone has the same failure mode at a smaller scale: a
+    pair far apart only needs a tiny relative error in the starting guess
+    to have its gap rounded to the wrong integer multiple entirely, and
+    those (wrong, but heavily-weighted) far-apart pairs would dominate the
+    average. So this runs in two passes — a short-span pass first to
+    sharpen the estimate enough that long-span pairs can then be trusted,
+    then a full-span pass using that sharpened value. Averaging hundreds to
+    thousands of these independent estimates in the second pass cancels out
+    individual onset-detection jitter and gets this within a small fraction
+    of a BPM. Fits against a 16th-note grid rather than the beat itself,
+    since hits land on kick quarters, snare backbeats, and hi-hat
+    8ths/16ths alike, which uses far more of the song's timing data than
+    only looking at one instrument's onsets would.
+
+    This does not fix octave errors (reading half or double the true
+    tempo) — that's a separate failure mode of the initial rough estimate;
+    refinement just makes whichever octave it picked very precise."""
+    onset_times = np.sort(np.asarray(onset_times, dtype=np.float64))
+    if initial_tempo <= 0 or onset_times.size < _MIN_ONSETS_FOR_REFINEMENT:
+        return initial_tempo
+
+    unit = 60.0 / initial_tempo / _REFINEMENT_SUBDIVISION
+
+    short_span = min(onset_times.size - 1, _REFINEMENT_BOOTSTRAP_SPAN)
+    sharpened = _grid_unit_estimate(onset_times, unit, short_span)
+    if sharpened is not None:
+        unit = sharpened
+
+    full_span = min(onset_times.size - 1, _REFINEMENT_MAX_SPAN)
+    if full_span > short_span:
+        refined = _grid_unit_estimate(onset_times, unit, full_span)
+        if refined is not None:
+            unit = refined
+
+    return 60.0 / unit / _REFINEMENT_SUBDIVISION
 
 
 def _write_drum_midi(song_dir: str) -> None:
     """Combine hits detected across all the isolated stems into a single
     drums.mid, so there's one file to drag onto one MIDI track instead of
-    converting and merging each stem by hand. The file's own tempo is set
-    to the detected BPM and every note is snapped to the nearest 16th note
-    at that tempo, so it lands on the grid instead of at its raw (slightly
-    human/jittery) onset-detected time."""
+    converting and merging each stem by hand. Notes keep their raw
+    onset-detected times (no quantizing/snapping) — instead, the file's own
+    tempo is detected and then precisely refined against every hit in the
+    song, so the grid itself lines up with the recording on import."""
     drums_wav = os.path.join(song_dir, "drums.wav")
-    tempo = _detect_tempo(drums_wav) if os.path.exists(drums_wav) else _DEFAULT_TEMPO
+    rough_tempo = _detect_tempo(drums_wav) if os.path.exists(drums_wav) else _DEFAULT_TEMPO
 
     all_notes = []
     for stem_name, midi_note in _MIDI_NOTE_MAP.items():
@@ -176,20 +251,12 @@ def _write_drum_midi(song_dir: str) -> None:
         if os.path.exists(wav_path):
             all_notes.extend(_detect_note_events(wav_path, midi_note))
 
-    # Snap each hit onto the grid, and drop duplicates that land on the same
-    # pitch + grid slot (keeping the louder one) instead of double-triggering.
-    quantized: dict[tuple[int, float], pretty_midi.Note] = {}
-    for note in all_notes:
-        q_start = max(0.0, _quantize_time(note.start, tempo))
-        key = (note.pitch, round(q_start, 6))
-        if key not in quantized or note.velocity > quantized[key].velocity:
-            note.start = q_start
-            note.end = q_start + _NOTE_DURATION_SEC
-            quantized[key] = note
+    onset_times = np.array([note.start for note in all_notes], dtype=np.float64)
+    tempo = _refine_tempo(onset_times, rough_tempo)
 
     midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
-    drum_track = pretty_midi.Instrument(program=0, is_drum=True, name="Drums")
-    drum_track.notes = sorted(quantized.values(), key=lambda note: note.start)
+    drum_track = pretty_midi.Instrument(program=0, is_drum=True, name=f"Drums ({round(tempo)})")
+    drum_track.notes = sorted(all_notes, key=lambda note: note.start)
     midi.instruments.append(drum_track)
     midi.write(os.path.join(song_dir, MIDI_FILENAME))
 

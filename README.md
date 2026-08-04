@@ -82,13 +82,21 @@ first (reusing the same intro-cut detection as the sanitizer), so both the
 stems and the MIDI start right on beat 1 instead of however many seconds
 into the file the original intro happened to be.
 
-The MIDI file's own tempo is set to the detected BPM, and every hit is
-snapped to the nearest 16th note at that tempo, so it lands on the grid on
-import instead of sitting at its raw, slightly-off onset-detected time.
-Automatic tempo detection can occasionally be off by an octave (reading
-95 BPM as 190, or vice versa) — if the grid looks twice as fast or half as
-slow as it should, that's the usual cause; halving or doubling the tempo in
-Ableton fixes it without needing to touch the notes themselves.
+The MIDI file's own tempo is detected, then precisely refined by fitting a
+constant grid through every hit across the whole song (averaging over
+however many hundred hits are in a full track cancels out individual
+onset-detection jitter far better than a single windowed estimate can),
+typically landing within a small fraction of a BPM of the song's real
+tempo. Notes themselves are left at their raw, unquantized onset-detected
+times — only the tempo is adjusted, so the grid lines up with the recording
+instead of the recording being forced onto a grid.
+
+Automatic tempo detection can still occasionally be off by an octave
+(reading 95 BPM as 190, or vice versa) — refinement makes whichever octave
+it picked very precise, but doesn't fix the octave itself. If the grid
+looks twice as fast or half as slow as it should, that's the usual cause;
+halving or doubling the tempo in Ableton fixes it without needing to touch
+the notes.
 
 Hi-hat and cymbals come out bundled together as one stem (and one MIDI
 note) for now — separating those two cleanly needs a heavier model that
