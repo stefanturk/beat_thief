@@ -59,3 +59,32 @@ what's in the folder.
 
 Duplicate downloads that get found and removed are moved into a visible
 `Duplicates` folder next to your songs, not deleted outright.
+
+## Isolating drums (optional, slow)
+
+Pass `--drums` to also split each song's drums out into individual stems —
+useful if you want to import them into a DAW (e.g. Ableton) to rebuild a
+digitized version of the drum performance:
+
+```
+python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" --drums
+```
+
+For each song this produces a `Drums/<Song Title>/` folder containing
+`drums.wav` (the full drum mix), `kick.wav`, `snare.wav`, `toms.wav`, and
+`cymbals_hihat.wav`. Hi-hat and cymbals come out bundled together in one
+file for now — separating those two cleanly needs a heavier model that
+isn't wired up yet.
+
+This is off by default because it's slow (each song runs through two
+machine-learning models) and downloads a one-time model file the first time
+it's used. It also runs standalone against an existing folder or file:
+
+```
+python3 drum_isolator.py ["path/to/folder-or-file.mp3"]
+```
+
+Once you have the stems, drag them into Ableton and use Live's built-in
+"Convert Drums to New MIDI Track" per stem — that's the most reliable way
+to get from an isolated stem to editable MIDI right now, more reliable
+than anything that could be fully scripted.

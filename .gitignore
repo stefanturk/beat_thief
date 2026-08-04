@@ -1,6 +1,8 @@
 downloads/
 .downloaded_archive.txt
 Duplicates/
+Drums/
+drumsep_model/
 __pycache__/
 *.pyc
 .venv/

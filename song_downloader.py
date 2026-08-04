@@ -9,6 +9,7 @@ import sys
 
 import yt_dlp
 
+import drum_isolator
 import song_sanitizer
 
 BAR_WIDTH = 30
@@ -162,6 +163,11 @@ def main() -> None:
         default=default_output,
         help=f"Output directory (default: {default_output})",
     )
+    parser.add_argument(
+        "--drums",
+        action="store_true",
+        help="Also isolate drum stems (kick/snare/toms/cymbals) for each song. Slow, off by default.",
+    )
     args = parser.parse_args()
 
     try:
@@ -199,6 +205,15 @@ def main() -> None:
         _exit(130)
     except Exception as e:
         print(f"Sanitizing hit a snag, but your downloads are safe: {e}")
+
+    if args.drums:
+        try:
+            drum_isolator.isolate_drums_for_folder(args.output)
+        except KeyboardInterrupt:
+            print("\nStopped isolating drums. Whatever was already produced is safe.")
+            _exit(130)
+        except Exception as e:
+            print(f"Isolating drums hit a snag, but your downloads are safe: {e}")
 
     _exit(0 if result == 0 else 1)
 
