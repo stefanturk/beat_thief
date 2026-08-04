@@ -5,7 +5,9 @@ and hi-hat still bundled together as one file for now (the free local model
 this uses doesn't separate those two yet), and a combined drums.mid built by
 detecting hits in each isolated stem — no manual per-stem MIDI conversion
 or combining needed. Any dead air or drum-less intro is trimmed off the
-front first, so the stems and MIDI both start on beat 1."""
+front first, so the stems and MIDI both start on beat 1, and the MIDI's own
+tempo is detected and its notes snapped to a 16th-note grid at that tempo,
+so it actually lands on the click instead of importing at the wrong BPM."""
 
 from __future__ import annotations
 
@@ -136,17 +138,58 @@ def _detect_note_events(wav_path: str, midi_note: int) -> list[pretty_midi.Note]
     return notes
 
 
+_DEFAULT_TEMPO = 120.0
+_GRID_SUBDIVISION = 16  # snap hits to the nearest 16th note
+
+
+def _detect_tempo(drums_wav_path: str) -> float:
+    """Estimate the song's tempo from the full isolated drums stem (a
+    clearer, more periodic signal to track than any single kit piece).
+    Without this, the MIDI file silently defaults to 120 BPM regardless of
+    the song's real tempo, which is exactly why a straight import lands off
+    the grid — the notes' absolute-time positions are correct, but nothing
+    ties them to the right bars/beats until the tempo is set to match."""
+    y, sr = librosa.load(drums_wav_path, sr=None, mono=True)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    tempo = float(np.atleast_1d(tempo)[0])
+    return tempo if tempo > 0 else _DEFAULT_TEMPO
+
+
+def _quantize_time(time_sec: float, tempo: float) -> float:
+    grid_sec = (60.0 / tempo) * (4.0 / _GRID_SUBDIVISION)
+    return round(time_sec / grid_sec) * grid_sec
+
+
 def _write_drum_midi(song_dir: str) -> None:
     """Combine hits detected across all the isolated stems into a single
     drums.mid, so there's one file to drag onto one MIDI track instead of
-    converting and merging each stem by hand."""
-    midi = pretty_midi.PrettyMIDI()
-    drum_track = pretty_midi.Instrument(program=0, is_drum=True, name="Drums")
+    converting and merging each stem by hand. The file's own tempo is set
+    to the detected BPM and every note is snapped to the nearest 16th note
+    at that tempo, so it lands on the grid instead of at its raw (slightly
+    human/jittery) onset-detected time."""
+    drums_wav = os.path.join(song_dir, "drums.wav")
+    tempo = _detect_tempo(drums_wav) if os.path.exists(drums_wav) else _DEFAULT_TEMPO
+
+    all_notes = []
     for stem_name, midi_note in _MIDI_NOTE_MAP.items():
         wav_path = os.path.join(song_dir, stem_name + ".wav")
         if os.path.exists(wav_path):
-            drum_track.notes.extend(_detect_note_events(wav_path, midi_note))
-    drum_track.notes.sort(key=lambda note: note.start)
+            all_notes.extend(_detect_note_events(wav_path, midi_note))
+
+    # Snap each hit onto the grid, and drop duplicates that land on the same
+    # pitch + grid slot (keeping the louder one) instead of double-triggering.
+    quantized: dict[tuple[int, float], pretty_midi.Note] = {}
+    for note in all_notes:
+        q_start = max(0.0, _quantize_time(note.start, tempo))
+        key = (note.pitch, round(q_start, 6))
+        if key not in quantized or note.velocity > quantized[key].velocity:
+            note.start = q_start
+            note.end = q_start + _NOTE_DURATION_SEC
+            quantized[key] = note
+
+    midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
+    drum_track = pretty_midi.Instrument(program=0, is_drum=True, name="Drums")
+    drum_track.notes = sorted(quantized.values(), key=lambda note: note.start)
     midi.instruments.append(drum_track)
     midi.write(os.path.join(song_dir, MIDI_FILENAME))
 

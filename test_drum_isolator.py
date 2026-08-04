@@ -21,6 +21,18 @@ def _hits(count, hit_ms=80, gap_ms=400, freq=200):
     return track
 
 
+def _click_track(bpm, beats, hit_ms=30, freq=1000):
+    """A steady metronome-like click at an exact tempo, for exercising tempo
+    detection and grid quantization against a known-correct answer."""
+    interval_ms = 60000.0 / bpm
+    gap_ms = interval_ms - hit_ms
+    beat_audio = Sine(freq).to_audio_segment(duration=hit_ms).fade_out(hit_ms // 2)
+    track = AudioSegment.silent(duration=0)
+    for _ in range(beats):
+        track += beat_audio + AudioSegment.silent(duration=int(gap_ms))
+    return track
+
+
 class TestMapDrumsepStemName(unittest.TestCase):
     def test_maps_english_names(self):
         self.assertEqual(drum_isolator._map_drumsep_stem_name("kick.wav"), "kick")
@@ -158,6 +170,34 @@ class TestDetectNoteEvents(unittest.TestCase):
         self.assertEqual(notes, [])
 
 
+class TestDetectTempo(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_detects_tempo_of_a_steady_click_track(self):
+        wav_path = os.path.join(self.tmp_dir, "drums.wav")
+        _click_track(bpm=120, beats=24).export(wav_path, format="wav")
+
+        tempo = drum_isolator._detect_tempo(wav_path)
+
+        # Octave errors (reading half or double the real tempo) are a known
+        # limitation of automatic tempo detection, so accept any of those
+        # instead of requiring an exact match to 120.
+        ratio = tempo / 120.0
+        self.assertTrue(any(abs(ratio - r) < 0.05 for r in (0.5, 1.0, 2.0)), tempo)
+
+
+class TestQuantizeTime(unittest.TestCase):
+    def test_snaps_to_the_nearest_sixteenth_note_at_120bpm(self):
+        # At 120 BPM a quarter note is 0.5s, so a 16th note is 0.125s.
+        self.assertAlmostEqual(drum_isolator._quantize_time(0.11, 120.0), 0.125)
+        self.assertAlmostEqual(drum_isolator._quantize_time(0.06, 120.0), 0.0)
+        self.assertAlmostEqual(drum_isolator._quantize_time(0.20, 120.0), 0.25)
+
+
 class TestWriteDrumMidi(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
@@ -185,6 +225,21 @@ class TestWriteDrumMidi(unittest.TestCase):
         # Notes should be written in start-time order.
         starts = [note.start for note in midi.instruments[0].notes]
         self.assertEqual(starts, sorted(starts))
+
+    def test_notes_are_snapped_to_the_detected_tempo_grid(self):
+        _click_track(bpm=120, beats=24).export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
+        _hits(4).export(os.path.join(self.tmp_dir, "kick.wav"), format="wav")
+
+        drum_isolator._write_drum_midi(self.tmp_dir)
+
+        import pretty_midi
+        midi = pretty_midi.PrettyMIDI(os.path.join(self.tmp_dir, drum_isolator.MIDI_FILENAME))
+        _, tempi = midi.get_tempo_changes()
+        tempo = tempi[0]
+        grid_sec = 60.0 / tempo / 4
+        for note in midi.instruments[0].notes:
+            remainder = note.start % grid_sec
+            self.assertLess(min(remainder, grid_sec - remainder), 1e-6, note.start)
 
 
 class TestTrimLeadingSilence(unittest.TestCase):
