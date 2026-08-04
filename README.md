@@ -72,12 +72,15 @@ python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIS
 
 For each song this produces a `Drums/<Song Title>/` folder containing
 `drums.wav` (the full drum mix), `kick.wav`, `snare.wav`, `toms.wav`,
-`cymbals_hihat.wav`, and `drums.mid` — a single combined MIDI file built by
+`cymbals.wav`, and `drums.mid` — a single combined MIDI file built by
 detecting hits in each isolated stem and writing them all onto one drum
 track, using the same note numbers as Ableton's default Drum Rack
-(kick=36, snare=38, hi-hat/cymbals=42, toms=45). Drag `drums.mid` straight
-onto a MIDI track with a drum rack loaded — no per-stem conversion or
-manual combining needed.
+(kick=36, snare=38, cymbals=40, toms=45). Drag `drums.mid` straight onto a
+MIDI track with a drum rack loaded — no per-stem conversion or manual
+combining needed. Any dead air or drum-less intro is trimmed off the front
+first (reusing the same intro-cut detection as the sanitizer), so both the
+stems and the MIDI start right on beat 1 instead of however many seconds
+into the file the original intro happened to be.
 
 Hi-hat and cymbals come out bundled together as one stem (and one MIDI
 note) for now — separating those two cleanly needs a heavier model that

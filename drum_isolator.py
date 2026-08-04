@@ -4,7 +4,8 @@ at splitting it into individual kit pieces (kick/snare/toms), with cymbals
 and hi-hat still bundled together as one file for now (the free local model
 this uses doesn't separate those two yet), and a combined drums.mid built by
 detecting hits in each isolated stem — no manual per-stem MIDI conversion
-or combining needed."""
+or combining needed. Any dead air or drum-less intro is trimmed off the
+front first, so the stems and MIDI both start on beat 1."""
 
 from __future__ import annotations
 
@@ -18,6 +19,9 @@ import tempfile
 import librosa
 import numpy as np
 import pretty_midi
+from pydub import AudioSegment
+
+import song_sanitizer
 
 DRUMS_DIR_NAME = "Drums"
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
@@ -32,20 +36,20 @@ _DRUMSEP_MODEL_NAME = "49469ca8"
 _DRUMSEP_GDRIVE_FILE_ID = "1-Dm666ScPkg8Gt2-lK3Ua0xOudWHZBGC"
 _DRUMSEP_MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drumsep_model")
 
-_STEM_NAMES = ("drums.wav", "kick.wav", "snare.wav", "toms.wav", "cymbals_hihat.wav")
+_STEM_NAMES = ("drums.wav", "kick.wav", "snare.wav", "toms.wav", "cymbals.wav")
 
 MIDI_FILENAME = "drums.mid"
 _NOTE_DURATION_SEC = 0.05
 
-# GM drum map notes, matching Ableton's own default Drum Rack mapping — a
+# Drum map notes, matching Ableton's own default Drum Rack mapping — a
 # MIDI file built from these can be dropped straight onto a stock drum rack.
-# cymbals_hihat and toms are each a single note for now since those stems
-# aren't split any further than one file per instrument group.
+# cymbals and toms are each a single note for now since those stems aren't
+# split any further than one file per instrument group.
 _MIDI_NOTE_MAP = {
-    "kick": 36,           # Bass Drum 1
-    "snare": 38,          # Acoustic Snare
-    "cymbals_hihat": 42,  # Closed Hi-Hat
-    "toms": 45,           # Low Tom
+    "kick": 36,     # Bass Drum 1
+    "snare": 38,    # Acoustic Snare
+    "cymbals": 40,  # combined cymbals/hi-hat stem
+    "toms": 45,     # Low Tom
 }
 
 _EXPECTED_OUTPUTS = _STEM_NAMES + (MIDI_FILENAME,)
@@ -63,7 +67,7 @@ def _map_drumsep_stem_name(filename: str) -> str | None:
     if "tom" in lowered:
         return "toms"
     if "cymbal" in lowered or "platillo" in lowered or "hihat" in lowered or "hi-hat" in lowered or "hh" in lowered:
-        return "cymbals_hihat"
+        return "cymbals"
     return None
 
 
@@ -147,10 +151,27 @@ def _write_drum_midi(song_dir: str) -> None:
     midi.write(os.path.join(song_dir, MIDI_FILENAME))
 
 
+def _trim_leading_silence(drums_wav_path: str) -> str:
+    """Cut any dead air (or a quiet, drum-less intro) off the front of the
+    isolated drums stem, reusing song_sanitizer's own intro-cut detection so
+    this lines up with how the song's own intro gets trimmed — otherwise the
+    first real hit lands however many seconds into the file the original
+    intro happened to be, instead of on beat 1. Returns the (possibly
+    unchanged) path to the trimmed file, written next to the original."""
+    audio = AudioSegment.from_wav(drums_wav_path)
+    cut_ms = song_sanitizer._find_cut_from_start(audio, audio.dBFS)
+    if not (0 < cut_ms < len(audio)):
+        return drums_wav_path
+    trimmed = song_sanitizer.trim(audio, cut_ms, None)
+    trimmed_path = os.path.join(os.path.dirname(drums_wav_path), "drums_trimmed.wav")
+    trimmed.export(trimmed_path, format="wav")
+    return trimmed_path
+
+
 def isolate_drums(mp3_path: str, drums_root: str) -> bool:
-    """Produce drums.wav, kick.wav, snare.wav, toms.wav, cymbals_hihat.wav,
-    and a combined drums.mid for a single song under drums_root/<title>/.
-    Returns False (skipped) if all of those already exist."""
+    """Produce drums.wav, kick.wav, snare.wav, toms.wav, cymbals.wav, and a
+    combined drums.mid for a single song under drums_root/<title>/. Returns
+    False (skipped) if all of those already exist."""
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = os.path.join(drums_root, title)
 
@@ -163,6 +184,7 @@ def isolate_drums(mp3_path: str, drums_root: str) -> bool:
     try:
         drums_stem_dir = _run_demucs(mp3_path, tmp_dir, _HTDEMUCS_MODEL, two_stems="drums")
         drums_wav = os.path.join(drums_stem_dir, "drums.wav")
+        drums_wav = _trim_leading_silence(drums_wav)
 
         os.makedirs(song_dir, exist_ok=True)
         shutil.copy(drums_wav, os.path.join(song_dir, "drums.wav"))
