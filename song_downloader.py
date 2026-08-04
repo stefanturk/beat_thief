@@ -167,7 +167,7 @@ def main() -> None:
         "mode",
         nargs="?",
         choices=["drums"],
-        help="Pass 'drums' to also isolate drum stems (kick/snare/toms/cymbals) for each song. Slow, off by default.",
+        help="Pass 'drums' to also isolate each song's drums (drums.wav + drums.mid). Slow, off by default.",
     )
     args = parser.parse_args()
     args.drums = args.mode == "drums"

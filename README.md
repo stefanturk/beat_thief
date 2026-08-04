@@ -62,25 +62,23 @@ Duplicate downloads that get found and removed are moved into a visible
 
 ## Isolating drums (optional, slow)
 
-Pass `drums` to also split each song's drums out into individual stems —
-useful if you want to import them into a DAW (e.g. Ableton) to rebuild a
-digitized version of the drum performance:
+Pass `drums` to also pull each song's drums out on their own — useful if
+you want to import them into a DAW (e.g. Ableton) to rebuild a digitized
+version of the drum performance:
 
 ```
 python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums
 ```
 
 For each song this produces a `Drums/<Song Title>/` folder containing
-`drums.wav` (the full drum mix), `kick.wav`, `snare.wav`, `toms.wav`,
-`cymbals.wav`, and `drums.mid` — a single combined MIDI file built by
-detecting hits in each isolated stem and writing them all onto one drum
-track, using the same note numbers as Ableton's default Drum Rack
-(kick=36, snare=38, cymbals=40, toms=45). Drag `drums.mid` straight onto a
-MIDI track with a drum rack loaded — no per-stem conversion or manual
-combining needed. Any dead air or drum-less intro is trimmed off the front
-first (reusing the same intro-cut detection as the sanitizer), so both the
-stems and the MIDI start right on beat 1 instead of however many seconds
-into the file the original intro happened to be.
+`drums.wav` (the isolated drum mix) and `drums.mid` — a MIDI file built by
+detecting hits directly in `drums.wav` and writing them all onto one drum
+track, using Ableton's default Drum Rack note for a drum hit (36). Drag
+`drums.mid` straight onto a MIDI track with a drum rack loaded. Any dead
+air or drum-less intro is trimmed off the front first (reusing the same
+intro-cut detection as the sanitizer), so both the wav and the MIDI start
+right on beat 1 instead of however many seconds into the file the original
+intro happened to be.
 
 The MIDI file's own tempo is detected, then precisely refined by fitting a
 constant grid through every hit across the whole song (averaging over
@@ -98,15 +96,14 @@ looks twice as fast or half as slow as it should, that's the usual cause;
 halving or doubling the tempo in Ableton fixes it without needing to touch
 the notes.
 
-Hi-hat and cymbals come out bundled together as one stem (and one MIDI
-note) for now — separating those two cleanly needs a heavier model that
-isn't wired up yet. Kick and snare transcribe well since they're clean,
-punchy hits; toms and the cymbals/hi-hat stem are noisier and more likely
-to need cleanup by hand.
+Because every hit lands on the same note, kick/snare/hi-hat aren't told
+apart — expect to manually reassign notes to different drum-rack pads (or
+just play the whole track back as one sampled hit) rather than getting a
+ready-split kit.
 
-This is off by default because it's slow (each song runs through two
-machine-learning models) and downloads a one-time model file the first time
-it's used. It also runs standalone against an existing folder or file:
+This is off by default because it's slow (each song runs through a
+machine-learning model). It also runs standalone against an existing
+folder or file:
 
 ```
 python3 drum_isolator.py ["path/to/folder-or-file.mp3"]

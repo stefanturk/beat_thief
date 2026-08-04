@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Isolate drum stems from downloaded MP3s: a full drums.wav, a first pass
-at splitting it into individual kit pieces (kick/snare/toms), with cymbals
-and hi-hat still bundled together as one file for now (the free local model
-this uses doesn't separate those two yet), and a combined drums.mid built by
-detecting hits in each isolated stem — no manual per-stem MIDI conversion
-or combining needed. Any dead air or drum-less intro is trimmed off the
-front first, so the stems and MIDI both start on beat 1, and the MIDI's own
-tempo is detected and then precisely refined against every hit across the
-whole song, so it actually lands on the grid on import instead of at the
-wrong BPM."""
+"""Isolate a song's drums from downloaded MP3s: a drums.wav (the full drum
+mix, pulled out of the song with Demucs) and a drums.mid built by detecting
+hits directly in it — no manual conversion needed. Any dead air or drum-less
+intro is trimmed off the front first, so the wav and MIDI both start on beat
+1, and the MIDI's own tempo is detected and then precisely refined against
+every hit across the whole song, so it actually lands on the grid on import
+instead of at the wrong BPM."""
 
 from __future__ import annotations
 
@@ -31,69 +28,21 @@ DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downlo
 
 _HTDEMUCS_MODEL = "htdemucs"
 
-# drumsep (github.com/inagoy/drumsep) is just the standard `demucs` CLI
-# pointed at a custom Hybrid-Demucs checkpoint. Its install script downloads
-# that checkpoint from Google Drive into a local "model" repo directory,
-# which we mirror here rather than any separate inference code.
-_DRUMSEP_MODEL_NAME = "49469ca8"
-_DRUMSEP_GDRIVE_FILE_ID = "1-Dm666ScPkg8Gt2-lK3Ua0xOudWHZBGC"
-_DRUMSEP_MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "drumsep_model")
-
-_STEM_NAMES = ("drums.wav", "kick.wav", "snare.wav", "toms.wav", "cymbals.wav")
-
+DRUMS_WAV_FILENAME = "drums.wav"
 MIDI_FILENAME = "drums.mid"
 _NOTE_DURATION_SEC = 0.05
 
-# Drum map notes, matching Ableton's own default Drum Rack mapping — a
-# MIDI file built from these can be dropped straight onto a stock drum rack.
-# cymbals and toms are each a single note for now since those stems aren't
-# split any further than one file per instrument group.
-_MIDI_NOTE_MAP = {
-    "kick": 36,     # Bass Drum 1
-    "snare": 38,    # Acoustic Snare
-    "cymbals": 40,  # combined cymbals/hi-hat stem
-    "toms": 45,     # Low Tom
-}
+# Ableton's default Drum Rack "Bass Drum 1" note. Without per-instrument
+# stems there's no way to tell a kick hit from a snare hit apart, so every
+# detected hit is written to this single note.
+_DRUM_HIT_NOTE = 36
 
-_EXPECTED_OUTPUTS = _STEM_NAMES + (MIDI_FILENAME,)
+_EXPECTED_OUTPUTS = (DRUMS_WAV_FILENAME, MIDI_FILENAME)
 
 
-def _map_drumsep_stem_name(filename: str) -> str | None:
-    """The drumsep checkpoint's own stem filenames aren't documented in
-    English (its README describes them as Bombo/Redoblante/Platillos/Toms),
-    so match loosely on either language instead of assuming one exact name."""
-    lowered = filename.lower()
-    if "kick" in lowered or "bombo" in lowered:
-        return "kick"
-    if "snare" in lowered or "redoblante" in lowered or "caja" in lowered:
-        return "snare"
-    if "tom" in lowered:
-        return "toms"
-    if "cymbal" in lowered or "platillo" in lowered or "hihat" in lowered or "hi-hat" in lowered or "hh" in lowered:
-        return "cymbals"
-    return None
-
-
-def _ensure_drumsep_model() -> None:
-    if os.path.isdir(_DRUMSEP_MODEL_DIR) and os.listdir(_DRUMSEP_MODEL_DIR):
-        return
-    print("  Downloading the kit-piece separation model (one-time)...")
-    os.makedirs(_DRUMSEP_MODEL_DIR, exist_ok=True)
-    try:
-        subprocess.run(
-            [sys.executable, "-m", "gdown", _DRUMSEP_GDRIVE_FILE_ID, "-O", _DRUMSEP_MODEL_DIR + os.sep],
-            check=True,
-        )
-    except Exception:
-        shutil.rmtree(_DRUMSEP_MODEL_DIR, ignore_errors=True)
-        raise
-
-
-def _run_demucs(input_path: str, out_dir: str, model_name: str, repo: str | None = None, two_stems: str | None = None) -> str:
+def _run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | None = None) -> str:
     """Run demucs and return the directory containing the separated stems."""
     cmd = [sys.executable, "-m", "demucs", "-n", model_name, "-o", out_dir]
-    if repo:
-        cmd += ["--repo", repo]
     if two_stems:
         cmd += ["--two-stems", two_stems]
     cmd.append(input_path)
@@ -106,13 +55,11 @@ _VELOCITY_WINDOW_SEC = 0.03
 
 
 def _detect_note_events(wav_path: str, midi_note: int) -> list[pretty_midi.Note]:
-    """Detect hit onsets in a single isolated drum stem and turn each one
-    into a MIDI note. This is a much easier problem than transcribing drums
-    from a full mix — the stem already isolates one instrument, so a plain
-    onset detector does a solid job on timing.
+    """Detect hit onsets in the isolated drum mix and turn each one into a
+    MIDI note.
 
     Velocity is derived from the waveform's peak amplitude just after each
-    onset, normalized against the loudest hit in the stem — not from the
+    onset, normalized against the loudest hit in the file — not from the
     onset-strength envelope's own peak, which is dominated by rare outlier
     spikes (e.g. a single unusually sharp transient) and made everything
     else round down to the minimum velocity when used directly."""
@@ -148,9 +95,8 @@ _REFINEMENT_TOLERANCE = 0.15  # fraction of a grid unit a gap may be off by and 
 
 
 def _detect_tempo(drums_wav_path: str) -> float:
-    """Rough tempo estimate from the full isolated drums stem (a clearer,
-    more periodic signal to track than any single kit piece). This alone is
-    only accurate to within a few BPM — good enough as a starting point for
+    """Rough tempo estimate from the isolated drums stem. This alone is only
+    accurate to within a few BPM — good enough as a starting point for
     _refine_tempo(), not on its own precise enough to import on the grid."""
     y, sr = librosa.load(drums_wav_path, sr=None, mono=True)
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
@@ -236,20 +182,15 @@ def _refine_tempo(onset_times: np.ndarray, initial_tempo: float) -> float:
 
 
 def _write_drum_midi(song_dir: str) -> None:
-    """Combine hits detected across all the isolated stems into a single
-    drums.mid, so there's one file to drag onto one MIDI track instead of
-    converting and merging each stem by hand. Notes keep their raw
-    onset-detected times (no quantizing/snapping) — instead, the file's own
-    tempo is detected and then precisely refined against every hit in the
-    song, so the grid itself lines up with the recording on import."""
-    drums_wav = os.path.join(song_dir, "drums.wav")
+    """Detect hits in drums.wav and write them all to a single drums.mid
+    track. Notes keep their raw onset-detected times (no quantizing/
+    snapping) — instead, the file's own tempo is detected and then
+    precisely refined against every hit in the song, so the grid itself
+    lines up with the recording on import."""
+    drums_wav = os.path.join(song_dir, DRUMS_WAV_FILENAME)
     rough_tempo = _detect_tempo(drums_wav) if os.path.exists(drums_wav) else _DEFAULT_TEMPO
 
-    all_notes = []
-    for stem_name, midi_note in _MIDI_NOTE_MAP.items():
-        wav_path = os.path.join(song_dir, stem_name + ".wav")
-        if os.path.exists(wav_path):
-            all_notes.extend(_detect_note_events(wav_path, midi_note))
+    all_notes = _detect_note_events(drums_wav, _DRUM_HIT_NOTE) if os.path.exists(drums_wav) else []
 
     onset_times = np.array([note.start for note in all_notes], dtype=np.float64)
     tempo = _refine_tempo(onset_times, rough_tempo)
@@ -279,14 +220,13 @@ def _trim_leading_silence(drums_wav_path: str) -> str:
 
 
 def isolate_drums(mp3_path: str, drums_root: str) -> bool:
-    """Produce drums.wav, kick.wav, snare.wav, toms.wav, cymbals.wav, and a
-    combined drums.mid for a single song under drums_root/<title>/. Returns
-    False (skipped) if all of those already exist."""
+    """Produce drums.wav and a drums.mid for a single song under
+    drums_root/<title>/. Returns False (skipped) if both already exist."""
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = os.path.join(drums_root, title)
 
     if os.path.isdir(song_dir) and all(os.path.exists(os.path.join(song_dir, f)) for f in _EXPECTED_OUTPUTS):
-        print(f"{title}: drum stems already exist, nothing to do.")
+        print(f"{title}: drums already isolated, nothing to do.")
         return False
 
     print(f"{title}: isolating drums (this can take a few minutes)...")
@@ -297,23 +237,14 @@ def isolate_drums(mp3_path: str, drums_root: str) -> bool:
         drums_wav = _trim_leading_silence(drums_wav)
 
         os.makedirs(song_dir, exist_ok=True)
-        shutil.copy(drums_wav, os.path.join(song_dir, "drums.wav"))
+        shutil.copy(drums_wav, os.path.join(song_dir, DRUMS_WAV_FILENAME))
 
-        print(f"{title}: splitting into kick/snare/toms/cymbals...")
-        _ensure_drumsep_model()
-        kit_stem_dir = _run_demucs(drums_wav, tmp_dir, _DRUMSEP_MODEL_NAME, repo=_DRUMSEP_MODEL_DIR)
-
-        for filename in os.listdir(kit_stem_dir):
-            our_name = _map_drumsep_stem_name(filename)
-            if our_name:
-                shutil.copy(os.path.join(kit_stem_dir, filename), os.path.join(song_dir, our_name + ".wav"))
-
-        print(f"{title}: transcribing stems to MIDI...")
+        print(f"{title}: transcribing to MIDI...")
         _write_drum_midi(song_dir)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    print(f"{title}: drum stems and MIDI saved to {song_dir}")
+    print(f"{title}: drums.wav and drums.mid saved to {song_dir}")
     return True
 
 
@@ -350,7 +281,7 @@ def isolate_drums_for_path(path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Isolate drum stems (kick/snare/toms/cymbals) from downloaded MP3s."
+        description="Isolate drums (drums.wav + drums.mid) from downloaded MP3s."
     )
     parser.add_argument(
         "path",

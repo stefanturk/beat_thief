@@ -34,27 +34,6 @@ def _click_track(bpm, beats, hit_ms=30, freq=1000):
     return track
 
 
-class TestMapDrumsepStemName(unittest.TestCase):
-    def test_maps_english_names(self):
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("kick.wav"), "kick")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("snare.wav"), "snare")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("toms.wav"), "toms")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("cymbals.wav"), "cymbals")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("hihat.wav"), "cymbals")
-
-    def test_maps_spanish_checkpoint_names(self):
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("bombo.wav"), "kick")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("redoblante.wav"), "snare")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("caja.wav"), "snare")
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("platillos.wav"), "cymbals")
-
-    def test_case_insensitive(self):
-        self.assertEqual(drum_isolator._map_drumsep_stem_name("KICK.WAV"), "kick")
-
-    def test_unrecognized_name_returns_none(self):
-        self.assertIsNone(drum_isolator._map_drumsep_stem_name("mystery.wav"))
-
-
 class TestIsolateDrums(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
@@ -66,19 +45,14 @@ class TestIsolateDrums(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def _fake_run_demucs(self, input_path, out_dir, model_name, repo=None, two_stems=None):
+    def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None):
         # Mimic demucs's own output layout well enough for isolate_drums to
         # find what it's looking for, without actually running any model.
         track_name = os.path.splitext(os.path.basename(input_path))[0]
         stem_dir = os.path.join(out_dir, model_name, track_name)
         os.makedirs(stem_dir, exist_ok=True)
-        if two_stems == "drums":
-            with open(os.path.join(stem_dir, "drums.wav"), "wb") as f:
-                f.write(b"drums")
-        else:
-            for name in ("bombo.wav", "redoblante.wav", "toms.wav", "platillos.wav"):
-                with open(os.path.join(stem_dir, name), "wb") as f:
-                    f.write(name.encode())
+        with open(os.path.join(stem_dir, "drums.wav"), "wb") as f:
+            f.write(b"drums")
         return stem_dir
 
     def _fake_write_drum_midi(self, song_dir):
@@ -88,10 +62,9 @@ class TestIsolateDrums(unittest.TestCase):
             f.write(b"midi")
 
     @mock.patch("drum_isolator._write_drum_midi")
-    @mock.patch("drum_isolator._ensure_drumsep_model")
     @mock.patch("drum_isolator._trim_leading_silence", side_effect=lambda path: path)
     @mock.patch("drum_isolator._run_demucs")
-    def test_produces_all_stems_and_midi(self, mock_run_demucs, mock_trim, mock_ensure_model, mock_write_midi):
+    def test_produces_drums_wav_and_midi(self, mock_run_demucs, mock_trim, mock_write_midi):
         mock_run_demucs.side_effect = self._fake_run_demucs
         mock_write_midi.side_effect = self._fake_write_drum_midi
 
@@ -101,12 +74,10 @@ class TestIsolateDrums(unittest.TestCase):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         for name in drum_isolator._EXPECTED_OUTPUTS:
             self.assertTrue(os.path.exists(os.path.join(song_dir, name)), name)
-        mock_ensure_model.assert_called_once()
         mock_write_midi.assert_called_once_with(song_dir)
 
-    @mock.patch("drum_isolator._ensure_drumsep_model")
     @mock.patch("drum_isolator._run_demucs")
-    def test_skips_when_all_outputs_already_exist(self, mock_run_demucs, mock_ensure_model):
+    def test_skips_when_all_outputs_already_exist(self, mock_run_demucs):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         os.makedirs(song_dir)
         for name in drum_isolator._EXPECTED_OUTPUTS:
@@ -117,18 +88,15 @@ class TestIsolateDrums(unittest.TestCase):
 
         self.assertFalse(result)
         mock_run_demucs.assert_not_called()
-        mock_ensure_model.assert_not_called()
 
     @mock.patch("drum_isolator._write_drum_midi")
-    @mock.patch("drum_isolator._ensure_drumsep_model")
     @mock.patch("drum_isolator._trim_leading_silence", side_effect=lambda path: path)
     @mock.patch("drum_isolator._run_demucs")
-    def test_reruns_when_the_midi_file_is_missing(self, mock_run_demucs, mock_trim, mock_ensure_model, mock_write_midi):
+    def test_reruns_when_the_midi_file_is_missing(self, mock_run_demucs, mock_trim, mock_write_midi):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         os.makedirs(song_dir)
-        for name in drum_isolator._STEM_NAMES:
-            with open(os.path.join(song_dir, name), "wb") as f:
-                f.write(b"x")
+        with open(os.path.join(song_dir, drum_isolator.DRUMS_WAV_FILENAME), "wb") as f:
+            f.write(b"x")
         # drums.mid missing
 
         mock_run_demucs.side_effect = self._fake_run_demucs
@@ -149,7 +117,7 @@ class TestDetectNoteEvents(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_detects_roughly_one_note_per_hit(self):
-        wav_path = os.path.join(self.tmp_dir, "kick.wav")
+        wav_path = os.path.join(self.tmp_dir, "drums.wav")
         _hits(4).export(wav_path, format="wav")
 
         notes = drum_isolator._detect_note_events(wav_path, midi_note=36)
@@ -221,10 +189,8 @@ class TestWriteDrumMidi(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def test_combines_all_present_stems_into_one_file(self):
-        _hits(3).export(os.path.join(self.tmp_dir, "kick.wav"), format="wav")
-        _hits(2, freq=800).export(os.path.join(self.tmp_dir, "snare.wav"), format="wav")
-        # toms.wav / cymbals.wav intentionally absent
+    def test_writes_notes_for_every_detected_hit(self):
+        _hits(5).export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
 
         drum_isolator._write_drum_midi(self.tmp_dir)
 
@@ -236,17 +202,26 @@ class TestWriteDrumMidi(unittest.TestCase):
         self.assertEqual(len(midi.instruments), 1)
         self.assertTrue(midi.instruments[0].is_drum)
         pitches = {note.pitch for note in midi.instruments[0].notes}
-        self.assertTrue(pitches.issubset({36, 38}))
+        self.assertEqual(pitches, {36})
         self.assertGreater(len(midi.instruments[0].notes), 0)
         # Notes should be written in start-time order.
         starts = [note.start for note in midi.instruments[0].notes]
         self.assertEqual(starts, sorted(starts))
 
+    def test_missing_drums_wav_produces_an_empty_midi_file(self):
+        drum_isolator._write_drum_midi(self.tmp_dir)
+
+        import pretty_midi
+        # An instrument with zero notes isn't written back out by pretty_midi
+        # on round-trip, so the file legitimately has no instruments at all.
+        midi = pretty_midi.PrettyMIDI(os.path.join(self.tmp_dir, drum_isolator.MIDI_FILENAME))
+        notes = [note for instrument in midi.instruments for note in instrument.notes]
+        self.assertEqual(notes, [])
+
     def test_embeds_a_precisely_refined_tempo_without_snapping_notes(self):
         true_bpm = 123.4
         click = _click_track(bpm=true_bpm, beats=200)
         click.export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
-        click.export(os.path.join(self.tmp_dir, "kick.wav"), format="wav")
 
         drum_isolator._write_drum_midi(self.tmp_dir)
 
@@ -268,10 +243,10 @@ class TestWriteDrumMidi(unittest.TestCase):
         # rounds absolute times to the nearest tick (a couple of ms here),
         # regardless of any snapping logic - that's the file format, not us.
         expected_starts = sorted(n.start for n in drum_isolator._detect_note_events(
-            os.path.join(self.tmp_dir, "kick.wav"), midi_note=36))
-        actual_kick_starts = sorted(n.start for n in midi.instruments[0].notes if n.pitch == 36)
-        self.assertEqual(len(actual_kick_starts), len(expected_starts))
-        for actual, expected in zip(actual_kick_starts, expected_starts):
+            os.path.join(self.tmp_dir, "drums.wav"), midi_note=36))
+        actual_starts = sorted(n.start for n in midi.instruments[0].notes)
+        self.assertEqual(len(actual_starts), len(expected_starts))
+        for actual, expected in zip(actual_starts, expected_starts):
             self.assertAlmostEqual(actual, expected, delta=0.01)
 
 
