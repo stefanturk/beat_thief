@@ -62,12 +62,12 @@ Duplicate downloads that get found and removed are moved into a visible
 
 ## Isolating drums (optional, slow)
 
-Pass `--drums` to also split each song's drums out into individual stems —
+Pass `drums` to also split each song's drums out into individual stems —
 useful if you want to import them into a DAW (e.g. Ableton) to rebuild a
 digitized version of the drum performance:
 
 ```
-python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" --drums
+python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums
 ```
 
 For each song this produces a `Drums/<Song Title>/` folder containing
