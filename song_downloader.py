@@ -164,11 +164,13 @@ def main() -> None:
         help=f"Output directory (default: {default_output})",
     )
     parser.add_argument(
-        "--drums",
-        action="store_true",
-        help="Also isolate drum stems (kick/snare/toms/cymbals) for each song. Slow, off by default.",
+        "mode",
+        nargs="?",
+        choices=["drums"],
+        help="Pass 'drums' to also isolate drum stems (kick/snare/toms/cymbals) for each song. Slow, off by default.",
     )
     args = parser.parse_args()
+    args.drums = args.mode == "drums"
 
     try:
         result = download_playlist(args.url, args.output)
