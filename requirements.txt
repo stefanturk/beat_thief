@@ -5,6 +5,5 @@ demucs
 torch<2.6
 torchaudio<2.6
 soundfile
-gdown
 librosa
 pretty_midi
