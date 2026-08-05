@@ -5,7 +5,9 @@ Nothing in here is specific to any one instrument."""
 
 from __future__ import annotations
 
+import json
 import os
+import pty
 import subprocess
 import sys
 import tempfile
@@ -16,18 +18,132 @@ from pydub import AudioSegment
 
 import song_sanitizer
 
+# Demucs prints these on every run regardless of how many instruments are
+# being isolated - useful the first time, just noise on every one after
+# that, so they're filtered out of the passed-through output below.
+_DEMUCS_NOISE_PATTERNS = (
+    "Selected model is a bag of",
+    "Separated tracks will be stored in",
+)
+
 
 def run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | None = None) -> str:
-    """Run demucs and return the directory containing the separated stems."""
+    """Run demucs and return the directory containing the separated stems.
+
+    Demucs' own progress bar (tqdm) only redraws in place over \\r when it
+    thinks it's talking to a real terminal - piped through a plain
+    subprocess pipe it decides it isn't, and prints a brand new line per
+    update instead, turning a single progress bar into a wall of them. A
+    pty makes tqdm see a real terminal so it draws one line that updates in
+    place, same as running demucs directly in a shell would."""
     cmd = [sys.executable, "-m", "demucs", "-n", model_name, "-o", out_dir]
     if two_stems:
         cmd += ["--two-stems", two_stems]
     cmd.append(input_path)
-    # Demucs prints its own progress bar as it separates - leave stdout/
-    # stderr connected so the user sees it instead of a long silent wait.
-    subprocess.run(cmd, check=True)
+
+    master_fd, slave_fd = pty.openpty()
+    proc = subprocess.Popen(cmd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
+    os.close(slave_fd)
+
+    buf = ""
+    try:
+        while True:
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk.decode(errors="ignore")
+            while True:
+                cut = None
+                for sep in ("\r\n", "\n", "\r"):
+                    pos = buf.find(sep)
+                    if pos != -1 and (cut is None or pos < cut[0]):
+                        cut = (pos, sep)
+                if cut is None:
+                    break
+                pos, sep = cut
+                line, buf = buf[:pos], buf[pos + len(sep):]
+                if any(pattern in line for pattern in _DEMUCS_NOISE_PATTERNS):
+                    continue
+                sys.stdout.write(line + sep)
+                sys.stdout.flush()
+    finally:
+        os.close(master_fd)
+    proc.wait()
+    if buf and not any(pattern in buf for pattern in _DEMUCS_NOISE_PATTERNS):
+        sys.stdout.write(buf)
+        sys.stdout.flush()
+
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+
     track_name = os.path.splitext(os.path.basename(input_path))[0]
     return os.path.join(out_dir, model_name, track_name)
+
+
+ISOLATED_SUFFIX = " (Isolated)"
+
+
+def song_output_dir(mp3_path: str) -> str:
+    """The shared folder a song's isolated instruments (drums, bass, ...)
+    are all written into, next to the source mp3 - one folder per song
+    rather than a separate one per instrument, so everything for a song
+    lives together."""
+    title = os.path.splitext(os.path.basename(mp3_path))[0]
+    parent = os.path.dirname(os.path.abspath(mp3_path))
+    return os.path.join(parent, title + ISOLATED_SUFFIX)
+
+
+def has_existing_outputs(song_dir: str, label: str, require_midi: bool) -> bool:
+    """Whether song_dir already has a wav (and, if require_midi, a matching
+    .mid) for the given instrument label (e.g. "Isolated Drums") - matched
+    by the label appearing in the filename, so drums and bass sharing one
+    song_dir don't see each other's files."""
+    if not os.path.isdir(song_dir):
+        return False
+    entries = os.listdir(song_dir)
+    marker = f"({label} at"
+    has_wav = any(marker in f and f.endswith(".wav") for f in entries)
+    if not require_midi:
+        return has_wav
+    has_mid = any(marker in f and f.endswith(".mid") for f in entries)
+    return has_wav and has_mid
+
+
+def clear_stale_outputs(song_dir: str, label: str) -> None:
+    """Remove any previously-produced .wav/.mid files for this instrument
+    label - the filename embeds the tempo, so re-processing with a
+    different tempo would otherwise leave old and new copies side by side.
+    Only touches files matching this label, leaving any other instrument's
+    files in the same shared song_dir alone."""
+    if not os.path.isdir(song_dir):
+        return
+    marker = f"({label} at"
+    for f in os.listdir(song_dir):
+        if marker in f and (f.endswith(".wav") or f.endswith(".mid")):
+            os.remove(os.path.join(song_dir, f))
+
+
+def write_source_marker(song_dir: str, mp3_path: str, marker_filename: str) -> None:
+    stat = os.stat(mp3_path)
+    marker = {"path": os.path.abspath(mp3_path), "size": stat.st_size, "mtime": stat.st_mtime}
+    with open(os.path.join(song_dir, marker_filename), "w") as f:
+        json.dump(marker, f)
+
+
+def source_marker_matches(song_dir: str, mp3_path: str, marker_filename: str) -> bool:
+    """Whether song_dir's existing outputs for this instrument were
+    produced from this exact mp3 (matched on size + mtime), not just from a
+    folder that happens to be named after this song's title."""
+    try:
+        with open(os.path.join(song_dir, marker_filename)) as f:
+            marker = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    stat = os.stat(mp3_path)
+    return marker.get("size") == stat.st_size and marker.get("mtime") == stat.st_mtime
 
 
 _DEFAULT_TEMPO = 120.0
@@ -191,11 +307,20 @@ def _prompt_tempo_choice(windows: list[tuple[float, float, float]]) -> float:
         print(f"  Please enter a number between 1 and {len(windows)}.")
 
 
+_alignment_cache: dict[tuple[str, int, float], tuple[int, float]] = {}
+
+
 def song_alignment(mp3_path: str) -> tuple[int, float]:
     """Compute the beat-1 trim point and tempo once, from the full song mix,
     so every instrument isolated from this song can share the exact same
     time origin and tempo grid instead of each independently (and possibly
     inconsistently) re-deriving its own.
+
+    Cached per source mp3 (by path + size + mtime) for the life of the
+    process: isolating both drums and bass for the same song calls this
+    twice, and without caching a tempo-drift prompt (see
+    _prompt_tempo_choice) would ask the same question about the same song
+    twice in one run.
 
     The trim point reuses song_sanitizer's own intro-cut detection against
     the source mp3 - the same detector that already trims the sanitized
@@ -207,6 +332,14 @@ def song_alignment(mp3_path: str) -> tuple[int, float]:
     onsets rather than any single isolated stem - that way it's available
     regardless of which instruments end up being isolated, and it draws on
     more onset information than any one instrument's onsets alone would."""
+    try:
+        stat = os.stat(mp3_path)
+        cache_key = (os.path.abspath(mp3_path), stat.st_size, stat.st_mtime)
+    except OSError:
+        cache_key = None
+    if cache_key is not None and cache_key in _alignment_cache:
+        return _alignment_cache[cache_key]
+
     audio = AudioSegment.from_file(mp3_path)
     cut_ms = song_sanitizer._find_cut_from_start(audio, audio.dBFS)
     if not (0 < cut_ms < len(audio)):
@@ -243,6 +376,8 @@ def song_alignment(mp3_path: str) -> tuple[int, float]:
             # hang waiting for a choice, just use the beginning of the song.
             tempo = windows[0][2]
 
+    if cache_key is not None:
+        _alignment_cache[cache_key] = (cut_ms, tempo)
     return cut_ms, tempo
 
 

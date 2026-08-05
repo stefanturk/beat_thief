@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """beat_thief: download all songs from a YouTube/YouTube Music playlist as
-MP3s, sanitize them, and optionally isolate drums/bass to MIDI."""
+MP3s, sanitize them, and optionally isolate drums/bass (wav, optionally
+MIDI too)."""
 
 from __future__ import annotations
 
@@ -209,25 +210,31 @@ def main() -> None:
     parser.add_argument(
         "--drums",
         action="store_true",
-        help="Also isolate each song's drums to wav + MIDI. Slow, off by default. Can also be given as a bare 'drums' argument, before or after the URL.",
+        help="Also isolate each song's drums to a wav (see --midi for a .mid too). Slow, off by default. Can also be given as a bare 'drums' argument, before or after the URL.",
     )
     parser.add_argument(
         "--bass",
         action="store_true",
-        help="Also isolate each song's bass to wav + MIDI. Slow, off by default. Can also be given as a bare 'bass' argument, before or after the URL.",
+        help="Also isolate each song's bass to a wav (see --midi for a .mid too). Slow, off by default. Can also be given as a bare 'bass' argument, before or after the URL.",
+    )
+    parser.add_argument(
+        "--midi",
+        action="store_true",
+        help="Also write a MIDI file for each isolated instrument, not just the wav. Only matters alongside --drums/--bass. Can also be given as a bare 'midi' argument.",
     )
 
-    # "drums"/"bass" are accepted bare (no --) too, in any position, since
-    # that's the more natural way to type them - pull those out of argv
-    # before argparse ever sees them, so they don't collide with the url
-    # positional no matter where they appear.
+    # "drums"/"bass"/"midi" are accepted bare (no --) too, in any position,
+    # since that's the more natural way to type them - pull those out of
+    # argv before argparse ever sees them, so they don't collide with the
+    # url positional no matter where they appear.
     raw_args = sys.argv[1:]
-    bare_modes = {tok.lower() for tok in raw_args if tok.lower() in ("drums", "bass")}
-    remaining_args = [tok for tok in raw_args if tok.lower() not in ("drums", "bass")]
+    bare_modes = {tok.lower() for tok in raw_args if tok.lower() in ("drums", "bass", "midi")}
+    remaining_args = [tok for tok in raw_args if tok.lower() not in ("drums", "bass", "midi")]
 
     args = parser.parse_args(remaining_args)
     args.drums = args.drums or "drums" in bare_modes
     args.bass = args.bass or "bass" in bare_modes
+    args.midi = args.midi or "midi" in bare_modes
 
     try:
         result = download_playlist(args.url, args.output)
@@ -282,7 +289,7 @@ def main() -> None:
     if args.drums:
         for filename in isolation_filenames:
             try:
-                drum_isolator.isolate_drums_for_single_file(os.path.join(args.output, filename))
+                drum_isolator.isolate_drums_for_single_file(os.path.join(args.output, filename), write_midi=args.midi)
             except KeyboardInterrupt:
                 print("\nStopped isolating drums. Whatever was already produced is safe.")
                 _exit(130)
@@ -292,7 +299,7 @@ def main() -> None:
     if args.bass:
         for filename in isolation_filenames:
             try:
-                bass_isolator.isolate_bass_for_single_file(os.path.join(args.output, filename))
+                bass_isolator.isolate_bass_for_single_file(os.path.join(args.output, filename), write_midi=args.midi)
             except KeyboardInterrupt:
                 print("\nStopped isolating bass. Whatever was already produced is safe.")
                 _exit(130)
