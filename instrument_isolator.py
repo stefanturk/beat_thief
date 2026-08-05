@@ -23,7 +23,9 @@ def run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | 
     if two_stems:
         cmd += ["--two-stems", two_stems]
     cmd.append(input_path)
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Demucs prints its own progress bar as it separates - leave stdout/
+    # stderr connected so the user sees it instead of a long silent wait.
+    subprocess.run(cmd, check=True)
     track_name = os.path.splitext(os.path.basename(input_path))[0]
     return os.path.join(out_dir, model_name, track_name)
 
@@ -35,15 +37,25 @@ _REFINEMENT_BOOTSTRAP_SPAN = 4  # short first pass, to sharpen the estimate befo
 _REFINEMENT_MAX_SPAN = 64  # how many onsets ahead to pair each onset with in the second pass
 _REFINEMENT_TOLERANCE = 0.15  # fraction of a grid unit a gap may be off by and still count
 
+_TEMPO_WINDOW_SEC = 30.0
+_MIN_ONSETS_FOR_WINDOW_TEMPO = 8  # lower bar than a full-song refinement - a single window has far fewer onsets to work with
+_TEMPO_DRIFT_THRESHOLD_BPM = 0.3  # any two windows differing by at least this much means the song doesn't have one constant tempo
 
-def detect_tempo(wav_path: str) -> float:
-    """Rough tempo estimate from a wav file. This alone is only accurate to
-    within a few BPM - good enough as a starting point for refine_tempo(),
-    not on its own precise enough to import on the grid."""
-    y, sr = librosa.load(wav_path, sr=None, mono=True)
+
+def _rough_tempo(y: np.ndarray, sr: int) -> float:
+    """Array-based rough tempo estimate, only accurate to within a few BPM -
+    good enough as a starting point for refine_tempo(). Split out from
+    detect_tempo() so a window of already-loaded audio can be estimated
+    without round-tripping through disk (see _windowed_tempos)."""
     tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
     tempo = float(np.atleast_1d(tempo)[0])
     return tempo if tempo > 0 else _DEFAULT_TEMPO
+
+
+def detect_tempo(wav_path: str) -> float:
+    """Rough tempo estimate from a wav file - see _rough_tempo."""
+    y, sr = librosa.load(wav_path, sr=None, mono=True)
+    return _rough_tempo(y, sr)
 
 
 def _grid_unit_estimate(onset_times: np.ndarray, unit: float, max_span: int) -> float | None:
@@ -123,6 +135,62 @@ def refine_tempo(onset_times: np.ndarray, initial_tempo: float) -> float:
     return 60.0 / unit / _REFINEMENT_SUBDIVISION
 
 
+def _windowed_tempos(y: np.ndarray, sr: int, onset_times: np.ndarray, song_duration_sec: float, window_sec: float = _TEMPO_WINDOW_SEC) -> list[tuple[float, float, float]]:
+    """Independently estimate and refine a tempo within each fixed-length
+    window of the song, rather than pooling every onset into one global
+    average (which assumes - and hides - a constant tempo throughout).
+
+    Each window gets its own rough estimate (_rough_tempo on just that
+    window's audio) rather than reusing the whole song's rough estimate -
+    reusing a single shared starting guess would make refine_tempo reject
+    a window whose real tempo is too far from it (its grid-fit tolerance
+    is only ~15%), which is exactly the failure mode this exists to catch.
+
+    Returns a list of (window_start_sec, window_end_sec, tempo)."""
+    onset_times = np.asarray(onset_times, dtype=np.float64)
+    windows = []
+    start = 0.0
+    while start < song_duration_sec:
+        end = min(start + window_sec, song_duration_sec)
+        y_slice = y[int(start * sr):int(end * sr)]
+        window_rough = _rough_tempo(y_slice, sr) if y_slice.size else _DEFAULT_TEMPO
+        window_onsets = onset_times[(onset_times >= start) & (onset_times < end)]
+        if window_onsets.size >= _MIN_ONSETS_FOR_WINDOW_TEMPO:
+            tempo = refine_tempo(window_onsets, window_rough)
+        else:
+            tempo = window_rough
+        windows.append((start, end, tempo))
+        start = end
+    return windows
+
+
+def _tempo_drift_detected(windows: list[tuple[float, float, float]], threshold_bpm: float = _TEMPO_DRIFT_THRESHOLD_BPM) -> bool:
+    tempos = [tempo for _, _, tempo in windows]
+    return len(tempos) > 1 and (max(tempos) - min(tempos)) >= threshold_bpm
+
+
+def _prompt_tempo_choice(windows: list[tuple[float, float, float]]) -> float:
+    """Ask which window's tempo to use for the whole song. Defaults to the
+    first (beginning of the song) on a bare Enter, since that's usually
+    what you'd want when looping the export in a DAW."""
+    print("This song's tempo isn't constant throughout - pick which part's tempo to use for the whole export:")
+    for i, (start, end, tempo) in enumerate(windows, start=1):
+        print(f"  {i}. {start:6.1f}s - {end:6.1f}s: {tempo:.3f} BPM")
+    prompt = f"  Which tempo? [1-{len(windows)}, Enter for 1 (the beginning)] "
+    while True:
+        raw = input(prompt).strip()
+        if raw == "":
+            return windows[0][2]
+        try:
+            choice = int(raw)
+        except ValueError:
+            print("  Please enter a number.")
+            continue
+        if 1 <= choice <= len(windows):
+            return windows[choice - 1][2]
+        print(f"  Please enter a number between 1 and {len(windows)}.")
+
+
 def song_alignment(mp3_path: str) -> tuple[int, float]:
     """Compute the beat-1 trim point and tempo once, from the full song mix,
     so every instrument isolated from this song can share the exact same
@@ -162,6 +230,18 @@ def song_alignment(mp3_path: str) -> tuple[int, float]:
         tempo = refine_tempo(onset_times, rough_tempo)
     finally:
         os.remove(tmp_wav)
+
+    song_duration_sec = len(trimmed) / 1000.0
+    windows = _windowed_tempos(y, sr, onset_times, song_duration_sec)
+    if _tempo_drift_detected(windows):
+        drift = max(t for _, _, t in windows) - min(t for _, _, t in windows)
+        print(f"Heads up: this song's tempo drifts by up to {drift:.3f} BPM across its length.")
+        if sys.stdin.isatty():
+            tempo = _prompt_tempo_choice(windows)
+        else:
+            # Not a real terminal (piped input, non-interactive run) - don't
+            # hang waiting for a choice, just use the beginning of the song.
+            tempo = windows[0][2]
 
     return cut_ms, tempo
 

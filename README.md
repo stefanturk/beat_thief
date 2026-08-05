@@ -1,4 +1,4 @@
-# song_downloader
+# beat_thief
 
 Download all songs from a YouTube Music (or YouTube) playlist as MP3s.
 
@@ -16,15 +16,18 @@ Download all songs from a YouTube Music (or YouTube) playlist as MP3s.
 ## Usage
 
 ```
-python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID"
+python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID"
 ```
+
+Quote the URL — playlist/video links usually contain `&`, which your shell
+will otherwise treat as a command separator instead of part of the URL.
 
 Songs are saved to `~/Downloads/Song Downloads` by default, named `Title - Artist.mp3`.
 
 Use a custom output folder:
 
 ```
-python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" -o "My Playlist"
+python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" -o "My Playlist"
 ```
 
 Re-running the script on the same playlist skips songs you've already downloaded (tracked in `.downloaded_archive.txt` in the output folder), so it's safe to re-run as a playlist grows.
@@ -38,11 +41,13 @@ writing proper Title/Artist tags, and removing duplicate downloads. The raw
 download is replaced by the cleaned-up version — you won't end up with two
 copies of the same song.
 
-If a song's intro or outro is quiet but not silent (e.g. a lone instrument or
-ambient sound), it's held for your review at the end of the run — it'll ask
-you to press space when ready, then play exactly the 5 seconds where the
-sanitized song would start or end, and you can choose to cut it, fade it
-instead, keep it as-is, or adjust exactly where the cut happens.
+If a song's intro is quiet but not silent (e.g. a lone instrument or ambient
+sound), it's held for your review at the end of the run — it'll ask you to
+press space when ready, then play exactly the 5 seconds where the sanitized
+song would start, and you can choose to cut it, fade it instead, keep it
+as-is, or adjust exactly where the cut happens. Where the song starts
+matters for beat-1/BPM accuracy, so it's worth a listen; a quiet-but-not-
+silent outro is auto-faded instead, no review needed.
 
 You can also run the cleanup on its own, any time, against a folder or a
 single MP3 file:
@@ -62,13 +67,13 @@ Duplicate downloads that get found and removed are moved into a visible
 
 ## Isolating instruments (optional, slow)
 
-Pass `drums` and/or `bass` to also pull those parts out on their own —
-useful if you want to import them into a DAW (e.g. Ableton) to rebuild a
-digitized version of the performance, or just to understand how a song is
-built:
+Pass `--drums` and/or `--bass` (in either order, before or after the URL)
+to also pull those parts out on their own — useful if you want to import
+them into a DAW (e.g. Ableton) to rebuild a digitized version of the
+performance, or just to understand how a song is built:
 
 ```
-python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass
+python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" --drums --bass
 ```
 
 Every instrument you isolate for a song shares the exact same beat-1 start
@@ -82,9 +87,12 @@ computation looks like in detail.
 ### Drums
 
 For each song this produces a `Drums/<Song Title>/` folder containing
-`drums.wav` (the isolated drum mix) and `drums.mid` — a MIDI file built by
-detecting hits directly in `drums.wav` and writing them all onto one drum
-track. Drag `drums.mid` straight onto a MIDI track with a drum rack loaded.
+`<Song Title> (Isolated Drums at N.NNN BPM).wav` (the isolated drum mix)
+and the matching `.mid` — a MIDI file built by detecting hits directly in
+the wav and writing them all onto one drum track. Drag the `.mid` file
+straight onto a MIDI track with a drum rack loaded; the exact BPM in the
+filename is the same one baked into the MIDI file itself, so it's there to
+read at a glance, not just to look up.
 
 Each hit is guessed as kick, snare, or cymbal/hi-hat from its spectral
 centroid (low-frequency hits are kicks, mid is snare, high is
@@ -96,12 +104,17 @@ and to need some manual cleanup on busier or more layered passages.
 ### Bass
 
 For each song this produces a `Bass/<Song Title>/` folder containing
-`bass.wav` (the isolated bass part) and `bass.mid` — a MIDI file built by
-tracking the bass's pitch directly (bass is monophonic, so this tracks one
-note at a time rather than guessing a fixed drum-rack note per hit) and
-writing the detected notes onto one track. Expect it to do well on a clear,
-single-note bassline and to need cleanup on anything with slides, chords,
-or heavy effects.
+`<Song Title> (Isolated Bass at N.NNN BPM).wav` (the isolated bass part)
+and the matching `.mid` — a MIDI file built by tracking the bass's pitch
+directly (bass is monophonic, so this tracks one note at a time rather than
+guessing a fixed drum-rack note per hit) and writing the detected notes
+onto one track. Expect it to do well on a clear, single-note bassline and
+to need cleanup on anything with slides, chords, or heavy effects.
+
+Before transcription, anything quieter than 5% of the isolated bass track's
+own peak volume is gated out — imperfect stem separation tends to leave a
+low-level noise floor behind that would otherwise get misread as extra,
+spurious notes.
 
 ### The shared beat-1 / tempo grid
 
@@ -125,6 +138,15 @@ it picked very precise, but doesn't fix the octave itself. If the grid
 looks twice as fast or half as slow as it should, that's the usual cause;
 halving or doubling the tempo in Ableton fixes it without needing to touch
 the notes.
+
+If a song's tempo isn't actually constant throughout (a DJ-style transition,
+a tempo-ramped bridge, etc.), this is checked for directly: the song is
+split into ~30 second windows, each with its own independently refined
+tempo, and if any two windows disagree by 0.3 BPM or more you're asked
+which one to use for the whole export (defaulting to the beginning of the
+song on a bare Enter, since that's usually what you want for a loop). This
+only happens interactively — a non-interactive run just uses the beginning
+of the song automatically.
 
 This is off by default because it's slow (each song runs through a
 machine-learning model, once per instrument isolated). Each instrument also

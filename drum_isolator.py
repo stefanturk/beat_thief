@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Isolate a song's drums from downloaded MP3s: a drums.wav (the full drum
-mix, pulled out of the song with Demucs) and a drums.mid built by detecting
-hits directly in it — no manual conversion needed. Both are trimmed and
-tempo-aligned to the same shared song_alignment() as every other isolated
-instrument (see instrument_isolator.py), so drums.mid lines up exactly with
-bass.mid and any future instrument exports from the same song."""
+"""Isolate a song's drums from downloaded MP3s: an isolated drum wav (the
+full drum mix, pulled out of the song with Demucs) and a matching MIDI file
+built by detecting hits directly in it — no manual conversion needed. Both
+are trimmed and tempo-aligned to the same shared song_alignment() as every
+other isolated instrument (see instrument_isolator.py), so the drums MIDI
+lines up exactly with the bass MIDI and any future instrument exports from
+the same song."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -25,9 +27,13 @@ DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downlo
 
 _HTDEMUCS_MODEL = "htdemucs"
 
-DRUMS_WAV_FILENAME = "drums.wav"
-MIDI_FILENAME = "drums.mid"
 _NOTE_DURATION_SEC = 0.05
+
+# Written alongside each song's output files to identify exactly which
+# source mp3 they were produced from - see _source_marker_matches. Doesn't
+# depend on tempo/filename, so it can be checked before song_alignment()
+# (and its slow tempo work + possible interactive drift prompt) ever runs.
+_SOURCE_MARKER_FILENAME = ".source.json"
 
 # Without per-instrument stems there's no ML model telling a kick hit from
 # a snare hit apart anymore, but the mixed drums.wav still carries enough
@@ -54,8 +60,6 @@ _SNARE_MAX_CENTROID_HZ = 2000.0
 _MIN_ONSETS_FOR_RELATIVE_CLASSIFICATION = 12
 _KICK_PERCENTILE = 33  # bottom third of a song's onsets -> kick
 _SNARE_PERCENTILE = 67  # middle third -> snare, top third -> cymbal
-
-_EXPECTED_OUTPUTS = (DRUMS_WAV_FILENAME, MIDI_FILENAME)
 
 
 _VELOCITY_WINDOW_SEC = 0.03
@@ -150,30 +154,80 @@ def _detect_note_events(wav_path: str) -> list[pretty_midi.Note]:
     return notes
 
 
-def _write_drum_midi(song_dir: str, tempo: float) -> None:
-    """Detect hits in drums.wav and write them all to a single drums.mid
-    track, each classified as kick/snare/cymbal (see _detect_note_events).
-    Notes keep their raw onset-detected times (no quantizing/snapping) -
-    tempo comes from the shared song_alignment() (see isolate_drums), not a
-    fresh per-file estimate, so it matches every other instrument exported
-    from the same song."""
-    drums_wav = os.path.join(song_dir, DRUMS_WAV_FILENAME)
-    all_notes = _detect_note_events(drums_wav) if os.path.exists(drums_wav) else []
+def _write_drum_midi(wav_path: str, midi_path: str, tempo: float) -> None:
+    """Detect hits in the isolated drum wav and write them all to a single
+    midi_path track, each classified as kick/snare/cymbal (see
+    _detect_note_events). Notes keep their raw onset-detected times (no
+    quantizing/snapping) - tempo comes from the shared song_alignment()
+    (see isolate_drums), not a fresh per-file estimate, so it matches every
+    other instrument exported from the same song."""
+    all_notes = _detect_note_events(wav_path) if os.path.exists(wav_path) else []
 
     midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
     drum_track = pretty_midi.Instrument(program=0, is_drum=True, name=f"Drums ({round(tempo)})")
     drum_track.notes = sorted(all_notes, key=lambda note: note.start)
     midi.instruments.append(drum_track)
-    midi.write(os.path.join(song_dir, MIDI_FILENAME))
+    midi.write(midi_path)
+
+
+def _output_basename(title: str, tempo: float) -> str:
+    return f"{title} (Isolated Drums at {tempo:.3f} BPM)"
+
+
+def _has_existing_outputs(song_dir: str) -> bool:
+    if not os.path.isdir(song_dir):
+        return False
+    entries = os.listdir(song_dir)
+    return any(f.endswith(".wav") for f in entries) and any(f.endswith(".mid") for f in entries)
+
+
+def _clear_stale_outputs(song_dir: str) -> None:
+    """Remove any previously-produced .wav/.mid files before writing new
+    ones - the filename now embeds the tempo, so re-processing with a
+    different tempo would otherwise leave old and new copies side by side."""
+    if not os.path.isdir(song_dir):
+        return
+    for f in os.listdir(song_dir):
+        if f.endswith(".wav") or f.endswith(".mid"):
+            os.remove(os.path.join(song_dir, f))
+
+
+def _source_marker_path(song_dir: str) -> str:
+    return os.path.join(song_dir, _SOURCE_MARKER_FILENAME)
+
+
+def _write_source_marker(song_dir: str, mp3_path: str) -> None:
+    stat = os.stat(mp3_path)
+    marker = {"path": os.path.abspath(mp3_path), "size": stat.st_size, "mtime": stat.st_mtime}
+    with open(_source_marker_path(song_dir), "w") as f:
+        json.dump(marker, f)
+
+
+def _source_marker_matches(song_dir: str, mp3_path: str) -> bool:
+    """Whether song_dir's existing outputs were produced from this exact
+    mp3 (matched on size + mtime), not just from a folder that happens to
+    be named after this song's title - see isolate_drums for why that
+    distinction matters."""
+    try:
+        with open(_source_marker_path(song_dir)) as f:
+            marker = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    stat = os.stat(mp3_path)
+    return marker.get("size") == stat.st_size and marker.get("mtime") == stat.st_mtime
 
 
 def isolate_drums(mp3_path: str, drums_root: str) -> bool:
-    """Produce drums.wav and a drums.mid for a single song under
-    drums_root/<title>/. Returns False (skipped) if both already exist."""
+    """Produce an isolated drums wav + MIDI for a single song under
+    drums_root/<title>/. Returns False (skipped) if outputs already exist
+    for this exact source mp3 (see _source_marker_matches) - existing
+    outputs whose marker is missing or doesn't match are treated as stale
+    (e.g. a leftover folder from an earlier run or a different file that
+    happened to share this title) and reprocessed rather than trusted."""
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = os.path.join(drums_root, title)
 
-    if os.path.isdir(song_dir) and all(os.path.exists(os.path.join(song_dir, f)) for f in _EXPECTED_OUTPUTS):
+    if _has_existing_outputs(song_dir) and _source_marker_matches(song_dir, mp3_path):
         print(f"{title}: drums already isolated, nothing to do.")
         return False
 
@@ -186,14 +240,19 @@ def isolate_drums(mp3_path: str, drums_root: str) -> bool:
         drums_wav = os.path.join(drums_stem_dir, "drums.wav")
 
         os.makedirs(song_dir, exist_ok=True)
-        instrument_isolator.trim_and_export(drums_wav, trim_ms, os.path.join(song_dir, DRUMS_WAV_FILENAME))
+        _clear_stale_outputs(song_dir)
+        basename = _output_basename(title, tempo)
+        wav_path = os.path.join(song_dir, basename + ".wav")
+        midi_path = os.path.join(song_dir, basename + ".mid")
+        instrument_isolator.trim_and_export(drums_wav, trim_ms, wav_path)
 
         print(f"{title}: transcribing to MIDI...")
-        _write_drum_midi(song_dir, tempo)
+        _write_drum_midi(wav_path, midi_path, tempo)
+        _write_source_marker(song_dir, mp3_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    print(f"{title}: drums.wav and drums.mid saved to {song_dir}")
+    print(f"{title}: {os.path.basename(wav_path)} and {os.path.basename(midi_path)} saved to {song_dir}")
     return True
 
 
@@ -230,7 +289,7 @@ def isolate_drums_for_path(path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Isolate drums (drums.wav + drums.mid) from downloaded MP3s."
+        description="Isolate drums (wav + MIDI) from downloaded MP3s."
     )
     parser.add_argument(
         "path",

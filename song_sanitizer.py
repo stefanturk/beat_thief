@@ -494,6 +494,11 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
                 trim_start_ms = candidate["cut_ms"]
             else:
                 trim_end_ms = candidate["cut_ms"]
+        elif end_key == "end":
+            # Only the start matters for beat-1/BPM accuracy, so an
+            # ambiguous ending is auto-faded rather than held for review —
+            # no snippet playback, no prompt.
+            audio = apply_fade(audio, "end", candidate["cut_ms"])
         else:
             new_flags.append({"filename": filename, "end": end_key, "cut_ms": candidate["cut_ms"]})
 

@@ -73,15 +73,16 @@ class TestIsolateBass(unittest.TestCase):
     def _fake_trim_and_export(self, wav_path, trim_ms, out_path):
         shutil.copy(wav_path, out_path)
 
-    def _fake_write_bass_midi(self, song_dir, tempo):
-        with open(os.path.join(song_dir, bass_isolator.MIDI_FILENAME), "wb") as f:
+    def _fake_write_bass_midi(self, wav_path, midi_path, tempo):
+        with open(midi_path, "wb") as f:
             f.write(b"midi")
 
+    @mock.patch("bass_isolator._apply_noise_gate")
     @mock.patch("bass_isolator._write_bass_midi")
     @mock.patch("instrument_isolator.trim_and_export")
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
-    def test_produces_bass_wav_and_midi(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi):
+    def test_produces_bass_wav_and_midi(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi, mock_gate):
         mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
         mock_trim.side_effect = self._fake_trim_and_export
@@ -91,33 +92,41 @@ class TestIsolateBass(unittest.TestCase):
 
         self.assertTrue(result)
         song_dir = os.path.join(self.bass_root, "Song - Artist")
-        for name in bass_isolator._EXPECTED_OUTPUTS:
-            self.assertTrue(os.path.exists(os.path.join(song_dir, name)), name)
-        mock_write_midi.assert_called_once_with(song_dir, 120.0)
+        basename = "Song - Artist (Isolated Bass at 120.000 BPM)"
+        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".wav")))
+        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".mid")))
+        mock_write_midi.assert_called_once_with(
+            os.path.join(song_dir, basename + ".wav"), os.path.join(song_dir, basename + ".mid"), 120.0
+        )
+        mock_gate.assert_called_once_with(os.path.join(song_dir, basename + ".wav"))
+        self.assertTrue(os.path.exists(os.path.join(song_dir, bass_isolator._SOURCE_MARKER_FILENAME)))
 
     @mock.patch("instrument_isolator.run_demucs")
-    def test_skips_when_all_outputs_already_exist(self, mock_run_demucs):
+    def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
         song_dir = os.path.join(self.bass_root, "Song - Artist")
         os.makedirs(song_dir)
-        for name in bass_isolator._EXPECTED_OUTPUTS:
-            with open(os.path.join(song_dir, name), "wb") as f:
-                f.write(b"x")
+        with open(os.path.join(song_dir, "x.wav"), "wb") as f:
+            f.write(b"x")
+        with open(os.path.join(song_dir, "x.mid"), "wb") as f:
+            f.write(b"x")
+        bass_isolator._write_source_marker(song_dir, self.mp3_path)
 
         result = bass_isolator.isolate_bass(self.mp3_path, self.bass_root)
 
         self.assertFalse(result)
         mock_run_demucs.assert_not_called()
 
+    @mock.patch("bass_isolator._apply_noise_gate")
     @mock.patch("bass_isolator._write_bass_midi")
     @mock.patch("instrument_isolator.trim_and_export")
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
-    def test_reruns_when_the_midi_file_is_missing(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi):
+    def test_reruns_when_the_midi_file_is_missing(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi, mock_gate):
         song_dir = os.path.join(self.bass_root, "Song - Artist")
         os.makedirs(song_dir)
-        with open(os.path.join(song_dir, bass_isolator.BASS_WAV_FILENAME), "wb") as f:
+        with open(os.path.join(song_dir, "old.wav"), "wb") as f:
             f.write(b"x")
-        # bass.mid missing
+        # no .mid file present yet
 
         mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
@@ -127,8 +136,9 @@ class TestIsolateBass(unittest.TestCase):
         result = bass_isolator.isolate_bass(self.mp3_path, self.bass_root)
 
         self.assertTrue(result)
-        for name in bass_isolator._EXPECTED_OUTPUTS:
-            self.assertTrue(os.path.exists(os.path.join(song_dir, name)), name)
+        basename = "Song - Artist (Isolated Bass at 120.000 BPM)"
+        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".wav")))
+        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".mid")))
 
 
 class TestDetectBassNotes(unittest.TestCase):
@@ -208,11 +218,12 @@ class TestWriteBassMidi(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_writes_notes_for_detected_pitches(self):
-        _notes(["E1", "A1", "D2"]).export(os.path.join(self.tmp_dir, "bass.wav"), format="wav")
+        wav_path = os.path.join(self.tmp_dir, "bass.wav")
+        midi_path = os.path.join(self.tmp_dir, "bass.mid")
+        _notes(["E1", "A1", "D2"]).export(wav_path, format="wav")
 
-        bass_isolator._write_bass_midi(self.tmp_dir, tempo=120.0)
+        bass_isolator._write_bass_midi(wav_path, midi_path, tempo=120.0)
 
-        midi_path = os.path.join(self.tmp_dir, bass_isolator.MIDI_FILENAME)
         self.assertTrue(os.path.exists(midi_path))
 
         import pretty_midi
@@ -224,22 +235,67 @@ class TestWriteBassMidi(unittest.TestCase):
         self.assertEqual(starts, sorted(starts))
 
     def test_missing_bass_wav_produces_an_empty_midi_file(self):
-        bass_isolator._write_bass_midi(self.tmp_dir, tempo=120.0)
+        wav_path = os.path.join(self.tmp_dir, "bass.wav")
+        midi_path = os.path.join(self.tmp_dir, "bass.mid")
+        bass_isolator._write_bass_midi(wav_path, midi_path, tempo=120.0)
 
         import pretty_midi
-        midi = pretty_midi.PrettyMIDI(os.path.join(self.tmp_dir, bass_isolator.MIDI_FILENAME))
+        midi = pretty_midi.PrettyMIDI(midi_path)
         notes = [note for instrument in midi.instruments for note in instrument.notes]
         self.assertEqual(notes, [])
 
     def test_embeds_the_given_tempo(self):
-        _notes(["E1", "A1"]).export(os.path.join(self.tmp_dir, "bass.wav"), format="wav")
+        wav_path = os.path.join(self.tmp_dir, "bass.wav")
+        midi_path = os.path.join(self.tmp_dir, "bass.mid")
+        _notes(["E1", "A1"]).export(wav_path, format="wav")
 
-        bass_isolator._write_bass_midi(self.tmp_dir, tempo=123.4)
+        bass_isolator._write_bass_midi(wav_path, midi_path, tempo=123.4)
 
         import pretty_midi
-        midi = pretty_midi.PrettyMIDI(os.path.join(self.tmp_dir, bass_isolator.MIDI_FILENAME))
+        midi = pretty_midi.PrettyMIDI(midi_path)
         _, tempi = midi.get_tempo_changes()
         self.assertAlmostEqual(tempi[0], 123.4, delta=0.1)
+
+
+class TestApplyNoiseGate(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_quiet_noise_lead_in_is_silenced(self):
+        quiet_noise = _noisy_tone("A1", duration_ms=500, noise_amplitude=0.002).apply_gain(-40)
+        loud_note = _notes(["A1"], note_ms=1000, gap_ms=0)
+        track = quiet_noise + loud_note
+        wav_path = os.path.join(self.tmp_dir, "bass.wav")
+        track.export(wav_path, format="wav")
+
+        bass_isolator._apply_noise_gate(wav_path)
+
+        gated = AudioSegment.from_wav(wav_path)
+        quiet_part = gated[:400]
+        loud_part = gated[600:1400]
+        self.assertLess(quiet_part.rms, loud_part.rms / 10)
+
+    def test_a_normal_note_is_left_essentially_untouched(self):
+        note = _notes(["A1"], note_ms=1000, gap_ms=0)
+        wav_path = os.path.join(self.tmp_dir, "bass.wav")
+        note.export(wav_path, format="wav")
+        original_rms = AudioSegment.from_wav(wav_path).rms
+
+        bass_isolator._apply_noise_gate(wav_path)
+
+        gated_rms = AudioSegment.from_wav(wav_path).rms
+        self.assertGreater(gated_rms, original_rms * 0.9)
+
+    def test_silent_file_does_not_raise(self):
+        wav_path = os.path.join(self.tmp_dir, "silence.wav")
+        AudioSegment.silent(duration=500).export(wav_path, format="wav")
+
+        bass_isolator._apply_noise_gate(wav_path)  # should not raise
+
+        self.assertTrue(os.path.exists(wav_path))
 
 
 class TestIsolateBassForFolder(unittest.TestCase):

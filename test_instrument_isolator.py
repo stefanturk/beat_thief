@@ -2,6 +2,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 from pydub import AudioSegment
@@ -65,6 +66,53 @@ class TestRefineTempo(unittest.TestCase):
         self.assertEqual(refined, 95.0)
 
 
+def _onsets_from_audio(y, sr):
+    onset_env = instrument_isolator.librosa.onset.onset_strength(y=y, sr=sr)
+    onset_frames = instrument_isolator.librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, backtrack=True)
+    return instrument_isolator.librosa.frames_to_time(onset_frames, sr=sr)
+
+
+class TestWindowedTempos(unittest.TestCase):
+    def test_splits_a_tempo_change_into_separate_windows(self):
+        track = _click_track(bpm=100, beats=50) + _click_track(bpm=150, beats=70)
+        y = np.array(track.set_channels(1).get_array_of_samples()).astype(np.float32) / 32768.0
+        sr = track.frame_rate
+        onset_times = _onsets_from_audio(y, sr)
+        song_duration_sec = len(track) / 1000.0
+
+        windows = instrument_isolator._windowed_tempos(y, sr, onset_times, song_duration_sec, window_sec=30.0)
+
+        self.assertEqual(len(windows), 2)
+        self.assertAlmostEqual(windows[0][2], 100.0, delta=2.0)
+        self.assertAlmostEqual(windows[1][2], 150.0, delta=2.0)
+
+    def test_a_window_with_too_few_onsets_falls_back_to_a_rough_estimate(self):
+        track = _click_track(bpm=95, beats=3)  # too few hits to refine
+        y = np.array(track.set_channels(1).get_array_of_samples()).astype(np.float32) / 32768.0
+        sr = track.frame_rate
+        onset_times = _onsets_from_audio(y, sr)
+        song_duration_sec = len(track) / 1000.0
+
+        windows = instrument_isolator._windowed_tempos(y, sr, onset_times, song_duration_sec, window_sec=30.0)
+
+        self.assertEqual(len(windows), 1)
+        self.assertGreater(windows[0][2], 0.0)
+
+
+class TestTempoDriftDetected(unittest.TestCase):
+    def test_flags_windows_that_differ_beyond_the_threshold(self):
+        windows = [(0.0, 30.0, 100.0), (30.0, 60.0, 100.5)]
+        self.assertTrue(instrument_isolator._tempo_drift_detected(windows))
+
+    def test_does_not_flag_windows_within_the_threshold(self):
+        windows = [(0.0, 30.0, 100.0), (30.0, 60.0, 100.1)]
+        self.assertFalse(instrument_isolator._tempo_drift_detected(windows))
+
+    def test_a_single_window_is_never_flagged(self):
+        windows = [(0.0, 30.0, 100.0)]
+        self.assertFalse(instrument_isolator._tempo_drift_detected(windows))
+
+
 class TestSongAlignment(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
@@ -95,6 +143,30 @@ class TestSongAlignment(unittest.TestCase):
         trim_ms, _ = instrument_isolator.song_alignment(mp3_path)
 
         self.assertEqual(trim_ms, 0)
+
+    @mock.patch("builtins.input", return_value="2")
+    @mock.patch("sys.stdin")
+    def test_tempo_drift_prompts_and_uses_the_chosen_window(self, mock_stdin, mock_input):
+        mock_stdin.isatty.return_value = True
+        track = _click_track(bpm=100, beats=50) + _click_track(bpm=150, beats=70)
+        mp3_path = os.path.join(self.tmp_dir, "song.mp3")
+        track.export(mp3_path, format="mp3")
+
+        _, tempo = instrument_isolator.song_alignment(mp3_path)
+
+        mock_input.assert_called_once()
+        self.assertAlmostEqual(tempo, 150.0, delta=2.0)
+
+    def test_tempo_drift_defaults_to_the_first_window_when_not_interactive(self):
+        track = _click_track(bpm=100, beats=50) + _click_track(bpm=150, beats=70)
+        mp3_path = os.path.join(self.tmp_dir, "song.mp3")
+        track.export(mp3_path, format="mp3")
+
+        with mock.patch("sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = False
+            _, tempo = instrument_isolator.song_alignment(mp3_path)
+
+        self.assertAlmostEqual(tempo, 100.0, delta=2.0)
 
 
 class TestTrimAndExport(unittest.TestCase):

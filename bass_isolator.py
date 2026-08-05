@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Isolate a song's bass from downloaded MP3s: a bass.wav (the isolated bass
-part, pulled out of the song with Demucs) and a bass.mid built by tracking
-its pitch directly. Both are trimmed and tempo-aligned to the same shared
+"""Isolate a song's bass from downloaded MP3s: an isolated bass wav (pulled
+out of the song with Demucs) and a matching MIDI file built by tracking its
+pitch directly. Both are trimmed and tempo-aligned to the same shared
 song_alignment() as every other isolated instrument (see
-instrument_isolator.py), so bass.mid lines up exactly with drums.mid and any
-future instrument exports from the same song."""
+instrument_isolator.py), so the bass MIDI lines up exactly with the drums
+MIDI and any future instrument exports from the same song."""
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import sys
@@ -17,6 +18,7 @@ import tempfile
 import librosa
 import numpy as np
 import pretty_midi
+from pydub import AudioSegment
 
 import instrument_isolator
 
@@ -25,10 +27,11 @@ DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downlo
 
 _HTDEMUCS_MODEL = "htdemucs"
 
-BASS_WAV_FILENAME = "bass.wav"
-MIDI_FILENAME = "bass.mid"
-
-_EXPECTED_OUTPUTS = (BASS_WAV_FILENAME, MIDI_FILENAME)
+# Written alongside each song's output files to identify exactly which
+# source mp3 they were produced from - see _source_marker_matches. Doesn't
+# depend on tempo/filename, so it can be checked before song_alignment()
+# (and its slow tempo work + possible interactive drift prompt) ever runs.
+_SOURCE_MARKER_FILENAME = ".source.json"
 
 # Bass is monophonic, so unlike drums (one fixed note per hit, guessed from
 # spectral shape) each note's own pitch has to be tracked directly. Covers
@@ -66,6 +69,17 @@ _PITCH_CONFIRM_SEC = 0.1  # how long a new pitch must hold before it counts as a
 # those out without losing real fast repeated notes.
 _MIN_TIME_BETWEEN_ONSET_SPLITS_SEC = 0.1
 _ONSET_DELTA = 0.3  # higher than librosa's percussive-tuned default, see _detect_bass_notes
+
+# Demucs' bass separation isn't perfect - what's left over after the real
+# bass content is imperfect stem "bleed"/noise-floor artifacts, which
+# confuse pitch tracking if left in. Calibrated against a real isolated
+# bass stem: its noise-floor lead-in peaked at ~5.25% of the file's overall
+# peak amplitude, matching this threshold almost exactly. Drums don't get
+# this treatment - kick/snare/cymbal hits already sit well above the noise
+# floor, so there's nothing worth gating out there.
+_NOISE_GATE_THRESHOLD_RATIO = 0.05
+_NOISE_GATE_WINDOW_MS = 20  # short enough to not gate out quick, quiet notes; long enough for a stable RMS reading
+_NOISE_GATE_FADE_MS = 5  # smooths each gate on/off transition so it doesn't click
 
 
 def _smooth_pitch_curve(midi_pitches: np.ndarray, voiced: np.ndarray, window: int) -> np.ndarray:
@@ -150,6 +164,51 @@ def _segment_notes(rounded_pitches: np.ndarray, voiced: np.ndarray, onset_frame_
     return segments
 
 
+def _apply_noise_gate(wav_path: str) -> None:
+    """Silence any part of wav_path that sits below
+    _NOISE_GATE_THRESHOLD_RATIO of the file's own peak amplitude - these are
+    near-noise-floor artifacts of imperfect stem separation, not real bass
+    content, and left in they add spurious low-confidence pitch estimates
+    for _detect_bass_notes to (mis)transcribe.
+
+    Gates by short RMS window rather than per-sample, with the gate curve
+    itself smoothed by a short moving average, so a gate transition fades
+    rather than clicking."""
+    audio = AudioSegment.from_wav(wav_path)
+    channels = audio.channels
+    sr = audio.frame_rate
+    raw = np.array(audio.get_array_of_samples())
+    if raw.size == 0:
+        return
+
+    frames = raw.reshape(-1, channels).astype(np.float64)
+    peak = np.abs(frames).max()
+    if peak <= 0:
+        return
+    threshold = _NOISE_GATE_THRESHOLD_RATIO * peak
+
+    window_frames = max(1, int(_NOISE_GATE_WINDOW_MS / 1000 * sr))
+    n_frames = frames.shape[0]
+    gate = np.ones(n_frames, dtype=np.float64)
+    for start in range(0, n_frames, window_frames):
+        end = min(start + window_frames, n_frames)
+        window_rms = np.sqrt(np.mean(frames[start:end] ** 2))
+        if window_rms < threshold:
+            gate[start:end] = 0.0
+
+    fade_frames = max(1, int(_NOISE_GATE_FADE_MS / 1000 * sr))
+    kernel = np.ones(fade_frames) / fade_frames
+    gate = np.convolve(gate, kernel, mode="same")
+
+    gated = frames * gate[:, np.newaxis]
+    max_val = float(2 ** (8 * audio.sample_width - 1))
+    gated = np.clip(gated, -max_val, max_val - 1)
+    gated_interleaved = gated.reshape(-1).astype(raw.dtype)
+
+    gated_audio = audio._spawn(gated_interleaved.tobytes())
+    gated_audio.export(wav_path, format="wav")
+
+
 def _detect_bass_notes(wav_path: str) -> list[pretty_midi.Note]:
     """Track pitch through the isolated bass stem and turn it into discrete
     MIDI notes.
@@ -224,29 +283,79 @@ def _detect_bass_notes(wav_path: str) -> list[pretty_midi.Note]:
     return notes
 
 
-def _write_bass_midi(song_dir: str, tempo: float) -> None:
-    """Detect notes in bass.wav and write them to a single bass.mid track.
-    Notes keep their raw pitch-tracked times (no quantizing/snapping) -
-    tempo comes from the shared song_alignment() (see isolate_bass), not a
-    fresh per-file estimate, so it matches every other instrument exported
-    from the same song."""
-    bass_wav = os.path.join(song_dir, BASS_WAV_FILENAME)
-    all_notes = _detect_bass_notes(bass_wav) if os.path.exists(bass_wav) else []
+def _write_bass_midi(wav_path: str, midi_path: str, tempo: float) -> None:
+    """Detect notes in the isolated bass wav and write them to a single
+    midi_path track. Notes keep their raw pitch-tracked times (no
+    quantizing/snapping) - tempo comes from the shared song_alignment()
+    (see isolate_bass), not a fresh per-file estimate, so it matches every
+    other instrument exported from the same song."""
+    all_notes = _detect_bass_notes(wav_path) if os.path.exists(wav_path) else []
 
     midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
     bass_track = pretty_midi.Instrument(program=33, is_drum=False, name=f"Bass ({round(tempo)})")  # 33 = Electric Bass (finger)
     bass_track.notes = sorted(all_notes, key=lambda note: note.start)
     midi.instruments.append(bass_track)
-    midi.write(os.path.join(song_dir, MIDI_FILENAME))
+    midi.write(midi_path)
+
+
+def _output_basename(title: str, tempo: float) -> str:
+    return f"{title} (Isolated Bass at {tempo:.3f} BPM)"
+
+
+def _has_existing_outputs(song_dir: str) -> bool:
+    if not os.path.isdir(song_dir):
+        return False
+    entries = os.listdir(song_dir)
+    return any(f.endswith(".wav") for f in entries) and any(f.endswith(".mid") for f in entries)
+
+
+def _clear_stale_outputs(song_dir: str) -> None:
+    """Remove any previously-produced .wav/.mid files before writing new
+    ones - the filename now embeds the tempo, so re-processing with a
+    different tempo would otherwise leave old and new copies side by side."""
+    if not os.path.isdir(song_dir):
+        return
+    for f in os.listdir(song_dir):
+        if f.endswith(".wav") or f.endswith(".mid"):
+            os.remove(os.path.join(song_dir, f))
+
+
+def _source_marker_path(song_dir: str) -> str:
+    return os.path.join(song_dir, _SOURCE_MARKER_FILENAME)
+
+
+def _write_source_marker(song_dir: str, mp3_path: str) -> None:
+    stat = os.stat(mp3_path)
+    marker = {"path": os.path.abspath(mp3_path), "size": stat.st_size, "mtime": stat.st_mtime}
+    with open(_source_marker_path(song_dir), "w") as f:
+        json.dump(marker, f)
+
+
+def _source_marker_matches(song_dir: str, mp3_path: str) -> bool:
+    """Whether song_dir's existing outputs were produced from this exact
+    mp3 (matched on size + mtime), not just from a folder that happens to
+    be named after this song's title - see isolate_bass for why that
+    distinction matters."""
+    try:
+        with open(_source_marker_path(song_dir)) as f:
+            marker = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return False
+    stat = os.stat(mp3_path)
+    return marker.get("size") == stat.st_size and marker.get("mtime") == stat.st_mtime
 
 
 def isolate_bass(mp3_path: str, bass_root: str) -> bool:
-    """Produce bass.wav and a bass.mid for a single song under
-    bass_root/<title>/. Returns False (skipped) if both already exist."""
+    """Produce an isolated bass wav + MIDI for a single song under
+    bass_root/<title>/. Returns False (skipped) if outputs already exist
+    for this exact source mp3 (see _source_marker_matches) - existing
+    outputs whose marker is missing or doesn't match are treated as stale
+    (e.g. a leftover folder from an earlier run or a different file that
+    happened to share this title) and reprocessed rather than trusted."""
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = os.path.join(bass_root, title)
 
-    if os.path.isdir(song_dir) and all(os.path.exists(os.path.join(song_dir, f)) for f in _EXPECTED_OUTPUTS):
+    if _has_existing_outputs(song_dir) and _source_marker_matches(song_dir, mp3_path):
         print(f"{title}: bass already isolated, nothing to do.")
         return False
 
@@ -259,14 +368,20 @@ def isolate_bass(mp3_path: str, bass_root: str) -> bool:
         bass_wav = os.path.join(bass_stem_dir, "bass.wav")
 
         os.makedirs(song_dir, exist_ok=True)
-        instrument_isolator.trim_and_export(bass_wav, trim_ms, os.path.join(song_dir, BASS_WAV_FILENAME))
+        _clear_stale_outputs(song_dir)
+        basename = _output_basename(title, tempo)
+        wav_path = os.path.join(song_dir, basename + ".wav")
+        midi_path = os.path.join(song_dir, basename + ".mid")
+        instrument_isolator.trim_and_export(bass_wav, trim_ms, wav_path)
+        _apply_noise_gate(wav_path)
 
         print(f"{title}: transcribing to MIDI...")
-        _write_bass_midi(song_dir, tempo)
+        _write_bass_midi(wav_path, midi_path, tempo)
+        _write_source_marker(song_dir, mp3_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    print(f"{title}: bass.wav and bass.mid saved to {song_dir}")
+    print(f"{title}: {os.path.basename(wav_path)} and {os.path.basename(midi_path)} saved to {song_dir}")
     return True
 
 
@@ -303,7 +418,7 @@ def isolate_bass_for_path(path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Isolate bass (bass.wav + bass.mid) from downloaded MP3s."
+        description="Isolate bass (wav + MIDI) from downloaded MP3s."
     )
     parser.add_argument(
         "path",
