@@ -40,7 +40,114 @@ _HOP_LENGTH = 512
 _FRAME_LENGTH = 4096  # long enough to fit several periods of _PITCH_FMIN_HZ, avoiding pyin's low-frequency inaccuracy warning
 
 _VELOCITY_WINDOW_SEC = 0.05
-_MIN_NOTE_SEC = 0.05  # discard fragments too short to be a real note
+_MIN_NOTE_SEC = 0.12  # discard fragments too short to be a real note
+
+# pyin's frame-to-frame pitch estimate is noisy even on a single sustained
+# note (it can wobble by a semitone or two from one 12ms frame to the next),
+# and a real pitch slide/bend passes through several intermediate semitones
+# on its way to landing on a note. Naively starting a new note on every
+# rounded-pitch change turned both of those into a flood of tiny, mostly
+# duplicate notes. Smoothing the pitch curve first, then only confirming a
+# pitch change once it's held for several consecutive frames, fixes both:
+# single-frame jitter never lasts long enough to register, and a slide's
+# transient in-between semitones get skipped in favor of wherever it settles.
+# Tuned against a real isolated bass stem (Redbone) - weaker smoothing/
+# confirmation left obvious jitter-driven duplicate/staircase notes in the
+# output; this setting was the point where those disappeared without
+# noticeably flattening the song's actual rhythm.
+_SMOOTHING_WINDOW_FRAMES = 9
+_PITCH_CONFIRM_SEC = 0.1  # how long a new pitch must hold before it counts as a real note change
+
+# A genuine repeated note (the same pitch played twice in a row) needs an
+# onset to split it from the note before it, since pitch alone can't tell
+# the difference - but treating every onset as a re-attack was splitting
+# single held notes on spurious mid-note onsets too. Requiring a minimum
+# amount of time to have passed since the current note started filters
+# those out without losing real fast repeated notes.
+_MIN_TIME_BETWEEN_ONSET_SPLITS_SEC = 0.1
+_ONSET_DELTA = 0.3  # higher than librosa's percussive-tuned default, see _detect_bass_notes
+
+
+def _smooth_pitch_curve(midi_pitches: np.ndarray, voiced: np.ndarray, window: int) -> np.ndarray:
+    """Median-filter the pitch curve over voiced frames only, so a brief
+    unvoiced gap doesn't get bridged/smeared across by the window."""
+    smoothed = midi_pitches.copy()
+    half = window // 2
+    n = len(midi_pitches)
+    for i in range(n):
+        if not voiced[i]:
+            continue
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        neighborhood = midi_pitches[lo:hi][voiced[lo:hi]]
+        if neighborhood.size:
+            smoothed[i] = np.median(neighborhood)
+    return smoothed
+
+
+def _segment_notes(rounded_pitches: np.ndarray, voiced: np.ndarray, onset_frame_set: set, frame_times: np.ndarray) -> list[tuple[int, int, float]]:
+    """Group per-frame pitch estimates into discrete notes, requiring a
+    pitch change to hold for confirm_frames before it's accepted - see
+    _detect_bass_notes for why."""
+    confirm_frames = max(1, round(_PITCH_CONFIRM_SEC / (frame_times[1] - frame_times[0]))) if len(frame_times) > 1 else 1
+
+    segments = []  # (start_frame, end_frame_exclusive, pitch)
+    confirmed_pitch = None
+    confirmed_start = None
+    candidate_pitch = None
+    candidate_start = None
+    candidate_count = 0
+
+    def close_current(end_frame):
+        if confirmed_pitch is not None:
+            segments.append((confirmed_start, end_frame, confirmed_pitch))
+
+    for i in range(len(rounded_pitches)):
+        if not voiced[i]:
+            close_current(i)
+            confirmed_pitch = None
+            candidate_pitch = None
+            candidate_count = 0
+            continue
+
+        pitch = rounded_pitches[i]
+        is_onset = i in onset_frame_set
+        re_attack = (
+            confirmed_pitch is not None
+            and pitch == confirmed_pitch
+            and is_onset
+            and frame_times[i] - frame_times[confirmed_start] >= _MIN_TIME_BETWEEN_ONSET_SPLITS_SEC
+        )
+
+        if confirmed_pitch is None:
+            confirmed_pitch, confirmed_start = pitch, i
+            candidate_pitch, candidate_count = None, 0
+            continue
+
+        if re_attack:
+            close_current(i)
+            confirmed_pitch, confirmed_start = pitch, i
+            candidate_pitch, candidate_count = None, 0
+            continue
+
+        if pitch == confirmed_pitch:
+            candidate_pitch, candidate_count = None, 0
+            continue
+
+        # Pitch differs from the confirmed note - track how long it holds
+        # before treating it as a real change rather than transient jitter.
+        if pitch == candidate_pitch:
+            candidate_count += 1
+        else:
+            candidate_pitch, candidate_count = pitch, 1
+
+        if candidate_count >= confirm_frames:
+            change_at = i - candidate_count + 1
+            close_current(change_at)
+            confirmed_pitch, confirmed_start = candidate_pitch, change_at
+            candidate_pitch, candidate_count = None, 0
+
+    close_current(len(rounded_pitches))
+    return segments
 
 
 def _detect_bass_notes(wav_path: str) -> list[pretty_midi.Note]:
@@ -48,10 +155,12 @@ def _detect_bass_notes(wav_path: str) -> list[pretty_midi.Note]:
     MIDI notes.
 
     librosa.pyin gives a per-frame pitch estimate (f0, in Hz) plus a voiced
-    flag. That's turned into a MIDI note number per frame, then grouped into
-    notes: a new note starts whenever the rounded pitch changes, voicing
-    drops to silence, or an onset lands on the same pitch (a re-attack -
-    otherwise a repeated bassline note would get glued into one long note).
+    flag. That's smoothed (see _smooth_pitch_curve) and turned into a MIDI
+    note number per frame, then grouped into notes (see _segment_notes): a
+    new note starts whenever a pitch change holds long enough to be real,
+    voicing drops to silence, or an onset lands on the same pitch after the
+    current note has been playing a little while (a re-attack - otherwise a
+    repeated bassline note would get glued into one long note).
 
     Velocity is derived from the waveform's peak amplitude right after each
     note's start, normalized against the loudest note in the file (see
@@ -67,31 +176,24 @@ def _detect_bass_notes(wav_path: str) -> list[pretty_midi.Note]:
 
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=_HOP_LENGTH)
     if onset_env.size and np.isfinite(onset_env).any() and onset_env.max() > 0:
-        onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=_HOP_LENGTH, backtrack=True)
+        # A higher-than-default delta (librosa's default is tuned for
+        # percussive onsets) makes the re-attack check in _segment_notes
+        # much less prone to firing on noise floor/estimation jitter in a
+        # sustained note - on a held tone with light broadband noise mixed
+        # in (typical of an imperfectly isolated bass stem), the default
+        # delta produced 20+ spurious onsets across 2 seconds of otherwise
+        # completely steady pitch.
+        onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, hop_length=_HOP_LENGTH, backtrack=True, delta=_ONSET_DELTA)
     else:
         onset_frames = np.array([], dtype=int)
     onset_frame_set = set(onset_frames.tolist())
 
     voiced = voiced_flag & ~np.isnan(f0)
-    rounded_pitches = np.round(librosa.hz_to_midi(np.where(voiced, f0, 1.0)))
+    midi_pitches = librosa.hz_to_midi(np.where(voiced, f0, 1.0))
+    smoothed_pitches = _smooth_pitch_curve(midi_pitches, voiced, _SMOOTHING_WINDOW_FRAMES)
+    rounded_pitches = np.round(smoothed_pitches)
 
-    segments = []  # (start_frame, end_frame_exclusive, pitch)
-    current_pitch = None
-    current_start = None
-    for i in range(len(rounded_pitches)):
-        if not voiced[i]:
-            if current_pitch is not None:
-                segments.append((current_start, i, current_pitch))
-                current_pitch = None
-            continue
-        pitch = rounded_pitches[i]
-        if current_pitch is None or pitch != current_pitch or i in onset_frame_set:
-            if current_pitch is not None:
-                segments.append((current_start, i, current_pitch))
-            current_pitch = pitch
-            current_start = i
-    if current_pitch is not None:
-        segments.append((current_start, len(rounded_pitches), current_pitch))
+    segments = _segment_notes(rounded_pitches, voiced, onset_frame_set, frame_times)
 
     if not segments:
         return []
