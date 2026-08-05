@@ -393,6 +393,33 @@ _alignment_cache: dict[tuple[str, int, float], tuple[int, float]] = {}
 
 _WHOLE_BPM_SNAP_TOLERANCE = 0.1  # a tempo this close to a whole number is almost certainly one, recorded to a click
 
+# A song with a genuinely constant tempo still won't measure as bit-for-bit
+# identical across independent windows - onset-detection jitter alone can
+# scatter per-window estimates by up to about a BPM even with no real
+# tempo change at all. _TEMPO_DRIFT_THRESHOLD_BPM is deliberately far more
+# sensitive than that (catches real drift as small as 0.3 BPM), so on its
+# own it also catches this kind of noise. If every window's estimate sits
+# within _NOISE_BAND_BPM of a whole-number average, that's this noise, not
+# real drift - snap straight to the whole number and skip the prompt
+# entirely, rather than asking about something that isn't actually there.
+_NOISE_BAND_BPM = 1.0
+
+
+def _snap_if_noisy_around_a_whole_number(windows: list[tuple[float, float, float]]) -> float | None:
+    """Returns the whole-number tempo every window is scattered around, if
+    that's what this looks like (see _NOISE_BAND_BPM above) - otherwise
+    None, leaving the normal drift check to decide."""
+    tempos = [tempo for _, _, tempo in windows]
+    if not tempos:
+        return None
+    average = sum(tempos) / len(tempos)
+    rounded = round(average)
+    if abs(average - rounded) >= _WHOLE_BPM_SNAP_TOLERANCE:
+        return None
+    if any(abs(tempo - rounded) >= _NOISE_BAND_BPM for tempo in tempos):
+        return None
+    return float(rounded)
+
 
 def _snap_tempo_to_whole_number_if_close(tempo: float) -> float:
     """A tempo landing within _WHOLE_BPM_SNAP_TOLERANCE of a whole number
@@ -460,7 +487,10 @@ def song_alignment(mp3_path: str) -> tuple[int, float]:
 
     song_duration_sec = len(trimmed) / 1000.0
     windows = _windowed_tempos(y, sr, onset_times, song_duration_sec, reference_tempo=tempo)
-    if _tempo_drift_detected(windows):
+    noise_snapped = _snap_if_noisy_around_a_whole_number(windows)
+    if noise_snapped is not None:
+        tempo = noise_snapped
+    elif _tempo_drift_detected(windows):
         drift = max(t for _, _, t in windows) - min(t for _, _, t in windows)
         print(f"Heads up: this song's tempo drifts by up to {drift:.3f} BPM across its length.")
         if sys.stdin.isatty():
