@@ -9,7 +9,6 @@ MIDI and any future instrument exports from the same song."""
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import shutil
 import sys
@@ -22,16 +21,21 @@ from pydub import AudioSegment
 
 import instrument_isolator
 
-BASS_DIR_NAME = "Bass"
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
 _HTDEMUCS_MODEL = "htdemucs"
 
-# Written alongside each song's output files to identify exactly which
-# source mp3 they were produced from - see _source_marker_matches. Doesn't
-# depend on tempo/filename, so it can be checked before song_alignment()
-# (and its slow tempo work + possible interactive drift prompt) ever runs.
-_SOURCE_MARKER_FILENAME = ".source.json"
+# What every bass output filename for a song contains, and what identifies
+# bass files (vs. e.g. a sibling drums export) within a song's shared
+# "<title> (Isolated)" folder - see instrument_isolator.
+_LABEL = "Isolated Bass"
+
+# Written alongside each song's bass output files to identify exactly which
+# source mp3 they were produced from - see instrument_isolator.
+# source_marker_matches. Doesn't depend on tempo/filename, so it can be
+# checked before song_alignment() (and its slow tempo work + possible
+# interactive drift prompt) ever runs.
+_SOURCE_MARKER_FILENAME = ".bass_source.json"
 
 # Bass is monophonic, so unlike drums (one fixed note per hit, guessed from
 # spectral shape) each note's own pitch has to be tracked directly. Covers
@@ -299,63 +303,24 @@ def _write_bass_midi(wav_path: str, midi_path: str, tempo: float) -> None:
 
 
 def _output_basename(title: str, tempo: float) -> str:
-    return f"{title} (Isolated Bass at {tempo:.3f} BPM)"
+    return f"{title} ({_LABEL} at {tempo:.3f} BPM)"
 
 
-def _has_existing_outputs(song_dir: str) -> bool:
-    if not os.path.isdir(song_dir):
-        return False
-    entries = os.listdir(song_dir)
-    return any(f.endswith(".wav") for f in entries) and any(f.endswith(".mid") for f in entries)
-
-
-def _clear_stale_outputs(song_dir: str) -> None:
-    """Remove any previously-produced .wav/.mid files before writing new
-    ones - the filename now embeds the tempo, so re-processing with a
-    different tempo would otherwise leave old and new copies side by side."""
-    if not os.path.isdir(song_dir):
-        return
-    for f in os.listdir(song_dir):
-        if f.endswith(".wav") or f.endswith(".mid"):
-            os.remove(os.path.join(song_dir, f))
-
-
-def _source_marker_path(song_dir: str) -> str:
-    return os.path.join(song_dir, _SOURCE_MARKER_FILENAME)
-
-
-def _write_source_marker(song_dir: str, mp3_path: str) -> None:
-    stat = os.stat(mp3_path)
-    marker = {"path": os.path.abspath(mp3_path), "size": stat.st_size, "mtime": stat.st_mtime}
-    with open(_source_marker_path(song_dir), "w") as f:
-        json.dump(marker, f)
-
-
-def _source_marker_matches(song_dir: str, mp3_path: str) -> bool:
-    """Whether song_dir's existing outputs were produced from this exact
-    mp3 (matched on size + mtime), not just from a folder that happens to
-    be named after this song's title - see isolate_bass for why that
-    distinction matters."""
-    try:
-        with open(_source_marker_path(song_dir)) as f:
-            marker = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return False
-    stat = os.stat(mp3_path)
-    return marker.get("size") == stat.st_size and marker.get("mtime") == stat.st_mtime
-
-
-def isolate_bass(mp3_path: str, bass_root: str) -> bool:
-    """Produce an isolated bass wav + MIDI for a single song under
-    bass_root/<title>/. Returns False (skipped) if outputs already exist
-    for this exact source mp3 (see _source_marker_matches) - existing
-    outputs whose marker is missing or doesn't match are treated as stale
-    (e.g. a leftover folder from an earlier run or a different file that
-    happened to share this title) and reprocessed rather than trusted."""
+def isolate_bass(mp3_path: str, write_midi: bool = True) -> bool:
+    """Produce an isolated bass wav (and, if write_midi, a matching MIDI)
+    for a single song, written into its shared "<title> (Isolated)" folder
+    alongside any other instrument exported from the same song. Returns
+    False (skipped) if bass outputs already exist for this exact source mp3
+    (see instrument_isolator.source_marker_matches) - existing outputs
+    whose marker is missing or doesn't match are treated as stale (e.g. a
+    leftover folder from an earlier run or a different file that happened
+    to share this title) and reprocessed rather than trusted."""
     title = os.path.splitext(os.path.basename(mp3_path))[0]
-    song_dir = os.path.join(bass_root, title)
+    song_dir = instrument_isolator.song_output_dir(mp3_path)
 
-    if _has_existing_outputs(song_dir) and _source_marker_matches(song_dir, mp3_path):
+    if instrument_isolator.has_existing_outputs(song_dir, _LABEL, write_midi) and instrument_isolator.source_marker_matches(
+        song_dir, mp3_path, _SOURCE_MARKER_FILENAME
+    ):
         print(f"{title}: bass already isolated, nothing to do.")
         return False
 
@@ -368,57 +333,58 @@ def isolate_bass(mp3_path: str, bass_root: str) -> bool:
         bass_wav = os.path.join(bass_stem_dir, "bass.wav")
 
         os.makedirs(song_dir, exist_ok=True)
-        _clear_stale_outputs(song_dir)
+        instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
         basename = _output_basename(title, tempo)
         wav_path = os.path.join(song_dir, basename + ".wav")
-        midi_path = os.path.join(song_dir, basename + ".mid")
         instrument_isolator.trim_and_export(bass_wav, trim_ms, wav_path)
         _apply_noise_gate(wav_path)
 
-        print(f"{title}: transcribing to MIDI...")
-        _write_bass_midi(wav_path, midi_path, tempo)
-        _write_source_marker(song_dir, mp3_path)
+        saved = os.path.basename(wav_path)
+        if write_midi:
+            midi_path = os.path.join(song_dir, basename + ".mid")
+            print(f"{title}: transcribing to MIDI...")
+            _write_bass_midi(wav_path, midi_path, tempo)
+            saved += f" and {os.path.basename(midi_path)}"
+
+        instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    print(f"{title}: {os.path.basename(wav_path)} and {os.path.basename(midi_path)} saved to {song_dir}")
+    print(f"{title}: {saved} saved to {song_dir}")
     return True
 
 
-def isolate_bass_for_folder(output_dir: str) -> None:
+def isolate_bass_for_folder(output_dir: str, write_midi: bool = True) -> None:
     mp3_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
     if not mp3_files:
         print("No MP3s found to isolate bass from.")
         return
 
-    bass_root = os.path.join(output_dir, BASS_DIR_NAME)
     for filename in mp3_files:
         path = os.path.join(output_dir, filename)
         try:
-            isolate_bass(path, bass_root)
+            isolate_bass(path, write_midi=write_midi)
         except Exception as e:
             print(f"  Could not isolate bass for {filename}, skipping: {e}")
 
 
-def isolate_bass_for_single_file(path: str) -> None:
-    output_dir = os.path.dirname(os.path.abspath(path)) or "."
-    bass_root = os.path.join(output_dir, BASS_DIR_NAME)
+def isolate_bass_for_single_file(path: str, write_midi: bool = True) -> None:
     try:
-        isolate_bass(path, bass_root)
+        isolate_bass(path, write_midi=write_midi)
     except Exception as e:
         print(f"  Could not isolate bass for {os.path.basename(path)}, skipping: {e}")
 
 
-def isolate_bass_for_path(path: str) -> None:
+def isolate_bass_for_path(path: str, write_midi: bool = True) -> None:
     if os.path.isfile(path):
-        isolate_bass_for_single_file(path)
+        isolate_bass_for_single_file(path, write_midi=write_midi)
     else:
-        isolate_bass_for_folder(path)
+        isolate_bass_for_folder(path, write_midi=write_midi)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Isolate bass (wav + MIDI) from downloaded MP3s."
+        description="Isolate bass (wav, optionally + MIDI) from downloaded MP3s."
     )
     parser.add_argument(
         "path",
@@ -426,10 +392,20 @@ def main() -> None:
         default=DEFAULT_OUTPUT,
         help=f"Folder of MP3s (or a single MP3 file) to isolate bass from (default: {DEFAULT_OUTPUT})",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--midi",
+        action="store_true",
+        help="Also write a MIDI file, not just the isolated wav. Can also be given as a bare 'midi' argument.",
+    )
+
+    raw_args = sys.argv[1:]
+    bare_midi = any(tok.lower() == "midi" for tok in raw_args)
+    remaining_args = [tok for tok in raw_args if tok.lower() != "midi"]
+    args = parser.parse_args(remaining_args)
+    args.midi = args.midi or bare_midi
 
     try:
-        isolate_bass_for_path(args.path)
+        isolate_bass_for_path(args.path, write_midi=args.midi)
     except KeyboardInterrupt:
         print("\nStopped.")
         sys.exit(130)

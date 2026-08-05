@@ -9,6 +9,7 @@ from pydub import AudioSegment
 from pydub.generators import Sine
 
 import drum_isolator
+import instrument_isolator
 
 
 def _hits(count, hit_ms=80, gap_ms=400, freq=200):
@@ -25,10 +26,10 @@ def _hits(count, hit_ms=80, gap_ms=400, freq=200):
 class TestIsolateDrums(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
-        self.drums_root = os.path.join(self.tmp_dir, "Drums")
         self.mp3_path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
         with open(self.mp3_path, "wb") as f:
             f.write(b"fake mp3 bytes")
+        self.song_dir = os.path.join(self.tmp_dir, "Song - Artist (Isolated)")
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -62,10 +63,10 @@ class TestIsolateDrums(unittest.TestCase):
         mock_trim.side_effect = self._fake_trim_and_export
         mock_write_midi.side_effect = self._fake_write_drum_midi
 
-        result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
+        result = drum_isolator.isolate_drums(self.mp3_path)
 
         self.assertTrue(result)
-        song_dir = os.path.join(self.drums_root, "Song - Artist")
+        song_dir = self.song_dir
         basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
         self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".wav")))
         self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".mid")))
@@ -76,17 +77,34 @@ class TestIsolateDrums(unittest.TestCase):
         # can tell these outputs are already up to date.
         self.assertTrue(os.path.exists(os.path.join(song_dir, drum_isolator._SOURCE_MARKER_FILENAME)))
 
+    @mock.patch("drum_isolator._write_drum_midi")
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_write_midi_false_produces_only_a_wav(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi):
+        mock_alignment.return_value = (0, 120.0)
+        mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
+
+        result = drum_isolator.isolate_drums(self.mp3_path, write_midi=False)
+
+        self.assertTrue(result)
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
+        self.assertFalse(os.path.exists(os.path.join(self.song_dir, basename + ".mid")))
+        mock_write_midi.assert_not_called()
+
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
-        song_dir = os.path.join(self.drums_root, "Song - Artist")
-        os.makedirs(song_dir)
-        with open(os.path.join(song_dir, "x.wav"), "wb") as f:
+        os.makedirs(self.song_dir)
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
-        with open(os.path.join(song_dir, "x.mid"), "wb") as f:
+        with open(os.path.join(self.song_dir, basename + ".mid"), "wb") as f:
             f.write(b"x")
-        drum_isolator._write_source_marker(song_dir, self.mp3_path)
+        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, drum_isolator._SOURCE_MARKER_FILENAME)
 
-        result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
+        result = drum_isolator.isolate_drums(self.mp3_path)
 
         self.assertFalse(result)
         mock_run_demucs.assert_not_called()
@@ -96,9 +114,9 @@ class TestIsolateDrums(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reruns_when_the_midi_file_is_missing(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi):
-        song_dir = os.path.join(self.drums_root, "Song - Artist")
-        os.makedirs(song_dir)
-        with open(os.path.join(song_dir, "old.wav"), "wb") as f:
+        os.makedirs(self.song_dir)
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         # no .mid file present yet
 
@@ -107,12 +125,11 @@ class TestIsolateDrums(unittest.TestCase):
         mock_trim.side_effect = self._fake_trim_and_export
         mock_write_midi.side_effect = self._fake_write_drum_midi
 
-        result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
+        result = drum_isolator.isolate_drums(self.mp3_path)
 
         self.assertTrue(result)
-        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
-        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".wav")))
-        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".mid")))
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".mid")))
 
     @mock.patch("drum_isolator._write_drum_midi")
     @mock.patch("instrument_isolator.trim_and_export")
@@ -121,12 +138,11 @@ class TestIsolateDrums(unittest.TestCase):
     def test_reruns_and_replaces_stale_outputs_when_the_source_mp3_marker_does_not_match(
         self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi
     ):
-        song_dir = os.path.join(self.drums_root, "Song - Artist")
-        os.makedirs(song_dir)
+        os.makedirs(self.song_dir)
         stale_basename = "Song - Artist (Isolated Drums at 99.000 BPM)"
-        with open(os.path.join(song_dir, stale_basename + ".wav"), "wb") as f:
+        with open(os.path.join(self.song_dir, stale_basename + ".wav"), "wb") as f:
             f.write(b"stale")
-        with open(os.path.join(song_dir, stale_basename + ".mid"), "wb") as f:
+        with open(os.path.join(self.song_dir, stale_basename + ".mid"), "wb") as f:
             f.write(b"stale")
         # No marker at all - e.g. a leftover folder from before this feature
         # existed, or from an unrelated song that happened to share a title.
@@ -136,16 +152,16 @@ class TestIsolateDrums(unittest.TestCase):
         mock_trim.side_effect = self._fake_trim_and_export
         mock_write_midi.side_effect = self._fake_write_drum_midi
 
-        result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
+        result = drum_isolator.isolate_drums(self.mp3_path)
 
         self.assertTrue(result)
         mock_run_demucs.assert_called_once()
         new_basename = "Song - Artist (Isolated Drums at 130.500 BPM)"
-        self.assertTrue(os.path.exists(os.path.join(song_dir, new_basename + ".wav")))
-        self.assertTrue(os.path.exists(os.path.join(song_dir, new_basename + ".mid")))
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, new_basename + ".wav")))
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, new_basename + ".mid")))
         # The stale, wrongly-named files from the mismatched marker are gone.
-        self.assertFalse(os.path.exists(os.path.join(song_dir, stale_basename + ".wav")))
-        self.assertFalse(os.path.exists(os.path.join(song_dir, stale_basename + ".mid")))
+        self.assertFalse(os.path.exists(os.path.join(self.song_dir, stale_basename + ".wav")))
+        self.assertFalse(os.path.exists(os.path.join(self.song_dir, stale_basename + ".mid")))
 
 
 class TestDetectNoteEvents(unittest.TestCase):
@@ -315,6 +331,8 @@ class TestIsolateDrumsForFolder(unittest.TestCase):
             called_paths,
             {os.path.join(self.tmp_dir, "A - Artist.mp3"), os.path.join(self.tmp_dir, "B - Artist.mp3")},
         )
+        for call in mock_isolate.call_args_list:
+            self.assertTrue(call.kwargs.get("write_midi", True))
 
     @mock.patch("drum_isolator.isolate_drums")
     def test_one_failure_does_not_stop_the_rest(self, mock_isolate):
@@ -336,19 +354,19 @@ class TestIsolateDrumsForPath(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     @mock.patch("drum_isolator.isolate_drums")
-    def test_single_file_dispatches_with_sibling_drums_folder(self, mock_isolate):
+    def test_single_file_dispatches_directly(self, mock_isolate):
         mp3_path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
         with open(mp3_path, "wb") as f:
             f.write(b"x")
 
         drum_isolator.isolate_drums_for_path(mp3_path)
 
-        mock_isolate.assert_called_once_with(mp3_path, os.path.join(self.tmp_dir, drum_isolator.DRUMS_DIR_NAME))
+        mock_isolate.assert_called_once_with(mp3_path, write_midi=True)
 
     @mock.patch("drum_isolator.isolate_drums_for_folder")
     def test_folder_dispatches_to_folder_handler(self, mock_folder):
         drum_isolator.isolate_drums_for_path(self.tmp_dir)
-        mock_folder.assert_called_once_with(self.tmp_dir)
+        mock_folder.assert_called_once_with(self.tmp_dir, write_midi=True)
 
 
 if __name__ == "__main__":

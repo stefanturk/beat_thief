@@ -76,23 +76,36 @@ version of the performance, or just to understand how a song is built:
 python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass
 ```
 
+For each song this produces one `<Song Title> (Isolated)/` folder
+containing whichever instruments you asked for, side by side — no separate
+top-level `Drums`/`Bass` folders to dig through.
+
+By default only the isolated `.wav` is written for each instrument. Add
+`midi` (or `--midi`) to also get a matching `.mid` file, built by detecting
+hits/notes directly in the wav:
+
+```
+python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass midi
+```
+
 Every instrument you isolate for a song shares the exact same beat-1 start
-and the exact same tempo grid, so e.g. `drums.mid` and `bass.mid` line up
-exactly when dragged into a DAW together. Both the trim point and the
-tempo are computed once from the full song (reusing the sanitizer's own
-intro-cut detection, and a tempo refined across the whole track), rather
-than each instrument guessing its own — see below for what that grid
-computation looks like in detail.
+and the exact same tempo grid, so e.g. the drums and bass MIDI line up
+exactly when dragged into a DAW together — and if a song's tempo turns out
+to drift (see below) you're only asked about it once per song, even when
+isolating both instruments. Both the trim point and the tempo are computed
+once from the full song (reusing the sanitizer's own intro-cut detection,
+and a tempo refined across the whole track), rather than each instrument
+guessing its own — see below for what that grid computation looks like in
+detail.
 
 ### Drums
 
-For each song this produces a `Drums/<Song Title>/` folder containing
-`<Song Title> (Isolated Drums at N.NNN BPM).wav` (the isolated drum mix)
-and the matching `.mid` — a MIDI file built by detecting hits directly in
-the wav and writing them all onto one drum track. Drag the `.mid` file
-straight onto a MIDI track with a drum rack loaded; the exact BPM in the
-filename is the same one baked into the MIDI file itself, so it's there to
-read at a glance, not just to look up.
+`<Song Title> (Isolated Drums at N.NNN BPM).wav` is the isolated drum mix;
+with `midi`, the matching `.mid` is a MIDI file built by detecting hits
+directly in the wav and writing them all onto one drum track. Drag the
+`.mid` file straight onto a MIDI track with a drum rack loaded; the exact
+BPM in the filename is the same one baked into the MIDI file itself, so
+it's there to read at a glance, not just to look up.
 
 Each hit is guessed as kick, snare, or cymbal/hi-hat from its spectral
 centroid (low-frequency hits are kicks, mid is snare, high is
@@ -103,13 +116,13 @@ and to need some manual cleanup on busier or more layered passages.
 
 ### Bass
 
-For each song this produces a `Bass/<Song Title>/` folder containing
-`<Song Title> (Isolated Bass at N.NNN BPM).wav` (the isolated bass part)
-and the matching `.mid` — a MIDI file built by tracking the bass's pitch
-directly (bass is monophonic, so this tracks one note at a time rather than
-guessing a fixed drum-rack note per hit) and writing the detected notes
-onto one track. Expect it to do well on a clear, single-note bassline and
-to need cleanup on anything with slides, chords, or heavy effects.
+`<Song Title> (Isolated Bass at N.NNN BPM).wav` is the isolated bass part;
+with `midi`, the matching `.mid` is a MIDI file built by tracking the
+bass's pitch directly (bass is monophonic, so this tracks one note at a
+time rather than guessing a fixed drum-rack note per hit) and writing the
+detected notes onto one track. Expect it to do well on a clear, single-note
+bassline and to need cleanup on anything with slides, chords, or heavy
+effects.
 
 Before transcription, anything quieter than 5% of the isolated bass track's
 own peak volume is gated out — imperfect stem separation tends to leave a
@@ -150,9 +163,10 @@ of the song automatically.
 
 This is off by default because it's slow (each song runs through a
 machine-learning model, once per instrument isolated). Each instrument also
-runs standalone against an existing folder or file:
+runs standalone against an existing folder or file, with the same optional
+`midi`/`--midi` flag:
 
 ```
-python3 drum_isolator.py ["path/to/folder-or-file.mp3"]
-python3 bass_isolator.py ["path/to/folder-or-file.mp3"]
+python3 drum_isolator.py ["path/to/folder-or-file.mp3"] [midi]
+python3 bass_isolator.py ["path/to/folder-or-file.mp3"] [midi]
 ```
