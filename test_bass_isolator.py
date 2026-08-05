@@ -5,6 +5,7 @@ import unittest
 from unittest import mock
 
 import librosa
+import numpy as np
 from pydub import AudioSegment
 from pydub.generators import Sine
 
@@ -20,6 +21,34 @@ def _notes(note_names, note_ms=600, gap_ms=200):
         tone = Sine(freq).to_audio_segment(duration=note_ms).fade_in(10).fade_out(30)
         track += tone + AudioSegment.silent(duration=gap_ms)
     return track
+
+
+def _noisy_tone(note_name, duration_ms=2000, noise_amplitude=0.03, sr=44100):
+    """A single held tone with a little broadband noise mixed in, standing
+    in for the pitch-estimation jitter a real (imperfectly isolated) bass
+    stem has even during one sustained note."""
+    freq = librosa.note_to_hz(note_name)
+    n = int(sr * duration_ms / 1000)
+    t = np.linspace(0, duration_ms / 1000, n, endpoint=False)
+    tone = np.sin(2 * np.pi * freq * t)
+    rng = np.random.default_rng(0)
+    noisy = tone + rng.normal(scale=noise_amplitude, size=n)
+    samples = np.clip(noisy * 32767 * 0.5, -32768, 32767).astype(np.int16)
+    return AudioSegment(samples.tobytes(), sample_width=2, frame_rate=sr, channels=1)
+
+
+def _chirp(start_note, end_note, duration_ms=1200, sr=44100):
+    """A smooth linear pitch glide from start_note to end_note, standing in
+    for a real bass slide/bend."""
+    f_start = librosa.note_to_hz(start_note)
+    f_end = librosa.note_to_hz(end_note)
+    n = int(sr * duration_ms / 1000)
+    t = np.linspace(0, duration_ms / 1000, n, endpoint=False)
+    freq_t = f_start + (f_end - f_start) * (t / t[-1])
+    phase = 2 * np.pi * np.cumsum(freq_t) / sr
+    tone = np.sin(phase)
+    samples = (tone * 32767 * 0.5).astype(np.int16)
+    return AudioSegment(samples.tobytes(), sample_width=2, frame_rate=sr, channels=1)
 
 
 class TestIsolateBass(unittest.TestCase):
@@ -144,6 +173,31 @@ class TestDetectBassNotes(unittest.TestCase):
         notes = bass_isolator._detect_bass_notes(wav_path)
 
         self.assertTrue(any(note.velocity == 127 for note in notes))
+
+    def test_a_noisy_sustained_note_does_not_fragment_into_many_notes(self):
+        # Regression test: pitch-estimation jitter on a single held note in
+        # a real (imperfectly isolated) bass stem was previously splitting
+        # one note into dozens of tiny near-duplicate ones.
+        wav_path = os.path.join(self.tmp_dir, "bass.wav")
+        _noisy_tone("A1", duration_ms=2000).export(wav_path, format="wav")
+
+        notes = bass_isolator._detect_bass_notes(wav_path)
+
+        self.assertLessEqual(len(notes), 3)
+
+    def test_a_fast_pitch_glide_does_not_produce_one_note_per_semitone(self):
+        # Regression test: a smooth slide/bend was previously chopped into a
+        # staircase of one note per semitone it passed through. A glide fast
+        # enough that no intermediate semitone holds for a real note's worth
+        # of time (250ms across 3 semitones here) should land as a single
+        # note, not ~3-4 - a slower glide can legitimately read as a
+        # sequence of distinct notes instead, which is fine.
+        wav_path = os.path.join(self.tmp_dir, "bass.wav")
+        _chirp("E1", "G1", duration_ms=250).export(wav_path, format="wav")
+
+        notes = bass_isolator._detect_bass_notes(wav_path)
+
+        self.assertLessEqual(len(notes), 2)
 
 
 class TestWriteBassMidi(unittest.TestCase):
