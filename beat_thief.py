@@ -13,6 +13,7 @@ import yt_dlp
 
 import bass_isolator
 import drum_isolator
+import harmony_isolator
 import song_sanitizer
 
 BAR_WIDTH = 30
@@ -218,22 +219,28 @@ def main() -> None:
         help="Also isolate each song's bass to a wav (see --midi for a .mid too). Slow, off by default. Can also be given as a bare 'bass' argument, before or after the URL.",
     )
     parser.add_argument(
+        "--harmony",
+        action="store_true",
+        help="Also isolate each song's non-drums-non-bass content (vocals, guitars, keys, etc.) to a wav. Slow, off by default. Can also be given as a bare 'harmony' argument, before or after the URL.",
+    )
+    parser.add_argument(
         "--midi",
         action="store_true",
-        help="Also write a MIDI file for each isolated instrument, not just the wav. Only matters alongside --drums/--bass. Can also be given as a bare 'midi' argument.",
+        help="(Deprecated, may be removed later - MIDI quality is currently worse than Ableton's own audio-to-MIDI.) Also write a MIDI file for each isolated instrument, not just the wav. Only matters alongside --drums/--bass. Can also be given as a bare 'midi' argument.",
     )
 
-    # "drums"/"bass"/"midi" are accepted bare (no --) too, in any position,
-    # since that's the more natural way to type them - pull those out of
-    # argv before argparse ever sees them, so they don't collide with the
-    # url positional no matter where they appear.
+    # "drums"/"bass"/"harmony"/"midi" are accepted bare (no --) too, in any
+    # position, since that's the more natural way to type them - pull those
+    # out of argv before argparse ever sees them, so they don't collide with
+    # the url positional no matter where they appear.
     raw_args = sys.argv[1:]
-    bare_modes = {tok.lower() for tok in raw_args if tok.lower() in ("drums", "bass", "midi")}
-    remaining_args = [tok for tok in raw_args if tok.lower() not in ("drums", "bass", "midi")]
+    bare_modes = {tok.lower() for tok in raw_args if tok.lower() in ("drums", "bass", "harmony", "midi")}
+    remaining_args = [tok for tok in raw_args if tok.lower() not in ("drums", "bass", "harmony", "midi")]
 
     args = parser.parse_args(remaining_args)
     args.drums = args.drums or "drums" in bare_modes
     args.bass = args.bass or "bass" in bare_modes
+    args.harmony = args.harmony or "harmony" in bare_modes
     args.midi = args.midi or "midi" in bare_modes
 
     try:
@@ -275,7 +282,7 @@ def main() -> None:
             print(f"Sanitizing hit a snag, but your downloads are safe: {e}")
 
     isolation_filenames = list(sanitized_filenames)
-    if args.drums or args.bass:
+    if args.drums or args.bass or args.harmony:
         # A song that was already downloaded in a previous run (and thus
         # skipped this time, with no download/postprocessor hook firing for
         # it) is still something this run explicitly asked to isolate -
@@ -305,6 +312,16 @@ def main() -> None:
                 _exit(130)
             except Exception as e:
                 print(f"Isolating bass hit a snag, but your downloads are safe: {e}")
+
+    if args.harmony:
+        for filename in isolation_filenames:
+            try:
+                harmony_isolator.isolate_harmony_for_single_file(os.path.join(args.output, filename))
+            except KeyboardInterrupt:
+                print("\nStopped isolating harmony. Whatever was already produced is safe.")
+                _exit(130)
+            except Exception as e:
+                print(f"Isolating harmony hit a snag, but your downloads are safe: {e}")
 
     _exit(0 if result == 0 else 1)
 

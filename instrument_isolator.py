@@ -108,7 +108,7 @@ def has_existing_outputs(song_dir: str, label: str, require_midi: bool) -> bool:
     if not os.path.isdir(song_dir):
         return False
     entries = os.listdir(song_dir)
-    marker = f"({label} at"
+    marker = f"({label}"
     has_wav = any(marker in f and f.endswith(".wav") for f in entries)
     if not require_midi:
         return has_wav
@@ -149,7 +149,7 @@ def clear_stale_outputs(song_dir: str, label: str) -> None:
     files in the same shared song_dir alone."""
     if not os.path.isdir(song_dir):
         return
-    marker = f"({label} at"
+    marker = f"({label}"
     for f in os.listdir(song_dir):
         if marker in f and (f.endswith(".wav") or f.endswith(".mid")):
             os.remove(os.path.join(song_dir, f))

@@ -277,7 +277,7 @@ def main() -> None:
     parser.add_argument(
         "--midi",
         action="store_true",
-        help="Also write a MIDI file, not just the isolated wav. Can also be given as a bare 'midi' argument.",
+        help="(Deprecated, may be removed later - MIDI quality is currently worse than Ableton's own audio-to-MIDI.) Also write a MIDI file, not just the isolated wav. Can also be given as a bare 'midi' argument.",
     )
 
     raw_args = sys.argv[1:]

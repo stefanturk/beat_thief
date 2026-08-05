@@ -67,22 +67,27 @@ Duplicate downloads that get found and removed are moved into a visible
 
 ## Isolating instruments (optional, slow)
 
-Pass `drums` and/or `bass` (with or without `--`, in either order, before or
-after the URL) to also pull those parts out on their own — useful if you
-want to import them into a DAW (e.g. Ableton) to rebuild a digitized
-version of the performance, or just to understand how a song is built:
+Pass `drums`, `bass`, and/or `harmony` (with or without `--`, in either
+order, before or after the URL) to also pull those parts out on their own —
+useful if you want to import them into a DAW (e.g. Ableton) to rebuild a
+digitized version of the performance, or just to understand how a song is
+built:
 
 ```
-python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass
+python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass harmony
 ```
 
 For each song this produces one `<Song Title> (Isolated)/` folder
 containing whichever instruments you asked for, side by side — no separate
-top-level `Drums`/`Bass` folders to dig through.
+top-level `Drums`/`Bass`/`Harmony` folders to dig through.
 
 By default only the isolated `.wav` is written for each instrument. Add
-`midi` (or `--midi`) to also get a matching `.mid` file, built by detecting
-hits/notes directly in the wav:
+`midi` (or `--midi`) to also get a matching `.mid` file for drums/bass,
+built by detecting hits/notes directly in the wav. **This is deprecated and
+may be removed later** — the transcription quality is currently worse than
+Ableton's own audio-to-MIDI conversion, so it's mostly useful as a rough
+starting point rather than something to rely on. `harmony` has no MIDI
+step; it's audio only.
 
 ```
 python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass midi
@@ -129,6 +134,13 @@ own peak volume is gated out — imperfect stem separation tends to leave a
 low-level noise floor behind that would otherwise get misread as extra,
 spurious notes.
 
+### Harmony
+
+`<Song Title> (Isolated Harmony).wav` is everything left in the mix once
+drums and bass are pulled out — vocals, guitars, keys, pads, whatever else
+is there — meant to drop straight into a DAW alongside the drums/bass
+exports from the same song. No MIDI step for this one, just audio.
+
 ### The shared beat-1 / tempo grid
 
 Any dead air or drum-less/bass-less intro is trimmed off the front of the
@@ -163,10 +175,11 @@ of the song automatically.
 
 This is off by default because it's slow (each song runs through a
 machine-learning model, once per instrument isolated). Each instrument also
-runs standalone against an existing folder or file, with the same optional
-`midi`/`--midi` flag:
+runs standalone against an existing folder or file — drums/bass with the
+same optional (deprecated) `midi`/`--midi` flag, harmony with no flags:
 
 ```
 python3 drum_isolator.py ["path/to/folder-or-file.mp3"] [midi]
 python3 bass_isolator.py ["path/to/folder-or-file.mp3"] [midi]
+python3 harmony_isolator.py ["path/to/folder-or-file.mp3"]
 ```
