@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 """Isolate a song's drums from downloaded MP3s: a drums.wav (the full drum
 mix, pulled out of the song with Demucs) and a drums.mid built by detecting
-hits directly in it — no manual conversion needed. Any dead air or drum-less
-intro is trimmed off the front first, so the wav and MIDI both start on beat
-1, and the MIDI's own tempo is detected and then precisely refined against
-every hit across the whole song, so it actually lands on the grid on import
-instead of at the wrong BPM."""
+hits directly in it — no manual conversion needed. Both are trimmed and
+tempo-aligned to the same shared song_alignment() as every other isolated
+instrument (see instrument_isolator.py), so drums.mid lines up exactly with
+bass.mid and any future instrument exports from the same song."""
 
 from __future__ import annotations
 
 import argparse
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 
 import librosa
 import numpy as np
 import pretty_midi
-from pydub import AudioSegment
 
-import song_sanitizer
+import instrument_isolator
 
 DRUMS_DIR_NAME = "Drums"
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
@@ -59,17 +56,6 @@ _KICK_PERCENTILE = 33  # bottom third of a song's onsets -> kick
 _SNARE_PERCENTILE = 67  # middle third -> snare, top third -> cymbal
 
 _EXPECTED_OUTPUTS = (DRUMS_WAV_FILENAME, MIDI_FILENAME)
-
-
-def _run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | None = None) -> str:
-    """Run demucs and return the directory containing the separated stems."""
-    cmd = [sys.executable, "-m", "demucs", "-n", model_name, "-o", out_dir]
-    if two_stems:
-        cmd += ["--two-stems", two_stems]
-    cmd.append(input_path)
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    track_name = os.path.splitext(os.path.basename(input_path))[0]
-    return os.path.join(out_dir, model_name, track_name)
 
 
 _VELOCITY_WINDOW_SEC = 0.03
@@ -122,14 +108,8 @@ def _detect_note_events(wav_path: str) -> list[pretty_midi.Note]:
     to make that split meaningful.
 
     Velocity is derived from the waveform's peak amplitude just after each
-    onset, normalized against the loudest *hit* in the file (not the raw
-    waveform's global peak sample, which can sit outside any detected onset
-    window and would then mean no hit ever reaches full velocity) — so the
-    hardest-hit note in the song always lands at 127 and every other note is
-    scaled relative to it. Not from the onset-strength envelope's own peak,
-    which is dominated by rare outlier spikes (e.g. a single unusually sharp
-    transient) and made everything else round down to the minimum velocity
-    when used directly."""
+    onset, normalized against the loudest hit in the file (see
+    instrument_isolator.velocities_from_amplitudes)."""
     y, sr = librosa.load(wav_path, sr=None, mono=True)
     onset_env = librosa.onset.onset_strength(y=y, sr=sr)
     if onset_env.size == 0 or not np.isfinite(onset_env).any() or onset_env.max() <= 0:
@@ -141,171 +121,50 @@ def _detect_note_events(wav_path: str) -> list[pretty_midi.Note]:
     velocity_window_samples = max(1, int(_VELOCITY_WINDOW_SEC * sr))
     classify_window_samples = max(1, int(_CLASSIFY_WINDOW_SEC * sr))
 
-    raw_hits = []
+    amplitudes = []
+    centroids = []
     for start in onset_times:
         start_sample = int(start * sr)
         velocity_window = y[start_sample:start_sample + velocity_window_samples]
         classify_window = y[start_sample:start_sample + classify_window_samples]
-        hit_amplitude = np.abs(velocity_window).max() if velocity_window.size else 0.0
-        centroid = _hit_centroid(classify_window, sr)
-        raw_hits.append((start, hit_amplitude, centroid))
+        amplitudes.append(np.abs(velocity_window).max() if velocity_window.size else 0.0)
+        centroids.append(_hit_centroid(classify_window, sr))
 
-    peak_hit_amplitude = max((amp for _, amp, _ in raw_hits), default=0.0)
-    if peak_hit_amplitude <= 0:
+    if not amplitudes:
         return []
 
-    hits = []
-    for start, hit_amplitude, centroid in raw_hits:
-        velocity = int(np.clip(hit_amplitude / peak_hit_amplitude * 127, 1, 127))
-        hits.append((start, velocity, centroid))
+    velocities = instrument_isolator.velocities_from_amplitudes(amplitudes)
 
-    centroids = np.array([c for _, _, c in hits if c is not None], dtype=np.float64)
-    if centroids.size >= _MIN_ONSETS_FOR_RELATIVE_CLASSIFICATION:
-        kick_threshold = float(np.percentile(centroids, _KICK_PERCENTILE))
-        snare_threshold = float(np.percentile(centroids, _SNARE_PERCENTILE))
+    valid_centroids = np.array([c for c in centroids if c is not None], dtype=np.float64)
+    if valid_centroids.size >= _MIN_ONSETS_FOR_RELATIVE_CLASSIFICATION:
+        kick_threshold = float(np.percentile(valid_centroids, _KICK_PERCENTILE))
+        snare_threshold = float(np.percentile(valid_centroids, _SNARE_PERCENTILE))
     else:
         kick_threshold = _KICK_MAX_CENTROID_HZ
         snare_threshold = _SNARE_MAX_CENTROID_HZ
 
     notes = []
-    for start, velocity, centroid in hits:
+    for start, velocity, centroid in zip(onset_times, velocities, centroids):
         pitch = _note_for_centroid(centroid, kick_threshold, snare_threshold)
         notes.append(pretty_midi.Note(velocity=velocity, pitch=pitch, start=float(start), end=float(start) + _NOTE_DURATION_SEC))
     return notes
 
 
-_DEFAULT_TEMPO = 120.0
-_MIN_ONSETS_FOR_REFINEMENT = 16
-_REFINEMENT_SUBDIVISION = 4  # fit against a 16th-note grid (beat / 4)
-_REFINEMENT_BOOTSTRAP_SPAN = 4  # short first pass, to sharpen the estimate before trusting longer spans
-_REFINEMENT_MAX_SPAN = 64  # how many onsets ahead to pair each onset with in the second pass
-_REFINEMENT_TOLERANCE = 0.15  # fraction of a grid unit a gap may be off by and still count
-
-
-def _detect_tempo(drums_wav_path: str) -> float:
-    """Rough tempo estimate from the isolated drums stem. This alone is only
-    accurate to within a few BPM — good enough as a starting point for
-    _refine_tempo(), not on its own precise enough to import on the grid."""
-    y, sr = librosa.load(drums_wav_path, sr=None, mono=True)
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    tempo = float(np.atleast_1d(tempo)[0])
-    return tempo if tempo > 0 else _DEFAULT_TEMPO
-
-
-def _grid_unit_estimate(onset_times: np.ndarray, unit: float, max_span: int) -> float | None:
-    """One pass of the gap-ratio averaging described in _refine_tempo, for
-    onset pairs up to max_span apart. Returns None if nothing usable was
-    found (so the caller can fall back to the estimate it already has)."""
-    estimates = []
-    weights = []
-    for offset in range(1, max_span + 1):
-        gaps = onset_times[offset:] - onset_times[:-offset]
-        multiples = np.round(gaps / unit)
-        valid = multiples > 0
-        gaps, multiples = gaps[valid], multiples[valid]
-        if gaps.size == 0:
-            continue
-        per_unit = gaps / multiples
-        close_enough = np.abs(per_unit - unit) / unit < _REFINEMENT_TOLERANCE
-        if not np.any(close_enough):
-            continue
-        estimates.append(per_unit[close_enough])
-        weights.append(multiples[close_enough])  # longer spans -> more precise estimate
-
-    if not estimates:
-        return None
-    return float(np.average(np.concatenate(estimates), weights=np.concatenate(weights)))
-
-
-def _refine_tempo(onset_times: np.ndarray, initial_tempo: float) -> float:
-    """Turn a rough tempo estimate into a precise one using every detected
-    hit across the whole song. A single windowed estimate (_detect_tempo)
-    is only accurate to within a few BPM.
-
-    A naive single global fit (assign each onset an integer grid index from
-    the start of the song, then least-squares through all of them) turns
-    out to be unstable here: even a couple of BPM of initial error
-    accumulates across hundreds of onsets until the "nearest grid index"
-    rounding starts picking the wrong integer, and the fit locks onto that
-    wrong assignment instead of converging.
-
-    Instead, this looks at gaps between nearby pairs of onsets, works out
-    how many grid units each gap likely spans, and derives a small, direct,
-    low-drift period estimate from each one — then weight-averages all of
-    them. But that alone has the same failure mode at a smaller scale: a
-    pair far apart only needs a tiny relative error in the starting guess
-    to have its gap rounded to the wrong integer multiple entirely, and
-    those (wrong, but heavily-weighted) far-apart pairs would dominate the
-    average. So this runs in two passes — a short-span pass first to
-    sharpen the estimate enough that long-span pairs can then be trusted,
-    then a full-span pass using that sharpened value. Averaging hundreds to
-    thousands of these independent estimates in the second pass cancels out
-    individual onset-detection jitter and gets this within a small fraction
-    of a BPM. Fits against a 16th-note grid rather than the beat itself,
-    since hits land on kick quarters, snare backbeats, and hi-hat
-    8ths/16ths alike, which uses far more of the song's timing data than
-    only looking at one instrument's onsets would.
-
-    This does not fix octave errors (reading half or double the true
-    tempo) — that's a separate failure mode of the initial rough estimate;
-    refinement just makes whichever octave it picked very precise."""
-    onset_times = np.sort(np.asarray(onset_times, dtype=np.float64))
-    if initial_tempo <= 0 or onset_times.size < _MIN_ONSETS_FOR_REFINEMENT:
-        return initial_tempo
-
-    unit = 60.0 / initial_tempo / _REFINEMENT_SUBDIVISION
-
-    short_span = min(onset_times.size - 1, _REFINEMENT_BOOTSTRAP_SPAN)
-    sharpened = _grid_unit_estimate(onset_times, unit, short_span)
-    if sharpened is not None:
-        unit = sharpened
-
-    full_span = min(onset_times.size - 1, _REFINEMENT_MAX_SPAN)
-    if full_span > short_span:
-        refined = _grid_unit_estimate(onset_times, unit, full_span)
-        if refined is not None:
-            unit = refined
-
-    return 60.0 / unit / _REFINEMENT_SUBDIVISION
-
-
-def _write_drum_midi(song_dir: str) -> None:
+def _write_drum_midi(song_dir: str, tempo: float) -> None:
     """Detect hits in drums.wav and write them all to a single drums.mid
-    track, each classified as kick/snare/cymbal (see _classify_hit). Notes
-    keep their raw onset-detected times (no quantizing/snapping) — instead,
-    the file's own tempo is detected and then precisely refined against
-    every hit in the song, so the grid itself lines up with the recording
-    on import."""
+    track, each classified as kick/snare/cymbal (see _detect_note_events).
+    Notes keep their raw onset-detected times (no quantizing/snapping) -
+    tempo comes from the shared song_alignment() (see isolate_drums), not a
+    fresh per-file estimate, so it matches every other instrument exported
+    from the same song."""
     drums_wav = os.path.join(song_dir, DRUMS_WAV_FILENAME)
-    rough_tempo = _detect_tempo(drums_wav) if os.path.exists(drums_wav) else _DEFAULT_TEMPO
-
     all_notes = _detect_note_events(drums_wav) if os.path.exists(drums_wav) else []
-
-    onset_times = np.array([note.start for note in all_notes], dtype=np.float64)
-    tempo = _refine_tempo(onset_times, rough_tempo)
 
     midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
     drum_track = pretty_midi.Instrument(program=0, is_drum=True, name=f"Drums ({round(tempo)})")
     drum_track.notes = sorted(all_notes, key=lambda note: note.start)
     midi.instruments.append(drum_track)
     midi.write(os.path.join(song_dir, MIDI_FILENAME))
-
-
-def _trim_leading_silence(drums_wav_path: str) -> str:
-    """Cut any dead air (or a quiet, drum-less intro) off the front of the
-    isolated drums stem, reusing song_sanitizer's own intro-cut detection so
-    this lines up with how the song's own intro gets trimmed — otherwise the
-    first real hit lands however many seconds into the file the original
-    intro happened to be, instead of on beat 1. Returns the (possibly
-    unchanged) path to the trimmed file, written next to the original."""
-    audio = AudioSegment.from_wav(drums_wav_path)
-    cut_ms = song_sanitizer._find_cut_from_start(audio, audio.dBFS)
-    if not (0 < cut_ms < len(audio)):
-        return drums_wav_path
-    trimmed = song_sanitizer.trim(audio, cut_ms, None)
-    trimmed_path = os.path.join(os.path.dirname(drums_wav_path), "drums_trimmed.wav")
-    trimmed.export(trimmed_path, format="wav")
-    return trimmed_path
 
 
 def isolate_drums(mp3_path: str, drums_root: str) -> bool:
@@ -319,17 +178,18 @@ def isolate_drums(mp3_path: str, drums_root: str) -> bool:
         return False
 
     print(f"{title}: isolating drums (this can take a few minutes)...")
+    trim_ms, tempo = instrument_isolator.song_alignment(mp3_path)
+
     tmp_dir = tempfile.mkdtemp()
     try:
-        drums_stem_dir = _run_demucs(mp3_path, tmp_dir, _HTDEMUCS_MODEL, two_stems="drums")
+        drums_stem_dir = instrument_isolator.run_demucs(mp3_path, tmp_dir, _HTDEMUCS_MODEL, two_stems="drums")
         drums_wav = os.path.join(drums_stem_dir, "drums.wav")
-        drums_wav = _trim_leading_silence(drums_wav)
 
         os.makedirs(song_dir, exist_ok=True)
-        shutil.copy(drums_wav, os.path.join(song_dir, DRUMS_WAV_FILENAME))
+        instrument_isolator.trim_and_export(drums_wav, trim_ms, os.path.join(song_dir, DRUMS_WAV_FILENAME))
 
         print(f"{title}: transcribing to MIDI...")
-        _write_drum_midi(song_dir)
+        _write_drum_midi(song_dir, tempo)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
