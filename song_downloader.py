@@ -195,12 +195,12 @@ def main() -> None:
 
     print()
     skipped = max((_total_songs or 0) - _downloaded_count - _failed_count, 0)
-    parts = [f"downloaded {_downloaded_count} new song{'s' if _downloaded_count != 1 else ''}"]
+    parts = [f"Downloaded {_downloaded_count} new song{'s' if _downloaded_count != 1 else ''}"]
     if skipped:
         parts.append(f"skipped {skipped} already downloaded")
     if _failed_count:
         parts.append(f"{_failed_count} failed")
-    print(f"All done! {', '.join(parts)}.")
+    print(f"Downloading complete: {', '.join(parts)}.")
     print(f"Your music is in: {args.output}")
 
     try:
