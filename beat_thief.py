@@ -118,6 +118,42 @@ def _count_playlist_entries(url: str) -> int | None:
     return len(entries) if entries is not None else 1
 
 
+def _requested_mp3_filenames(url: str, output_dir: str) -> list[str]:
+    """The mp3 filename(s) this url resolves to, whether they were just
+    downloaded this run or already sat on disk from a previous one (skipped
+    via the download archive). Used to scope drum/bass isolation to what
+    was actually asked for this run - _downloaded_filenames alone misses a
+    request for a song you already have, since yt-dlp's archive skip means
+    no download/postprocessor hook ever fires for it."""
+    probe_opts = {
+        "format": "bestaudio/best",
+        "outtmpl": os.path.join(output_dir, "%(title)s - %(uploader)s.%(ext)s"),
+        "noplaylist": True,
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
+        "quiet": True,
+        "no_warnings": True,
+        "logger": _SilentLogger(),
+    }
+    try:
+        with yt_dlp.YoutubeDL(probe_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return []
+            entries = info.get("entries") if info.get("entries") is not None else [info]
+            filenames = []
+            for entry in entries:
+                if not entry:
+                    continue
+                try:
+                    raw_path = ydl.prepare_filename(entry)
+                except Exception:
+                    continue
+                filenames.append(os.path.splitext(os.path.basename(raw_path))[0] + ".mp3")
+            return filenames
+    except Exception:
+        return []
+
+
 def download_playlist(url: str, output_dir: str) -> int:
     global _total_songs
     os.makedirs(output_dir, exist_ok=True)
@@ -231,8 +267,20 @@ def main() -> None:
         except Exception as e:
             print(f"Sanitizing hit a snag, but your downloads are safe: {e}")
 
+    isolation_filenames = list(sanitized_filenames)
+    if args.drums or args.bass:
+        # A song that was already downloaded in a previous run (and thus
+        # skipped this time, with no download/postprocessor hook firing for
+        # it) is still something this run explicitly asked to isolate -
+        # widen the scope to cover it too, not just this run's fresh saves.
+        already_seen = set(isolation_filenames)
+        for filename in _requested_mp3_filenames(args.url, args.output):
+            if filename not in already_seen and os.path.exists(os.path.join(args.output, filename)):
+                isolation_filenames.append(filename)
+                already_seen.add(filename)
+
     if args.drums:
-        for filename in sanitized_filenames:
+        for filename in isolation_filenames:
             try:
                 drum_isolator.isolate_drums_for_single_file(os.path.join(args.output, filename))
             except KeyboardInterrupt:
@@ -242,7 +290,7 @@ def main() -> None:
                 print(f"Isolating drums hit a snag, but your downloads are safe: {e}")
 
     if args.bass:
-        for filename in sanitized_filenames:
+        for filename in isolation_filenames:
             try:
                 bass_isolator.isolate_bass_for_single_file(os.path.join(args.output, filename))
             except KeyboardInterrupt:
