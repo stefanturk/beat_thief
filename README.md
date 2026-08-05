@@ -60,24 +60,31 @@ what's in the folder.
 Duplicate downloads that get found and removed are moved into a visible
 `Duplicates` folder next to your songs, not deleted outright.
 
-## Isolating drums (optional, slow)
+## Isolating instruments (optional, slow)
 
-Pass `drums` to also pull each song's drums out on their own — useful if
-you want to import them into a DAW (e.g. Ableton) to rebuild a digitized
-version of the drum performance:
+Pass `drums` and/or `bass` to also pull those parts out on their own —
+useful if you want to import them into a DAW (e.g. Ableton) to rebuild a
+digitized version of the performance, or just to understand how a song is
+built:
 
 ```
-python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums
+python3 song_downloader.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass
 ```
+
+Every instrument you isolate for a song shares the exact same beat-1 start
+and the exact same tempo grid, so e.g. `drums.mid` and `bass.mid` line up
+exactly when dragged into a DAW together. Both the trim point and the
+tempo are computed once from the full song (reusing the sanitizer's own
+intro-cut detection, and a tempo refined across the whole track), rather
+than each instrument guessing its own — see below for what that grid
+computation looks like in detail.
+
+### Drums
 
 For each song this produces a `Drums/<Song Title>/` folder containing
 `drums.wav` (the isolated drum mix) and `drums.mid` — a MIDI file built by
 detecting hits directly in `drums.wav` and writing them all onto one drum
-track. Drag `drums.mid` straight onto a MIDI track with a drum rack
-loaded. Any dead air or drum-less intro is trimmed off the front first
-(reusing the same intro-cut detection as the sanitizer), so both the wav
-and the MIDI start right on beat 1 instead of however many seconds into
-the file the original intro happened to be.
+track. Drag `drums.mid` straight onto a MIDI track with a drum rack loaded.
 
 Each hit is guessed as kick, snare, or cymbal/hi-hat from its spectral
 centroid (low-frequency hits are kicks, mid is snare, high is
@@ -86,14 +93,31 @@ piece (kick=36, snare=38, cymbal=42) — a cheap heuristic rather than a
 second ML model, so expect it to be right most of the time on clean hits
 and to need some manual cleanup on busier or more layered passages.
 
-The MIDI file's own tempo is detected, then precisely refined by fitting a
-constant grid through every hit across the whole song (averaging over
-however many hundred hits are in a full track cancels out individual
-onset-detection jitter far better than a single windowed estimate can),
-typically landing within a small fraction of a BPM of the song's real
-tempo. Notes themselves are left at their raw, unquantized onset-detected
-times — only the tempo is adjusted, so the grid lines up with the recording
-instead of the recording being forced onto a grid.
+### Bass
+
+For each song this produces a `Bass/<Song Title>/` folder containing
+`bass.wav` (the isolated bass part) and `bass.mid` — a MIDI file built by
+tracking the bass's pitch directly (bass is monophonic, so this tracks one
+note at a time rather than guessing a fixed drum-rack note per hit) and
+writing the detected notes onto one track. Expect it to do well on a clear,
+single-note bassline and to need cleanup on anything with slides, chords,
+or heavy effects.
+
+### The shared beat-1 / tempo grid
+
+Any dead air or drum-less/bass-less intro is trimmed off the front of the
+whole song first (reusing the same intro-cut detection as the sanitizer),
+so every isolated instrument's wav and MIDI start right on beat 1 instead
+of however many seconds into the file the original intro happened to be.
+
+Each song's tempo is detected once from the full mix, then precisely
+refined by fitting a constant grid through every onset across the whole
+song (averaging over however many hundred onsets are in a full track
+cancels out individual onset-detection jitter far better than a single
+windowed estimate can), typically landing within a small fraction of a BPM
+of the song's real tempo. Notes themselves are left at their raw,
+unquantized detected times — only the tempo is adjusted, so the grid lines
+up with the recording instead of the recording being forced onto a grid.
 
 Automatic tempo detection can still occasionally be off by an octave
 (reading 95 BPM as 190, or vice versa) — refinement makes whichever octave
@@ -103,9 +127,10 @@ halving or doubling the tempo in Ableton fixes it without needing to touch
 the notes.
 
 This is off by default because it's slow (each song runs through a
-machine-learning model). It also runs standalone against an existing
-folder or file:
+machine-learning model, once per instrument isolated). Each instrument also
+runs standalone against an existing folder or file:
 
 ```
 python3 drum_isolator.py ["path/to/folder-or-file.mp3"]
+python3 bass_isolator.py ["path/to/folder-or-file.mp3"]
 ```

@@ -22,18 +22,6 @@ def _hits(count, hit_ms=80, gap_ms=400, freq=200):
     return track
 
 
-def _click_track(bpm, beats, hit_ms=30, freq=1000):
-    """A steady metronome-like click at an exact tempo, for exercising tempo
-    detection/refinement against a known-correct answer."""
-    interval_ms = 60000.0 / bpm
-    gap_ms = interval_ms - hit_ms
-    beat_audio = Sine(freq).to_audio_segment(duration=hit_ms).fade_out(hit_ms // 2)
-    track = AudioSegment.silent(duration=0)
-    for _ in range(beats):
-        track += beat_audio + AudioSegment.silent(duration=int(gap_ms))
-    return track
-
-
 class TestIsolateDrums(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
@@ -55,17 +43,23 @@ class TestIsolateDrums(unittest.TestCase):
             f.write(b"drums")
         return stem_dir
 
-    def _fake_write_drum_midi(self, song_dir):
+    def _fake_trim_and_export(self, wav_path, trim_ms, out_path):
+        shutil.copy(wav_path, out_path)
+
+    def _fake_write_drum_midi(self, song_dir, tempo):
         # Real onset detection needs real audio; these tests only care about
         # file orchestration, so stand in with an empty placeholder file.
         with open(os.path.join(song_dir, drum_isolator.MIDI_FILENAME), "wb") as f:
             f.write(b"midi")
 
     @mock.patch("drum_isolator._write_drum_midi")
-    @mock.patch("drum_isolator._trim_leading_silence", side_effect=lambda path: path)
-    @mock.patch("drum_isolator._run_demucs")
-    def test_produces_drums_wav_and_midi(self, mock_run_demucs, mock_trim, mock_write_midi):
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_produces_drums_wav_and_midi(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi):
+        mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
         mock_write_midi.side_effect = self._fake_write_drum_midi
 
         result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
@@ -74,9 +68,9 @@ class TestIsolateDrums(unittest.TestCase):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         for name in drum_isolator._EXPECTED_OUTPUTS:
             self.assertTrue(os.path.exists(os.path.join(song_dir, name)), name)
-        mock_write_midi.assert_called_once_with(song_dir)
+        mock_write_midi.assert_called_once_with(song_dir, 120.0)
 
-    @mock.patch("drum_isolator._run_demucs")
+    @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_all_outputs_already_exist(self, mock_run_demucs):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         os.makedirs(song_dir)
@@ -90,16 +84,19 @@ class TestIsolateDrums(unittest.TestCase):
         mock_run_demucs.assert_not_called()
 
     @mock.patch("drum_isolator._write_drum_midi")
-    @mock.patch("drum_isolator._trim_leading_silence", side_effect=lambda path: path)
-    @mock.patch("drum_isolator._run_demucs")
-    def test_reruns_when_the_midi_file_is_missing(self, mock_run_demucs, mock_trim, mock_write_midi):
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_reruns_when_the_midi_file_is_missing(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         os.makedirs(song_dir)
         with open(os.path.join(song_dir, drum_isolator.DRUMS_WAV_FILENAME), "wb") as f:
             f.write(b"x")
         # drums.mid missing
 
+        mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
         mock_write_midi.side_effect = self._fake_write_drum_midi
 
         result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
@@ -182,49 +179,6 @@ class TestNoteForCentroid(unittest.TestCase):
         self.assertEqual(drum_isolator._note_for_centroid(None, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._KICK_NOTE)
 
 
-class TestDetectTempo(unittest.TestCase):
-    def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_detects_tempo_of_a_steady_click_track(self):
-        wav_path = os.path.join(self.tmp_dir, "drums.wav")
-        _click_track(bpm=120, beats=24).export(wav_path, format="wav")
-
-        tempo = drum_isolator._detect_tempo(wav_path)
-
-        # Octave errors (reading half or double the real tempo) are a known
-        # limitation of automatic tempo detection, so accept any of those
-        # instead of requiring an exact match to 120.
-        ratio = tempo / 120.0
-        self.assertTrue(any(abs(ratio - r) < 0.05 for r in (0.5, 1.0, 2.0)), tempo)
-
-
-class TestRefineTempo(unittest.TestCase):
-    def test_recovers_precise_tempo_from_noisy_onsets(self):
-        true_bpm = 137.73
-        period = 60.0 / true_bpm
-        rng = np.random.default_rng(0)
-        n_hits = 300
-        onset_times = np.arange(n_hits) * period
-        onset_times += rng.normal(scale=0.004, size=n_hits)  # ~4ms onset-detection jitter
-
-        # Deliberately start from a rough/wrong initial estimate, matching
-        # how _detect_tempo's single windowed guess is only approximate.
-        refined = drum_isolator._refine_tempo(onset_times, initial_tempo=140.0)
-
-        self.assertAlmostEqual(refined, true_bpm, delta=0.1)
-
-    def test_too_few_onsets_returns_the_initial_estimate_unchanged(self):
-        onset_times = np.array([0.0, 0.5, 1.0])
-
-        refined = drum_isolator._refine_tempo(onset_times, initial_tempo=95.0)
-
-        self.assertEqual(refined, 95.0)
-
-
 class TestWriteDrumMidi(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
@@ -235,7 +189,7 @@ class TestWriteDrumMidi(unittest.TestCase):
     def test_writes_notes_for_every_detected_hit(self):
         _hits(5).export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
 
-        drum_isolator._write_drum_midi(self.tmp_dir)
+        drum_isolator._write_drum_midi(self.tmp_dir, tempo=120.0)
 
         midi_path = os.path.join(self.tmp_dir, drum_isolator.MIDI_FILENAME)
         self.assertTrue(os.path.exists(midi_path))
@@ -252,7 +206,7 @@ class TestWriteDrumMidi(unittest.TestCase):
         self.assertEqual(starts, sorted(starts))
 
     def test_missing_drums_wav_produces_an_empty_midi_file(self):
-        drum_isolator._write_drum_midi(self.tmp_dir)
+        drum_isolator._write_drum_midi(self.tmp_dir, tempo=120.0)
 
         import pretty_midi
         # An instrument with zero notes isn't written back out by pretty_midi
@@ -261,23 +215,18 @@ class TestWriteDrumMidi(unittest.TestCase):
         notes = [note for instrument in midi.instruments for note in instrument.notes]
         self.assertEqual(notes, [])
 
-    def test_embeds_a_precisely_refined_tempo_without_snapping_notes(self):
-        true_bpm = 123.4
-        click = _click_track(bpm=true_bpm, beats=200)
-        click.export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
+    def test_embeds_the_given_tempo_without_snapping_notes(self):
+        _hits(6).export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
 
-        drum_isolator._write_drum_midi(self.tmp_dir)
+        drum_isolator._write_drum_midi(self.tmp_dir, tempo=123.4)
 
         import pretty_midi
         midi = pretty_midi.PrettyMIDI(os.path.join(self.tmp_dir, drum_isolator.MIDI_FILENAME))
         _, tempi = midi.get_tempo_changes()
-        tempo = tempi[0]
-
-        # Octave errors are a separate, accepted failure mode - check
-        # precision within whichever octave the rough estimate landed on.
-        targets = [octave * true_bpm for octave in (0.5, 1.0, 2.0)]
-        closest_target = min(targets, key=lambda target: abs(tempo - target))
-        self.assertLess(abs(tempo - closest_target), 0.1, tempo)
+        # write_drum_midi should embed exactly the tempo it's given, not
+        # detect/refine its own - that's now song_alignment()'s job, shared
+        # across every instrument isolated from the same song.
+        self.assertAlmostEqual(tempi[0], 123.4, delta=0.1)
 
         # Notes should keep their raw onset-detected times untouched - not
         # snapped to any musical grid - matching what _detect_note_events
@@ -291,37 +240,6 @@ class TestWriteDrumMidi(unittest.TestCase):
         self.assertEqual(len(actual_starts), len(expected_starts))
         for actual, expected in zip(actual_starts, expected_starts):
             self.assertAlmostEqual(actual, expected, delta=0.01)
-
-
-class TestTrimLeadingSilence(unittest.TestCase):
-    def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_trims_a_silent_intro_so_the_beat_starts_near_zero(self):
-        silent_intro = AudioSegment.silent(duration=3000)
-        beat = Sine(200).to_audio_segment(duration=3000)
-        track = silent_intro + beat
-        wav_path = os.path.join(self.tmp_dir, "drums.wav")
-        track.export(wav_path, format="wav")
-
-        trimmed_path = drum_isolator._trim_leading_silence(wav_path)
-
-        self.assertNotEqual(trimmed_path, wav_path)
-        trimmed_audio = AudioSegment.from_wav(trimmed_path)
-        # The ~3s silent intro should be gone, leaving mostly just the beat.
-        self.assertLess(len(trimmed_audio), len(track) - 1500)
-
-    def test_no_intro_to_trim_leaves_the_file_alone(self):
-        beat = Sine(200).to_audio_segment(duration=3000)
-        wav_path = os.path.join(self.tmp_dir, "drums.wav")
-        beat.export(wav_path, format="wav")
-
-        trimmed_path = drum_isolator._trim_leading_silence(wav_path)
-
-        self.assertEqual(trimmed_path, wav_path)
 
 
 class TestIsolateDrumsForFolder(unittest.TestCase):

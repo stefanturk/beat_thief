@@ -2,9 +2,11 @@ downloads/
 .downloaded_archive.txt
 Duplicates/
 Drums/
+Bass/
 __pycache__/
 *.pyc
 .venv/
 venv/
 .DS_Store
 .claude/
+Funky Drummer (100 BPM).mid

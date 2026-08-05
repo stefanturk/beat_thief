@@ -9,6 +9,7 @@ import sys
 
 import yt_dlp
 
+import bass_isolator
 import drum_isolator
 import song_sanitizer
 
@@ -165,12 +166,14 @@ def main() -> None:
     )
     parser.add_argument(
         "mode",
-        nargs="?",
-        choices=["drums"],
-        help="Pass 'drums' to also isolate each song's drums (drums.wav + drums.mid). Slow, off by default.",
+        nargs="*",
+        choices=["drums", "bass"],
+        help="Pass 'drums' and/or 'bass' to also isolate each song's drums (drums.wav + drums.mid) "
+        "and/or bass (bass.wav + bass.mid). Slow, off by default.",
     )
     args = parser.parse_args()
-    args.drums = args.mode == "drums"
+    args.drums = "drums" in args.mode
+    args.bass = "bass" in args.mode
 
     try:
         result = download_playlist(args.url, args.output)
@@ -216,6 +219,15 @@ def main() -> None:
             _exit(130)
         except Exception as e:
             print(f"Isolating drums hit a snag, but your downloads are safe: {e}")
+
+    if args.bass:
+        try:
+            bass_isolator.isolate_bass_for_folder(args.output)
+        except KeyboardInterrupt:
+            print("\nStopped isolating bass. Whatever was already produced is safe.")
+            _exit(130)
+        except Exception as e:
+            print(f"Isolating bass hit a snag, but your downloads are safe: {e}")
 
     _exit(0 if result == 0 else 1)
 
