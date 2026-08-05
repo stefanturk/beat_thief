@@ -418,6 +418,24 @@ class TestSanitizeFile(unittest.TestCase):
         self.assertTrue(os.path.exists(copy_path))
         self.assertAlmostEqual(len(sanitizer.load_audio(copy_path)), original_len, delta=200)
 
+    @mock.patch("song_sanitizer._prompt_choice")
+    def test_auto_fades_ambiguous_outro_without_prompting(self, mock_prompt_choice):
+        filename = "Song - Artist.mp3"
+        original_path = os.path.join(self.tmp_dir, filename)
+        loud_body = _tone(5000, dbfs_gain=-3)
+        quiet_outro = _tone(3000, dbfs_gain=-45)
+        track = loud_body + quiet_outro
+        sanitizer.export_audio(track, original_path)
+
+        new_flags = sanitizer.sanitize_file(filename, self.tmp_dir)
+
+        self.assertEqual(new_flags, [])
+        mock_prompt_choice.assert_not_called()
+        copy_path = os.path.join(self.tmp_dir, filename)
+        self.assertTrue(os.path.exists(copy_path))
+        # Faded in place, not trimmed away - length is essentially unchanged.
+        self.assertAlmostEqual(len(sanitizer.load_audio(copy_path)), len(track), delta=200)
+
     def test_auto_trims_silent_intro_and_replaces_the_original(self):
         filename = "Song - Artist.mp3"
         original_path = os.path.join(self.tmp_dir, filename)

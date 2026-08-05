@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Download all songs from a YouTube/YouTube Music playlist as MP3s."""
+"""beat_thief: download all songs from a YouTube/YouTube Music playlist as
+MP3s, sanitize them, and optionally isolate drums/bass to MIDI."""
 
 from __future__ import annotations
 
@@ -165,15 +166,16 @@ def main() -> None:
         help=f"Output directory (default: {default_output})",
     )
     parser.add_argument(
-        "mode",
-        nargs="*",
-        choices=["drums", "bass"],
-        help="Pass 'drums' and/or 'bass' to also isolate each song's drums (drums.wav + drums.mid) "
-        "and/or bass (bass.wav + bass.mid). Slow, off by default.",
+        "--drums",
+        action="store_true",
+        help="Also isolate each song's drums to wav + MIDI. Slow, off by default.",
+    )
+    parser.add_argument(
+        "--bass",
+        action="store_true",
+        help="Also isolate each song's bass to wav + MIDI. Slow, off by default.",
     )
     args = parser.parse_args()
-    args.drums = "drums" in args.mode
-    args.bass = "bass" in args.mode
 
     try:
         result = download_playlist(args.url, args.output)

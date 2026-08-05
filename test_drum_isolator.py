@@ -46,10 +46,10 @@ class TestIsolateDrums(unittest.TestCase):
     def _fake_trim_and_export(self, wav_path, trim_ms, out_path):
         shutil.copy(wav_path, out_path)
 
-    def _fake_write_drum_midi(self, song_dir, tempo):
+    def _fake_write_drum_midi(self, wav_path, midi_path, tempo):
         # Real onset detection needs real audio; these tests only care about
         # file orchestration, so stand in with an empty placeholder file.
-        with open(os.path.join(song_dir, drum_isolator.MIDI_FILENAME), "wb") as f:
+        with open(midi_path, "wb") as f:
             f.write(b"midi")
 
     @mock.patch("drum_isolator._write_drum_midi")
@@ -66,17 +66,25 @@ class TestIsolateDrums(unittest.TestCase):
 
         self.assertTrue(result)
         song_dir = os.path.join(self.drums_root, "Song - Artist")
-        for name in drum_isolator._EXPECTED_OUTPUTS:
-            self.assertTrue(os.path.exists(os.path.join(song_dir, name)), name)
-        mock_write_midi.assert_called_once_with(song_dir, 120.0)
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".wav")))
+        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".mid")))
+        mock_write_midi.assert_called_once_with(
+            os.path.join(song_dir, basename + ".wav"), os.path.join(song_dir, basename + ".mid"), 120.0
+        )
+        # A source marker is written too, so a re-run against the same mp3
+        # can tell these outputs are already up to date.
+        self.assertTrue(os.path.exists(os.path.join(song_dir, drum_isolator._SOURCE_MARKER_FILENAME)))
 
     @mock.patch("instrument_isolator.run_demucs")
-    def test_skips_when_all_outputs_already_exist(self, mock_run_demucs):
+    def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         os.makedirs(song_dir)
-        for name in drum_isolator._EXPECTED_OUTPUTS:
-            with open(os.path.join(song_dir, name), "wb") as f:
-                f.write(b"x")
+        with open(os.path.join(song_dir, "x.wav"), "wb") as f:
+            f.write(b"x")
+        with open(os.path.join(song_dir, "x.mid"), "wb") as f:
+            f.write(b"x")
+        drum_isolator._write_source_marker(song_dir, self.mp3_path)
 
         result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
 
@@ -90,9 +98,9 @@ class TestIsolateDrums(unittest.TestCase):
     def test_reruns_when_the_midi_file_is_missing(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi):
         song_dir = os.path.join(self.drums_root, "Song - Artist")
         os.makedirs(song_dir)
-        with open(os.path.join(song_dir, drum_isolator.DRUMS_WAV_FILENAME), "wb") as f:
+        with open(os.path.join(song_dir, "old.wav"), "wb") as f:
             f.write(b"x")
-        # drums.mid missing
+        # no .mid file present yet
 
         mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
@@ -102,8 +110,42 @@ class TestIsolateDrums(unittest.TestCase):
         result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
 
         self.assertTrue(result)
-        for name in drum_isolator._EXPECTED_OUTPUTS:
-            self.assertTrue(os.path.exists(os.path.join(song_dir, name)), name)
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".wav")))
+        self.assertTrue(os.path.exists(os.path.join(song_dir, basename + ".mid")))
+
+    @mock.patch("drum_isolator._write_drum_midi")
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_reruns_and_replaces_stale_outputs_when_the_source_mp3_marker_does_not_match(
+        self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi
+    ):
+        song_dir = os.path.join(self.drums_root, "Song - Artist")
+        os.makedirs(song_dir)
+        stale_basename = "Song - Artist (Isolated Drums at 99.000 BPM)"
+        with open(os.path.join(song_dir, stale_basename + ".wav"), "wb") as f:
+            f.write(b"stale")
+        with open(os.path.join(song_dir, stale_basename + ".mid"), "wb") as f:
+            f.write(b"stale")
+        # No marker at all - e.g. a leftover folder from before this feature
+        # existed, or from an unrelated song that happened to share a title.
+
+        mock_alignment.return_value = (0, 130.5)
+        mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
+        mock_write_midi.side_effect = self._fake_write_drum_midi
+
+        result = drum_isolator.isolate_drums(self.mp3_path, self.drums_root)
+
+        self.assertTrue(result)
+        mock_run_demucs.assert_called_once()
+        new_basename = "Song - Artist (Isolated Drums at 130.500 BPM)"
+        self.assertTrue(os.path.exists(os.path.join(song_dir, new_basename + ".wav")))
+        self.assertTrue(os.path.exists(os.path.join(song_dir, new_basename + ".mid")))
+        # The stale, wrongly-named files from the mismatched marker are gone.
+        self.assertFalse(os.path.exists(os.path.join(song_dir, stale_basename + ".wav")))
+        self.assertFalse(os.path.exists(os.path.join(song_dir, stale_basename + ".mid")))
 
 
 class TestDetectNoteEvents(unittest.TestCase):
@@ -187,11 +229,12 @@ class TestWriteDrumMidi(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_writes_notes_for_every_detected_hit(self):
-        _hits(5).export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
+        wav_path = os.path.join(self.tmp_dir, "drums.wav")
+        midi_path = os.path.join(self.tmp_dir, "drums.mid")
+        _hits(5).export(wav_path, format="wav")
 
-        drum_isolator._write_drum_midi(self.tmp_dir, tempo=120.0)
+        drum_isolator._write_drum_midi(wav_path, midi_path, tempo=120.0)
 
-        midi_path = os.path.join(self.tmp_dir, drum_isolator.MIDI_FILENAME)
         self.assertTrue(os.path.exists(midi_path))
 
         import pretty_midi
@@ -206,22 +249,26 @@ class TestWriteDrumMidi(unittest.TestCase):
         self.assertEqual(starts, sorted(starts))
 
     def test_missing_drums_wav_produces_an_empty_midi_file(self):
-        drum_isolator._write_drum_midi(self.tmp_dir, tempo=120.0)
+        wav_path = os.path.join(self.tmp_dir, "drums.wav")
+        midi_path = os.path.join(self.tmp_dir, "drums.mid")
+        drum_isolator._write_drum_midi(wav_path, midi_path, tempo=120.0)
 
         import pretty_midi
         # An instrument with zero notes isn't written back out by pretty_midi
         # on round-trip, so the file legitimately has no instruments at all.
-        midi = pretty_midi.PrettyMIDI(os.path.join(self.tmp_dir, drum_isolator.MIDI_FILENAME))
+        midi = pretty_midi.PrettyMIDI(midi_path)
         notes = [note for instrument in midi.instruments for note in instrument.notes]
         self.assertEqual(notes, [])
 
     def test_embeds_the_given_tempo_without_snapping_notes(self):
-        _hits(6).export(os.path.join(self.tmp_dir, "drums.wav"), format="wav")
+        wav_path = os.path.join(self.tmp_dir, "drums.wav")
+        midi_path = os.path.join(self.tmp_dir, "drums.mid")
+        _hits(6).export(wav_path, format="wav")
 
-        drum_isolator._write_drum_midi(self.tmp_dir, tempo=123.4)
+        drum_isolator._write_drum_midi(wav_path, midi_path, tempo=123.4)
 
         import pretty_midi
-        midi = pretty_midi.PrettyMIDI(os.path.join(self.tmp_dir, drum_isolator.MIDI_FILENAME))
+        midi = pretty_midi.PrettyMIDI(midi_path)
         _, tempi = midi.get_tempo_changes()
         # write_drum_midi should embed exactly the tempo it's given, not
         # detect/refine its own - that's now song_alignment()'s job, shared
