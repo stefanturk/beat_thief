@@ -624,6 +624,51 @@ class TestSanitizeFolder(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, ".originals")))
 
 
+class TestSanitizeNewDownloads(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_only_touches_the_given_filenames_not_the_whole_folder(self):
+        # An older, already-sanitized song sitting in the folder should be
+        # left completely alone - not re-scanned, not reported on.
+        old_filename = "Old Song - Artist.mp3"
+        sanitizer.export_audio(_tone(1000, dbfs_gain=-3), os.path.join(self.tmp_dir, old_filename))
+        sanitizer.sanitize_new_downloads([old_filename], self.tmp_dir)
+        old_bytes = open(os.path.join(self.tmp_dir, old_filename), "rb").read()
+
+        new_filename = "New Song (Official Video) - Artist.mp3"
+        sanitizer.export_audio(_tone(1000, dbfs_gain=-3), os.path.join(self.tmp_dir, new_filename))
+
+        final_filenames = sanitizer.sanitize_new_downloads([new_filename], self.tmp_dir)
+
+        # The old song's bytes are untouched - it was never re-processed.
+        self.assertEqual(open(os.path.join(self.tmp_dir, old_filename), "rb").read(), old_bytes)
+        self.assertEqual(final_filenames, ["New Song - Artist.mp3"])
+        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, "New Song - Artist.mp3")))
+
+    def test_still_deduplicates_the_new_download_against_the_existing_library(self):
+        existing = "Song Name - Artist.mp3"
+        sanitizer.export_audio(_tone(1000, dbfs_gain=-3), os.path.join(self.tmp_dir, existing))
+        sanitizer.sanitize_new_downloads([existing], self.tmp_dir)
+
+        new_duplicate = "Song Name  - Artist.mp3"
+        sanitizer.export_audio(_tone(1000, dbfs_gain=-3), os.path.join(self.tmp_dir, new_duplicate))
+
+        sanitizer.sanitize_new_downloads([new_duplicate], self.tmp_dir)
+
+        remaining = [f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")]
+        self.assertEqual(len(remaining), 1)
+        duplicates_dir = os.path.join(self.tmp_dir, sanitizer.DUPLICATES_DIR_NAME)
+        self.assertTrue(os.path.isdir(duplicates_dir))
+
+    def test_missing_filename_is_skipped_without_raising(self):
+        final_filenames = sanitizer.sanitize_new_downloads(["Nonexistent.mp3"], self.tmp_dir)
+        self.assertEqual(final_filenames, [])
+
+
 class TestSanitizeFileReplace(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()

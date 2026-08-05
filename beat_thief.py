@@ -21,6 +21,7 @@ _song_number = 0
 _total_songs = None
 _downloaded_count = 0
 _failed_count = 0
+_downloaded_filenames = []
 
 
 def _exit(code: int) -> None:
@@ -76,8 +77,12 @@ def _progress_hook(d):
 def _postprocessor_hook(d):
     global _active_title, _downloaded_count
     if d["status"] == "finished" and d.get("postprocessor") == "ExtractAudio" and _active_title is not None:
-        title = d.get("info_dict", {}).get("title", "Unknown")
+        info = d.get("info_dict", {})
+        title = info.get("title", "Unknown")
         _downloaded_count += 1
+        filepath = info.get("filepath")
+        if filepath:
+            _downloaded_filenames.append(os.path.basename(filepath))
         print(f"Saved: {_short(title)}.mp3")
         _active_title = None
 
@@ -205,31 +210,35 @@ def main() -> None:
     print(f"Downloading complete: {', '.join(parts)}.")
     print(f"Your music is in: {args.output}")
 
-    try:
-        song_sanitizer.sanitize_folder(args.output)
-    except KeyboardInterrupt:
-        print("\nStopped reviewing. Whatever was already cleaned up is safe.")
-        _exit(130)
-    except Exception as e:
-        print(f"Sanitizing hit a snag, but your downloads are safe: {e}")
+    sanitized_filenames = []
+    if _downloaded_filenames:
+        try:
+            sanitized_filenames = song_sanitizer.sanitize_new_downloads(_downloaded_filenames, args.output)
+        except KeyboardInterrupt:
+            print("\nStopped reviewing. Whatever was already cleaned up is safe.")
+            _exit(130)
+        except Exception as e:
+            print(f"Sanitizing hit a snag, but your downloads are safe: {e}")
 
     if args.drums:
-        try:
-            drum_isolator.isolate_drums_for_folder(args.output)
-        except KeyboardInterrupt:
-            print("\nStopped isolating drums. Whatever was already produced is safe.")
-            _exit(130)
-        except Exception as e:
-            print(f"Isolating drums hit a snag, but your downloads are safe: {e}")
+        for filename in sanitized_filenames:
+            try:
+                drum_isolator.isolate_drums_for_single_file(os.path.join(args.output, filename))
+            except KeyboardInterrupt:
+                print("\nStopped isolating drums. Whatever was already produced is safe.")
+                _exit(130)
+            except Exception as e:
+                print(f"Isolating drums hit a snag, but your downloads are safe: {e}")
 
     if args.bass:
-        try:
-            bass_isolator.isolate_bass_for_folder(args.output)
-        except KeyboardInterrupt:
-            print("\nStopped isolating bass. Whatever was already produced is safe.")
-            _exit(130)
-        except Exception as e:
-            print(f"Isolating bass hit a snag, but your downloads are safe: {e}")
+        for filename in sanitized_filenames:
+            try:
+                bass_isolator.isolate_bass_for_single_file(os.path.join(args.output, filename))
+            except KeyboardInterrupt:
+                print("\nStopped isolating bass. Whatever was already produced is safe.")
+                _exit(130)
+            except Exception as e:
+                print(f"Isolating bass hit a snag, but your downloads are safe: {e}")
 
     _exit(0 if result == 0 else 1)
 

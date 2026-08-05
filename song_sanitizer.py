@@ -609,6 +609,51 @@ def sanitize_folder(output_dir: str) -> None:
         resolve_flags(all_flags, output_dir)
 
 
+def sanitize_new_downloads(filenames: list[str], output_dir: str) -> list[str]:
+    """Sanitize exactly the given (just-downloaded) filenames, rather than
+    rescanning every mp3 already in output_dir - reprocessing/reporting on
+    songs this run never touched is just noise. Duplicate detection still
+    runs against the whole folder (see _run_dedup), since a new download
+    can only be a duplicate of something already there, not of itself.
+
+    Returns the resulting filenames actually left in output_dir for these
+    downloads (accounting for any cleanup rename, and dropping the loser of
+    any duplicate pair that got moved into Duplicates/), so a caller can
+    chain further per-song work (e.g. isolating drums/bass) onto exactly
+    what this run downloaded - not the whole library."""
+    all_flags = []
+    final_filenames = []
+    for filename in filenames:
+        path = os.path.join(output_dir, filename)
+        if not os.path.exists(path):
+            continue
+        before = set(os.listdir(output_dir))
+        try:
+            new_flags = sanitize_file(filename, output_dir)
+        except Exception as e:
+            print(f"  Could not sanitize {filename}, skipping: {e}")
+            continue
+        all_flags.extend(new_flags)
+
+        after = set(os.listdir(output_dir))
+        added_mp3s = [f for f in (after - before) if f.lower().endswith(".mp3")]
+        if added_mp3s:
+            final_filenames.append(added_mp3s[0])
+        elif os.path.exists(path):
+            final_filenames.append(filename)
+        # else: sanitize_file left the original in place under a name that
+        # collided with an unrelated existing song - nothing to chain onto.
+
+    _run_dedup(output_dir)
+    final_filenames = [f for f in final_filenames if os.path.exists(os.path.join(output_dir, f))]
+
+    if all_flags:
+        print(f"\n{len(all_flags)} song section(s) need your input.")
+        resolve_flags(all_flags, output_dir)
+
+    return final_filenames
+
+
 def sanitize_single_file(path: str) -> None:
     output_dir = os.path.dirname(os.path.abspath(path)) or "."
     filename = os.path.basename(path)
