@@ -67,13 +67,13 @@ Duplicate downloads that get found and removed are moved into a visible
 
 ## Isolating instruments (optional, slow)
 
-Pass `--drums` and/or `--bass` (in either order, before or after the URL)
-to also pull those parts out on their own — useful if you want to import
-them into a DAW (e.g. Ableton) to rebuild a digitized version of the
-performance, or just to understand how a song is built:
+Pass `drums` and/or `bass` (with or without `--`, in either order, before or
+after the URL) to also pull those parts out on their own — useful if you
+want to import them into a DAW (e.g. Ableton) to rebuild a digitized
+version of the performance, or just to understand how a song is built:
 
 ```
-python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" --drums --bass
+python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass
 ```
 
 Every instrument you isolate for a song shares the exact same beat-1 start

@@ -173,14 +173,25 @@ def main() -> None:
     parser.add_argument(
         "--drums",
         action="store_true",
-        help="Also isolate each song's drums to wav + MIDI. Slow, off by default.",
+        help="Also isolate each song's drums to wav + MIDI. Slow, off by default. Can also be given as a bare 'drums' argument, before or after the URL.",
     )
     parser.add_argument(
         "--bass",
         action="store_true",
-        help="Also isolate each song's bass to wav + MIDI. Slow, off by default.",
+        help="Also isolate each song's bass to wav + MIDI. Slow, off by default. Can also be given as a bare 'bass' argument, before or after the URL.",
     )
-    args = parser.parse_args()
+
+    # "drums"/"bass" are accepted bare (no --) too, in any position, since
+    # that's the more natural way to type them - pull those out of argv
+    # before argparse ever sees them, so they don't collide with the url
+    # positional no matter where they appear.
+    raw_args = sys.argv[1:]
+    bare_modes = {tok.lower() for tok in raw_args if tok.lower() in ("drums", "bass")}
+    remaining_args = [tok for tok in raw_args if tok.lower() not in ("drums", "bass")]
+
+    args = parser.parse_args(remaining_args)
+    args.drums = args.drums or "drums" in bare_modes
+    args.bass = args.bass or "bass" in bare_modes
 
     try:
         result = download_playlist(args.url, args.output)
