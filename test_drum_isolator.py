@@ -113,12 +113,16 @@ class TestIsolateDrums(unittest.TestCase):
     @mock.patch("instrument_isolator.trim_and_export")
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
-    def test_reruns_when_the_midi_file_is_missing(self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi):
+    def test_reruns_when_the_midi_file_is_missing_and_no_marker_confirms_the_wav(
+        self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi
+    ):
         os.makedirs(self.song_dir)
         basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
-        # no .mid file present yet
+        # no .mid file present yet, and no marker either - so this wav
+        # can't be trusted as coming from self.mp3_path, and the whole
+        # thing (not just the MIDI) has to be reprocessed.
 
         mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
@@ -128,8 +132,32 @@ class TestIsolateDrums(unittest.TestCase):
         result = drum_isolator.isolate_drums(self.mp3_path)
 
         self.assertTrue(result)
+        mock_run_demucs.assert_called_once()
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".mid")))
+
+    @mock.patch("drum_isolator._write_drum_midi")
+    @mock.patch("instrument_isolator.run_demucs")
+    def test_adds_midi_to_an_already_isolated_wav_without_rerunning_demucs(self, mock_run_demucs, mock_write_midi):
+        # Regression test: requesting midi against a song already isolated
+        # (wav-only, from an earlier midi-less run) used to re-run demucs
+        # from scratch just to add the MIDI, even though the wav - by far
+        # the slow part - was already there and still valid.
+        os.makedirs(self.song_dir)
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
+            f.write(b"x")
+        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, drum_isolator._SOURCE_MARKER_FILENAME)
+        mock_write_midi.side_effect = self._fake_write_drum_midi
+
+        result = drum_isolator.isolate_drums(self.mp3_path, write_midi=True)
+
+        self.assertTrue(result)
+        mock_run_demucs.assert_not_called()
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".mid")))
+        mock_write_midi.assert_called_once_with(
+            os.path.join(self.song_dir, basename + ".wav"), os.path.join(self.song_dir, basename + ".mid"), 120.0
+        )
 
     @mock.patch("drum_isolator._write_drum_midi")
     @mock.patch("instrument_isolator.trim_and_export")
