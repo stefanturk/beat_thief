@@ -98,6 +98,40 @@ class TestWindowedTempos(unittest.TestCase):
         self.assertEqual(len(windows), 1)
         self.assertGreater(windows[0][2], 0.0)
 
+    def test_reference_tempo_reconciles_a_window_caught_at_a_different_subdivision(self):
+        # Regression test: a real, constant-tempo song was reported as
+        # "drifting" from ~108 to ~144 BPM (a 4/3 ratio) purely because a
+        # later window's own beat tracker locked onto a different
+        # subdivision of the same beat, not because the song's tempo
+        # actually changed.
+        track = _click_track(bpm=108, beats=54) + _click_track(bpm=144, beats=72)
+        y = np.array(track.set_channels(1).get_array_of_samples()).astype(np.float32) / 32768.0
+        sr = track.frame_rate
+        onset_times = _onsets_from_audio(y, sr)
+        song_duration_sec = len(track) / 1000.0
+
+        windows = instrument_isolator._windowed_tempos(
+            y, sr, onset_times, song_duration_sec, window_sec=30.0, reference_tempo=108.0
+        )
+
+        for _, _, tempo in windows:
+            self.assertAlmostEqual(tempo, 108.0, delta=3.0)
+        self.assertFalse(instrument_isolator._tempo_drift_detected(windows))
+
+
+class TestReconcileWithReference(unittest.TestCase):
+    def test_a_4_3_ratio_is_reconciled_onto_the_reference(self):
+        self.assertAlmostEqual(instrument_isolator._reconcile_with_reference(144.0, 108.0), 108.0, delta=0.5)
+
+    def test_an_octave_error_is_reconciled_onto_the_reference(self):
+        self.assertAlmostEqual(instrument_isolator._reconcile_with_reference(240.0, 120.0), 120.0, delta=0.5)
+
+    def test_a_3_2_ratio_is_left_unchanged_since_it_can_be_a_genuine_tempo_change(self):
+        self.assertEqual(instrument_isolator._reconcile_with_reference(150.0, 100.0), 150.0)
+
+    def test_an_unrelated_tempo_is_left_unchanged(self):
+        self.assertEqual(instrument_isolator._reconcile_with_reference(95.0, 120.0), 95.0)
+
 
 class TestTempoDriftDetected(unittest.TestCase):
     def test_flags_windows_that_differ_beyond_the_threshold(self):

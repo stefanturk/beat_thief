@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import pty
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,34 +19,40 @@ from pydub import AudioSegment
 
 import song_sanitizer
 
-# Demucs prints these on every run regardless of how many instruments are
-# being isolated - useful the first time, just noise on every one after
-# that, so they're filtered out of the passed-through output below.
-_DEMUCS_NOISE_PATTERNS = (
-    "Selected model is a bag of",
-    "Separated tracks will be stored in",
-)
+_BAR_WIDTH = 30
+
+# demucs prints its own progress via tqdm as e.g. "  45%|####      | ...",
+# plus a couple of one-off informational lines ("Separating track <path>",
+# "Selected model is a bag of N models...") that are only ever noise here -
+# we already print our own "isolating drums/bass..." message before this
+# runs. Rather than try to relay demucs' own raw terminal output (whose
+# in-place-updating behavior depends on it correctly detecting a real
+# terminal, which isn't reliable across every way this can be run),
+# _PERCENT_RE pulls just the percentage back out of it so a single bar of
+# our own can be drawn - guaranteed one line, no boilerplate, regardless of
+# how demucs itself chose to render.
+_PERCENT_RE = re.compile(r"(\d{1,3})%")
 
 
 def run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | None = None) -> str:
-    """Run demucs and return the directory containing the separated stems.
-
-    Demucs' own progress bar (tqdm) only redraws in place over \\r when it
-    thinks it's talking to a real terminal - piped through a plain
-    subprocess pipe it decides it isn't, and prints a brand new line per
-    update instead, turning a single progress bar into a wall of them. A
-    pty makes tqdm see a real terminal so it draws one line that updates in
-    place, same as running demucs directly in a shell would."""
+    """Run demucs and return the directory containing the separated stems,
+    printing our own single-line progress bar (see _PERCENT_RE) rather than
+    relaying demucs' own terminal output."""
     cmd = [sys.executable, "-m", "demucs", "-n", model_name, "-o", out_dir]
     if two_stems:
         cmd += ["--two-stems", two_stems]
     cmd.append(input_path)
 
+    # A pty, not a plain pipe, because demucs disables its own progress bar
+    # entirely if it doesn't see a real terminal on the other end - we
+    # still need it emitting *something* for _PERCENT_RE to read, even
+    # though we throw away everything except the percentage itself.
     master_fd, slave_fd = pty.openpty()
     proc = subprocess.Popen(cmd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
     os.close(slave_fd)
 
     buf = ""
+    last_percent = None
     try:
         while True:
             try:
@@ -55,25 +62,21 @@ def run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | 
             if not chunk:
                 break
             buf += chunk.decode(errors="ignore")
-            while True:
-                cut = None
-                for sep in ("\r\n", "\n", "\r"):
-                    pos = buf.find(sep)
-                    if pos != -1 and (cut is None or pos < cut[0]):
-                        cut = (pos, sep)
-                if cut is None:
-                    break
-                pos, sep = cut
-                line, buf = buf[:pos], buf[pos + len(sep):]
-                if any(pattern in line for pattern in _DEMUCS_NOISE_PATTERNS):
-                    continue
-                sys.stdout.write(line + sep)
-                sys.stdout.flush()
+            buf = buf[-64:]  # only ever need enough tail to catch the latest "NN%"
+            matches = _PERCENT_RE.findall(buf)
+            if matches:
+                percent = min(int(matches[-1]), 100)
+                if percent != last_percent:
+                    last_percent = percent
+                    filled = int(_BAR_WIDTH * percent / 100)
+                    bar = "#" * filled + "-" * (_BAR_WIDTH - filled)
+                    sys.stdout.write(f"\r  [{bar}] {percent:3d}%")
+                    sys.stdout.flush()
     finally:
         os.close(master_fd)
     proc.wait()
-    if buf and not any(pattern in buf for pattern in _DEMUCS_NOISE_PATTERNS):
-        sys.stdout.write(buf)
+    if last_percent is not None:
+        sys.stdout.write("\n")
         sys.stdout.flush()
 
     if proc.returncode != 0:
@@ -251,7 +254,52 @@ def refine_tempo(onset_times: np.ndarray, initial_tempo: float) -> float:
     return 60.0 / unit / _REFINEMENT_SUBDIVISION
 
 
-def _windowed_tempos(y: np.ndarray, sr: int, onset_times: np.ndarray, song_duration_sec: float, window_sec: float = _TEMPO_WINDOW_SEC) -> list[tuple[float, float, float]]:
+# A short (~30s) window's own beat tracker can lock onto a different but
+# musically-related pulse level than the song's real tempo - e.g. a
+# sparser or differently-textured section (a bridge, an instrumental
+# break) making a different subdivision of the beat more prominent than
+# the main beat itself. That reads as a tempo change but isn't one - it's
+# the same tempo measured against a different metric level. Covers
+# double/half time (the existing octave-error case refine_tempo's
+# docstring already calls out) and 4-against-3 (a beat split into 4 vs
+# into 3, e.g. straight 16ths misread against a dotted-8th/triplet feel).
+# Deliberately excludes 3/2 (and 2/3): unlike the ratios above, that's also
+# a common *genuine* tempo relationship in real tempo changes (e.g. a
+# DJ-style 100->150 BPM transition), so auto-correcting it would hide real
+# drift this feature exists to catch - reconciling a window's tempo
+# against the whole song's before comparing for drift should only remove
+# the false positives, not the true ones.
+_METRIC_RATIO_CANDIDATES = (1.0, 2.0, 0.5, 4.0 / 3.0, 3.0 / 4.0)
+_METRIC_RATIO_TOLERANCE = 0.04  # fraction of the reference tempo a candidate ratio must land within to count as a match
+
+
+def _reconcile_with_reference(window_tempo: float, reference_tempo: float) -> float:
+    """If window_tempo sits at a simple ratio of reference_tempo (close
+    enough to plausibly be the same underlying tempo caught at a different
+    metric level - see the constants above), rescale it back onto
+    reference_tempo's own level and return that instead. Otherwise returns
+    window_tempo unchanged, since a genuinely different tempo shouldn't be
+    forced to match."""
+    if reference_tempo <= 0 or window_tempo <= 0:
+        return window_tempo
+    best_tempo = window_tempo
+    best_error = abs(window_tempo - reference_tempo) / reference_tempo
+    for ratio in _METRIC_RATIO_CANDIDATES:
+        candidate = window_tempo / ratio
+        error = abs(candidate - reference_tempo) / reference_tempo
+        if error < _METRIC_RATIO_TOLERANCE and error < best_error:
+            best_tempo, best_error = candidate, error
+    return best_tempo
+
+
+def _windowed_tempos(
+    y: np.ndarray,
+    sr: int,
+    onset_times: np.ndarray,
+    song_duration_sec: float,
+    window_sec: float = _TEMPO_WINDOW_SEC,
+    reference_tempo: float | None = None,
+) -> list[tuple[float, float, float]]:
     """Independently estimate and refine a tempo within each fixed-length
     window of the song, rather than pooling every onset into one global
     average (which assumes - and hides - a constant tempo throughout).
@@ -261,6 +309,12 @@ def _windowed_tempos(y: np.ndarray, sr: int, onset_times: np.ndarray, song_durat
     reusing a single shared starting guess would make refine_tempo reject
     a window whose real tempo is too far from it (its grid-fit tolerance
     is only ~15%), which is exactly the failure mode this exists to catch.
+
+    If reference_tempo is given (the whole song's own tempo), each
+    window's result is then reconciled against it (see
+    _reconcile_with_reference) before being returned, so a window that
+    locked onto a different subdivision of the same tempo doesn't read as
+    real drift.
 
     Returns a list of (window_start_sec, window_end_sec, tempo)."""
     onset_times = np.asarray(onset_times, dtype=np.float64)
@@ -275,6 +329,8 @@ def _windowed_tempos(y: np.ndarray, sr: int, onset_times: np.ndarray, song_durat
             tempo = refine_tempo(window_onsets, window_rough)
         else:
             tempo = window_rough
+        if reference_tempo is not None:
+            tempo = _reconcile_with_reference(tempo, reference_tempo)
         windows.append((start, end, tempo))
         start = end
     return windows
@@ -365,7 +421,7 @@ def song_alignment(mp3_path: str) -> tuple[int, float]:
         os.remove(tmp_wav)
 
     song_duration_sec = len(trimmed) / 1000.0
-    windows = _windowed_tempos(y, sr, onset_times, song_duration_sec)
+    windows = _windowed_tempos(y, sr, onset_times, song_duration_sec, reference_tempo=tempo)
     if _tempo_drift_detected(windows):
         drift = max(t for _, _, t in windows) - min(t for _, _, t in windows)
         print(f"Heads up: this song's tempo drifts by up to {drift:.3f} BPM across its length.")
