@@ -127,6 +127,31 @@ class TestSnapTempoToWholeNumberIfClose(unittest.TestCase):
         self.assertEqual(instrument_isolator._snap_tempo_to_whole_number_if_close(108.138), 108.138)
 
 
+class TestSnapIfNoisyAroundAWholeNumber(unittest.TestCase):
+    def test_windows_scattered_tightly_around_a_whole_number_are_snapped(self):
+        # Regression test: a real, essentially-constant ~157 BPM song
+        # triggered the tempo-drift prompt purely from ordinary per-window
+        # jitter (max-min was under 1 BPM, comfortably above the 0.3 BPM
+        # drift threshold but not a real tempo change).
+        windows = [
+            (0, 30, 157.600), (30, 60, 156.935), (60, 90, 156.875), (90, 120, 156.845),
+            (120, 150, 156.741), (150, 180, 157.037), (180, 210, 157.143), (210, 240, 156.862),
+            (240, 270, 157.143), (270, 300, 156.955), (300, 319.1, 157.155),
+        ]
+
+        self.assertEqual(instrument_isolator._snap_if_noisy_around_a_whole_number(windows), 157.0)
+
+    def test_a_genuine_two_part_tempo_change_is_not_snapped(self):
+        windows = [(0.0, 30.0, 100.0), (30.0, 60.0, 150.0)]
+
+        self.assertIsNone(instrument_isolator._snap_if_noisy_around_a_whole_number(windows))
+
+    def test_a_stable_non_whole_tempo_is_not_snapped(self):
+        windows = [(0.0, 30.0, 137.6), (30.0, 60.0, 137.7), (60.0, 90.0, 137.65)]
+
+        self.assertIsNone(instrument_isolator._snap_if_noisy_around_a_whole_number(windows))
+
+
 class TestReconcileWithReference(unittest.TestCase):
     def test_a_4_3_ratio_is_reconciled_onto_the_reference(self):
         self.assertAlmostEqual(instrument_isolator._reconcile_with_reference(144.0, 108.0), 108.0, delta=0.5)
