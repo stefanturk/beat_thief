@@ -314,15 +314,29 @@ def isolate_bass(mp3_path: str, write_midi: bool = True) -> bool:
     (see instrument_isolator.source_marker_matches) - existing outputs
     whose marker is missing or doesn't match are treated as stale (e.g. a
     leftover folder from an earlier run or a different file that happened
-    to share this title) and reprocessed rather than trusted."""
+    to share this title) and reprocessed rather than trusted.
+
+    If the wav is already there (from an earlier run that didn't ask for
+    MIDI) and only the MIDI is now missing, this transcribes onto the
+    existing (already noise-gated) wav instead of re-running demucs -
+    demucs is by far the slowest part of this, and nothing about the wav
+    changes based on whether MIDI is also requested."""
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = instrument_isolator.song_output_dir(mp3_path)
+    marker_matches = instrument_isolator.source_marker_matches(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
 
-    if instrument_isolator.has_existing_outputs(song_dir, _LABEL, write_midi) and instrument_isolator.source_marker_matches(
-        song_dir, mp3_path, _SOURCE_MARKER_FILENAME
-    ):
+    if marker_matches and instrument_isolator.has_existing_outputs(song_dir, _LABEL, write_midi):
         print(f"{title}: bass already isolated, nothing to do.")
         return False
+
+    if marker_matches and instrument_isolator.has_existing_outputs(song_dir, _LABEL, require_midi=False):
+        basename = instrument_isolator.find_existing_basename(song_dir, _LABEL)
+        wav_path = os.path.join(song_dir, basename + ".wav")
+        midi_path = os.path.join(song_dir, basename + ".mid")
+        tempo = instrument_isolator.parse_tempo_from_basename(basename)
+        _write_bass_midi(wav_path, midi_path, tempo)
+        print(f"{title}: bass MIDI added ({tempo:.3f} BPM).")
+        return True
 
     print(f"{title}: isolating bass (this can take a few minutes)...")
     trim_ms, tempo = instrument_isolator.song_alignment(mp3_path)
@@ -339,18 +353,15 @@ def isolate_bass(mp3_path: str, write_midi: bool = True) -> bool:
         instrument_isolator.trim_and_export(bass_wav, trim_ms, wav_path)
         _apply_noise_gate(wav_path)
 
-        saved = os.path.basename(wav_path)
         if write_midi:
             midi_path = os.path.join(song_dir, basename + ".mid")
-            print(f"{title}: transcribing to MIDI...")
             _write_bass_midi(wav_path, midi_path, tempo)
-            saved += f" and {os.path.basename(midi_path)}"
 
         instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-    print(f"{title}: {saved} saved to {song_dir}")
+    print(f"{title}: bass isolated{' + MIDI' if write_midi else ''} ({tempo:.3f} BPM).")
     return True
 
 

@@ -119,6 +119,14 @@ class TestWindowedTempos(unittest.TestCase):
         self.assertFalse(instrument_isolator._tempo_drift_detected(windows))
 
 
+class TestSnapTempoToWholeNumberIfClose(unittest.TestCase):
+    def test_a_tempo_close_to_a_whole_number_is_rounded(self):
+        self.assertEqual(instrument_isolator._snap_tempo_to_whole_number_if_close(108.038), 108.0)
+
+    def test_a_tempo_further_from_a_whole_number_is_left_alone(self):
+        self.assertEqual(instrument_isolator._snap_tempo_to_whole_number_if_close(108.138), 108.138)
+
+
 class TestReconcileWithReference(unittest.TestCase):
     def test_a_4_3_ratio_is_reconciled_onto_the_reference(self):
         self.assertAlmostEqual(instrument_isolator._reconcile_with_reference(144.0, 108.0), 108.0, delta=0.5)

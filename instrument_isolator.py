@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import os
-import pty
 import re
 import subprocess
 import sys
@@ -21,16 +20,17 @@ import song_sanitizer
 
 _BAR_WIDTH = 30
 
-# demucs prints its own progress via tqdm as e.g. "  45%|####      | ...",
-# plus a couple of one-off informational lines ("Separating track <path>",
-# "Selected model is a bag of N models...") that are only ever noise here -
-# we already print our own "isolating drums/bass..." message before this
-# runs. Rather than try to relay demucs' own raw terminal output (whose
-# in-place-updating behavior depends on it correctly detecting a real
-# terminal, which isn't reliable across every way this can be run),
-# _PERCENT_RE pulls just the percentage back out of it so a single bar of
-# our own can be drawn - guaranteed one line, no boilerplate, regardless of
-# how demucs itself chose to render.
+# demucs's own tqdm progress bar (ncols=120, so each rendered frame is over
+# 100 characters wide) renders as e.g.
+# "  45%|########              | 12/27 [00:07<00:08,  1.4seconds/s]",
+# separated from the next frame by \r (or \n at the very end) regardless of
+# whether stdout is a real terminal - confirmed directly against a real
+# `python -m demucs` run, plain-piped, no pty needed. Plus a couple of
+# one-off informational lines ("Separating track <path>", "Selected model
+# is a bag of N models...") that are only ever noise here - we already
+# print our own "isolating drums/bass..." message before this runs. Rather
+# than relay any of demucs' own text, _PERCENT_RE pulls just the
+# percentage out of each frame so a single bar of our own can be drawn.
 _PERCENT_RE = re.compile(r"(\d{1,3})%")
 
 
@@ -43,37 +43,38 @@ def run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | 
         cmd += ["--two-stems", two_stems]
     cmd.append(input_path)
 
-    # A pty, not a plain pipe, because demucs disables its own progress bar
-    # entirely if it doesn't see a real terminal on the other end - we
-    # still need it emitting *something* for _PERCENT_RE to read, even
-    # though we throw away everything except the percentage itself.
-    master_fd, slave_fd = pty.openpty()
-    proc = subprocess.Popen(cmd, stdout=slave_fd, stderr=slave_fd, close_fds=True)
-    os.close(slave_fd)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
     buf = ""
     last_percent = None
-    try:
+    for chunk in iter(lambda: proc.stdout.read(4096), b""):
+        buf += chunk.decode(errors="ignore")
+        # Process one complete \r/\n-terminated frame at a time (rather
+        # than scanning the raw growing buffer) so a still-arriving frame
+        # can never get truncated mid-way through its own "NN%" text -
+        # that truncation is what silently swallowed every update before.
         while True:
-            try:
-                chunk = os.read(master_fd, 4096)
-            except OSError:
+            cut = None
+            for sep in ("\r", "\n"):
+                pos = buf.find(sep)
+                if pos != -1 and (cut is None or pos < cut[0]):
+                    cut = (pos, sep)
+            if cut is None:
                 break
-            if not chunk:
-                break
-            buf += chunk.decode(errors="ignore")
-            buf = buf[-64:]  # only ever need enough tail to catch the latest "NN%"
-            matches = _PERCENT_RE.findall(buf)
-            if matches:
-                percent = min(int(matches[-1]), 100)
-                if percent != last_percent:
-                    last_percent = percent
-                    filled = int(_BAR_WIDTH * percent / 100)
-                    bar = "#" * filled + "-" * (_BAR_WIDTH - filled)
-                    sys.stdout.write(f"\r  [{bar}] {percent:3d}%")
-                    sys.stdout.flush()
-    finally:
-        os.close(master_fd)
+            pos, _sep = cut
+            frame, buf = buf[:pos], buf[pos + 1:]
+            matches = _PERCENT_RE.findall(frame)
+            if not matches:
+                continue
+            percent = min(int(matches[-1]), 100)
+            if percent == last_percent:
+                continue
+            last_percent = percent
+            filled = int(_BAR_WIDTH * percent / 100)
+            bar = "#" * filled + "-" * (_BAR_WIDTH - filled)
+            sys.stdout.write(f"\r  [{bar}] {percent:3d}%")
+            sys.stdout.flush()
+    proc.stdout.close()
     proc.wait()
     if last_percent is not None:
         sys.stdout.write("\n")
@@ -113,6 +114,31 @@ def has_existing_outputs(song_dir: str, label: str, require_midi: bool) -> bool:
         return has_wav
     has_mid = any(marker in f and f.endswith(".mid") for f in entries)
     return has_wav and has_mid
+
+
+_TEMPO_FROM_BASENAME_RE = re.compile(r"at ([\d.]+) BPM\)$")
+
+
+def find_existing_basename(song_dir: str, label: str) -> str | None:
+    """The basename (no extension) of song_dir's existing wav for this
+    instrument label, or None if there isn't one - lets a caller add a
+    MIDI file for outputs that were already isolated without re-running
+    demucs, by reading the tempo straight back out of the filename (see
+    parse_tempo_from_basename) instead of needing song_alignment() again."""
+    if not os.path.isdir(song_dir):
+        return None
+    marker = f"({label} at"
+    for f in os.listdir(song_dir):
+        if marker in f and f.endswith(".wav"):
+            return os.path.splitext(f)[0]
+    return None
+
+
+def parse_tempo_from_basename(basename: str) -> float:
+    match = _TEMPO_FROM_BASENAME_RE.search(basename)
+    if not match:
+        raise ValueError(f"no tempo found in {basename!r}")
+    return float(match.group(1))
 
 
 def clear_stale_outputs(song_dir: str, label: str) -> None:
@@ -365,6 +391,18 @@ def _prompt_tempo_choice(windows: list[tuple[float, float, float]]) -> float:
 
 _alignment_cache: dict[tuple[str, int, float], tuple[int, float]] = {}
 
+_WHOLE_BPM_SNAP_TOLERANCE = 0.1  # a tempo this close to a whole number is almost certainly one, recorded to a click
+
+
+def _snap_tempo_to_whole_number_if_close(tempo: float) -> float:
+    """A tempo landing within _WHOLE_BPM_SNAP_TOLERANCE of a whole number
+    is almost certainly a song that really was made to a click at that
+    exact BPM, with the fractional part just onset-detection noise - round
+    it. Anything further off than that is treated as a real (non-integer)
+    tempo and left with its detected precision."""
+    nearest = round(tempo)
+    return float(nearest) if abs(tempo - nearest) < _WHOLE_BPM_SNAP_TOLERANCE else tempo
+
 
 def song_alignment(mp3_path: str) -> tuple[int, float]:
     """Compute the beat-1 trim point and tempo once, from the full song mix,
@@ -431,6 +469,8 @@ def song_alignment(mp3_path: str) -> tuple[int, float]:
             # Not a real terminal (piped input, non-interactive run) - don't
             # hang waiting for a choice, just use the beginning of the song.
             tempo = windows[0][2]
+
+    tempo = _snap_tempo_to_whole_number_if_close(tempo)
 
     if cache_key is not None:
         _alignment_cache[cache_key] = (cut_ms, tempo)
