@@ -63,7 +63,7 @@ class TestIsolateBass(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None):
+    def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None, on_percent=None, should_cancel=None):
         track_name = os.path.splitext(os.path.basename(input_path))[0]
         stem_dir = os.path.join(out_dir, model_name, track_name)
         os.makedirs(stem_dir, exist_ok=True)
@@ -401,12 +401,12 @@ class TestIsolateBassForPath(unittest.TestCase):
 
         bass_isolator.isolate_bass_for_path(mp3_path)
 
-        mock_isolate.assert_called_once_with(mp3_path, write_midi=True)
+        mock_isolate.assert_called_once_with(mp3_path, write_midi=True, context=None)
 
     @mock.patch("bass_isolator.isolate_bass_for_folder")
     def test_folder_dispatches_to_folder_handler(self, mock_folder):
         bass_isolator.isolate_bass_for_path(self.tmp_dir)
-        mock_folder.assert_called_once_with(self.tmp_dir, write_midi=True)
+        mock_folder.assert_called_once_with(self.tmp_dir, write_midi=True, context=None)
 
 
 if __name__ == "__main__":

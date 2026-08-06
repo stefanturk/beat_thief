@@ -34,7 +34,7 @@ class TestIsolateDrums(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None):
+    def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None, on_percent=None, should_cancel=None):
         # Mimic demucs's own output layout well enough for isolate_drums to
         # find what it's looking for, without actually running any model.
         track_name = os.path.splitext(os.path.basename(input_path))[0]
@@ -52,6 +52,31 @@ class TestIsolateDrums(unittest.TestCase):
         # file orchestration, so stand in with an empty placeholder file.
         with open(midi_path, "wb") as f:
             f.write(b"midi")
+
+    @mock.patch("drum_isolator._write_drum_midi")
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_run_context_reaches_demucs_and_alignment(
+        self, mock_alignment, mock_run_demucs, mock_trim, mock_write_midi
+    ):
+        # The GUI's progress callback and non-interactive choice are only
+        # useful if they survive the trip down to where the work happens.
+        mock_alignment.return_value = (0, 120.0)
+        mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
+        mock_write_midi.side_effect = self._fake_write_drum_midi
+        sink = []
+
+        def note_percent(percent):
+            sink.append(percent)
+
+        context = instrument_isolator.RunContext(on_percent=note_percent, interactive=False)
+
+        drum_isolator.isolate_drums(self.mp3_path, context=context)
+
+        self.assertIs(mock_run_demucs.call_args.kwargs["on_percent"], note_percent)
+        self.assertIs(mock_alignment.call_args.kwargs["interactive"], False)
 
     @mock.patch("drum_isolator._write_drum_midi")
     @mock.patch("instrument_isolator.trim_and_export")
@@ -389,12 +414,12 @@ class TestIsolateDrumsForPath(unittest.TestCase):
 
         drum_isolator.isolate_drums_for_path(mp3_path)
 
-        mock_isolate.assert_called_once_with(mp3_path, write_midi=True)
+        mock_isolate.assert_called_once_with(mp3_path, write_midi=True, context=None)
 
     @mock.patch("drum_isolator.isolate_drums_for_folder")
     def test_folder_dispatches_to_folder_handler(self, mock_folder):
         drum_isolator.isolate_drums_for_path(self.tmp_dir)
-        mock_folder.assert_called_once_with(self.tmp_dir, write_midi=True)
+        mock_folder.assert_called_once_with(self.tmp_dir, write_midi=True, context=None)
 
 
 if __name__ == "__main__":

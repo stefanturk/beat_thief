@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from typing import NamedTuple
 
 import librosa
 import numpy as np
@@ -34,10 +35,60 @@ _BAR_WIDTH = 30
 _PERCENT_RE = re.compile(r"(\d{1,3})%")
 
 
-def run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | None = None) -> str:
+class Cancelled(BaseException):
+    """Raised when a run is abandoned partway through at the caller's request.
+
+    Deliberately a BaseException rather than an Exception, exactly like
+    KeyboardInterrupt: the isolators wrap their work in broad
+    `except Exception` handlers that turn failures into a printed warning
+    and carry on to the next song. A cancel must cut straight through those
+    instead of being reported as a per-song failure."""
+
+
+class RunContext(NamedTuple):
+    """How an isolation run should talk to whoever asked for it.
+
+    Bundled into one object rather than threaded as separate arguments
+    because every isolator has to pass it straight down through four layers
+    (for_path -> for_folder/for_single_file -> isolate_X -> run_demucs /
+    song_alignment) without looking at it.
+
+    on_percent    - receives demucs' progress (0-100); None draws the terminal bar.
+    interactive   - whether a tempo drift may be put to the user; None means
+                    decide from whether stdin is a terminal (see song_alignment).
+    should_cancel - polled during the slow demucs stage; returning True kills
+                    it and raises Cancelled. There's no ctrl-C in a GUI window,
+                    so without this a mistaken 5-minute run can't be called off.
+    """
+
+    on_percent: object = None
+    interactive: bool | None = None
+    should_cancel: object = None
+
+
+DEFAULT_CONTEXT = RunContext()
+
+
+def run_demucs(
+    input_path: str,
+    out_dir: str,
+    model_name: str,
+    two_stems: str | None = None,
+    on_percent=None,
+    should_cancel=None,
+) -> str:
     """Run demucs and return the directory containing the separated stems,
     printing our own single-line progress bar (see _PERCENT_RE) rather than
-    relaying demucs' own terminal output."""
+    relaying demucs' own terminal output.
+
+    on_percent, if given, receives each new percentage (0-100) instead of the
+    terminal bar being drawn - for front ends with somewhere better to put it
+    than stdout (see gui.py). Only the sink changes; the parsing is identical
+    either way.
+
+    should_cancel, if given, is polled as output arrives; once it returns True
+    the demucs subprocess is killed and Cancelled is raised, so a cancel
+    actually stops the work rather than just abandoning the wait for it."""
     cmd = [sys.executable, "-m", "demucs", "-n", model_name, "-o", out_dir]
     if two_stems:
         cmd += ["--two-stems", two_stems]
@@ -48,6 +99,11 @@ def run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | 
     buf = ""
     last_percent = None
     for chunk in iter(lambda: proc.stdout.read(4096), b""):
+        if should_cancel is not None and should_cancel():
+            proc.kill()
+            proc.stdout.close()
+            proc.wait()
+            raise Cancelled()
         buf += chunk.decode(errors="ignore")
         # Process one complete \r/\n-terminated frame at a time (rather
         # than scanning the raw growing buffer) so a still-arriving frame
@@ -70,13 +126,16 @@ def run_demucs(input_path: str, out_dir: str, model_name: str, two_stems: str | 
             if percent == last_percent:
                 continue
             last_percent = percent
+            if on_percent is not None:
+                on_percent(percent)
+                continue
             filled = int(_BAR_WIDTH * percent / 100)
             bar = "#" * filled + "-" * (_BAR_WIDTH - filled)
             sys.stdout.write(f"\r  [{bar}] {percent:3d}%")
             sys.stdout.flush()
     proc.stdout.close()
     proc.wait()
-    if last_percent is not None:
+    if last_percent is not None and on_percent is None:
         sys.stdout.write("\n")
         sys.stdout.flush()
 
@@ -431,7 +490,7 @@ def _snap_tempo_to_whole_number_if_close(tempo: float) -> float:
     return float(nearest) if abs(tempo - nearest) < _WHOLE_BPM_SNAP_TOLERANCE else tempo
 
 
-def song_alignment(mp3_path: str) -> tuple[int, float]:
+def song_alignment(mp3_path: str, interactive: bool | None = None) -> tuple[int, float]:
     """Compute the beat-1 trim point and tempo once, from the full song mix,
     so every instrument isolated from this song can share the exact same
     time origin and tempo grid instead of each independently (and possibly
@@ -448,6 +507,13 @@ def song_alignment(mp3_path: str) -> tuple[int, float]:
     song itself. In the normal pipeline the mp3 passed in has already been
     through song_sanitizer, so this is typically a no-op (~0ms); for
     standalone use against an un-sanitized file it still does real work.
+
+    interactive decides whether a detected tempo drift is put to the user:
+    None (the default) keeps the historical behavior of asking whenever
+    stdin is a real terminal, while False never asks and always takes the
+    beginning of the song. The GUI passes False explicitly rather than
+    relying on isatty, so its behavior can't depend on what stdin a launched
+    .app happens to inherit.
 
     The tempo is detected and refined against the full (trimmed) mix's own
     onsets rather than any single isolated stem - that way it's available
@@ -493,11 +559,13 @@ def song_alignment(mp3_path: str) -> tuple[int, float]:
     elif _tempo_drift_detected(windows):
         drift = max(t for _, _, t in windows) - min(t for _, _, t in windows)
         print(f"Heads up: this song's tempo drifts by up to {drift:.3f} BPM across its length.")
-        if sys.stdin.isatty():
+        can_ask = sys.stdin.isatty() if interactive is None else interactive
+        if can_ask:
             tempo = _prompt_tempo_choice(windows)
         else:
-            # Not a real terminal (piped input, non-interactive run) - don't
-            # hang waiting for a choice, just use the beginning of the song.
+            # No one to ask (piped input, non-interactive run, or a front end
+            # that can't prompt) - don't hang waiting for a choice, just use
+            # the beginning of the song.
             tempo = windows[0][2]
 
     tempo = _snap_tempo_to_whole_number_if_close(tempo)

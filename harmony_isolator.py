@@ -51,7 +51,7 @@ def _output_basename(title: str) -> str:
     return f"{title} ({_LABEL})"
 
 
-def isolate_harmony(mp3_path: str) -> bool:
+def isolate_harmony(mp3_path: str, context: instrument_isolator.RunContext | None = None) -> bool:
     """Produce an isolated harmony wav (everything but drums/bass) for a
     single song, written into its shared "<title> (Isolated)" folder
     alongside any other instrument exported from the same song. Returns
@@ -59,6 +59,7 @@ def isolate_harmony(mp3_path: str) -> bool:
     source mp3 (see instrument_isolator.source_marker_matches) - an
     existing output whose marker is missing or doesn't match is treated as
     stale and reprocessed rather than trusted."""
+    context = context or instrument_isolator.DEFAULT_CONTEXT
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = instrument_isolator.song_output_dir(mp3_path)
     marker_matches = instrument_isolator.source_marker_matches(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
@@ -68,11 +69,14 @@ def isolate_harmony(mp3_path: str) -> bool:
         return False
 
     print(f"{title}: isolating harmony (this can take a few minutes)...")
-    trim_ms, _tempo = instrument_isolator.song_alignment(mp3_path)
+    trim_ms, _tempo = instrument_isolator.song_alignment(mp3_path, interactive=context.interactive)
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        stem_dir = instrument_isolator.run_demucs(mp3_path, tmp_dir, _HTDEMUCS_MODEL)
+        stem_dir = instrument_isolator.run_demucs(
+            mp3_path, tmp_dir, _HTDEMUCS_MODEL, on_percent=context.on_percent,
+            should_cancel=context.should_cancel,
+        )
         other_wav = os.path.join(stem_dir, "other.wav")
         vocals_wav = os.path.join(stem_dir, "vocals.wav")
 
@@ -93,7 +97,7 @@ def isolate_harmony(mp3_path: str) -> bool:
     return True
 
 
-def isolate_harmony_for_folder(output_dir: str) -> None:
+def isolate_harmony_for_folder(output_dir: str, context: instrument_isolator.RunContext | None = None) -> None:
     mp3_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
     if not mp3_files:
         print("No MP3s found to isolate harmony from.")
@@ -102,23 +106,23 @@ def isolate_harmony_for_folder(output_dir: str) -> None:
     for filename in mp3_files:
         path = os.path.join(output_dir, filename)
         try:
-            isolate_harmony(path)
+            isolate_harmony(path, context=context)
         except Exception as e:
             print(f"  Could not isolate harmony for {filename}, skipping: {e}")
 
 
-def isolate_harmony_for_single_file(path: str) -> None:
+def isolate_harmony_for_single_file(path: str, context: instrument_isolator.RunContext | None = None) -> None:
     try:
-        isolate_harmony(path)
+        isolate_harmony(path, context=context)
     except Exception as e:
         print(f"  Could not isolate harmony for {os.path.basename(path)}, skipping: {e}")
 
 
-def isolate_harmony_for_path(path: str) -> None:
+def isolate_harmony_for_path(path: str, context: instrument_isolator.RunContext | None = None) -> None:
     if os.path.isfile(path):
-        isolate_harmony_for_single_file(path)
+        isolate_harmony_for_single_file(path, context=context)
     else:
-        isolate_harmony_for_folder(path)
+        isolate_harmony_for_folder(path, context=context)
 
 
 def main() -> None:

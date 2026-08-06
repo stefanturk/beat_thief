@@ -7,3 +7,4 @@ torchaudio<2.6
 soundfile
 librosa
 pretty_midi
+pywebview

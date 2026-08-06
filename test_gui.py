@@ -1,0 +1,243 @@
+import os
+import shutil
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+
+import gui
+
+
+def _wait_until(predicate, timeout=2.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+class TestApiStart(unittest.TestCase):
+    def test_a_blank_link_is_refused_without_starting_anything(self):
+        started = []
+        api = gui.Api(run_pipeline=lambda *a, **k: started.append(a) or {})
+
+        state = api.start("   ")
+
+        self.assertEqual(started, [])
+        self.assertFalse(state["running"])
+        self.assertIn("link", state["error"].lower())
+
+    def test_start_returns_immediately_while_the_work_runs_behind_it(self):
+        release = threading.Event()
+
+        def slow_pipeline(url, **kwargs):
+            release.wait(timeout=2)
+            return {"outputs": [], "downloaded": 1}
+
+        api = gui.Api(run_pipeline=slow_pipeline)
+        state = api.start("https://example.com/song")
+
+        self.assertTrue(state["running"])
+        release.set()
+        self.assertTrue(_wait_until(lambda: not api.status()["running"]))
+
+    def test_checked_boxes_become_the_requested_instruments(self):
+        calls = {}
+
+        def capture(url, **kwargs):
+            calls.update(kwargs)
+            calls["url"] = url
+            return {"outputs": []}
+
+        api = gui.Api(run_pipeline=capture)
+        api.start("https://example.com/song", {"drums": True, "harmony": True, "midi": True})
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["url"], "https://example.com/song")
+        self.assertEqual(calls["instruments"], ["drums", "harmony"])
+        self.assertIs(calls["write_midi"], True)
+
+    def test_the_gui_always_runs_non_interactively(self):
+        calls = {}
+
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+        api.start("https://example.com/song")
+        _wait_until(lambda: not api.status()["running"])
+
+        # A window can't answer a terminal prompt, so it must never provoke one.
+        self.assertIs(calls["interactive"], False)
+
+    def test_a_second_start_while_running_is_ignored(self):
+        release = threading.Event()
+        runs = []
+
+        def slow_pipeline(url, **kwargs):
+            runs.append(url)
+            release.wait(timeout=2)
+            return {"outputs": []}
+
+        api = gui.Api(run_pipeline=slow_pipeline)
+        api.start("https://example.com/first")
+        api.start("https://example.com/second")
+
+        release.set()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(runs, ["https://example.com/first"])
+
+
+class TestApiStatus(unittest.TestCase):
+    def test_progress_events_become_a_readable_message_and_percentage(self):
+        def emitting_pipeline(url, on_event=None, **kwargs):
+            on_event({"stage": "isolating", "instrument": "drums", "song": "Redbone", "percent": 58})
+            return {"outputs": []}
+
+        api = gui.Api(run_pipeline=emitting_pipeline)
+        api.start("https://example.com/song")
+        _wait_until(lambda: not api.status()["running"])
+
+        # The final state is "done", so check what the event produced en route.
+        self.assertTrue(_wait_until(lambda: api.status()["stage"] == "done"))
+
+    def test_the_message_for_each_stage_is_plain_english(self):
+        message, percent = gui.Api._describe(
+            {"stage": "isolating", "instrument": "drums", "song": "Redbone", "percent": 58}
+        )
+        self.assertEqual(message, "Isolating drums — Redbone")
+        self.assertEqual(percent, 58)
+
+        message, _ = gui.Api._describe({"stage": "looking-up"})
+        self.assertIn("Looking up", message)
+
+    def test_a_stage_with_nothing_to_say_leaves_the_message_alone(self):
+        api = gui.Api(run_pipeline=lambda *a, **k: {"outputs": []})
+        with api._lock:
+            api._state["message"] = "Cleaning it up..."
+
+        api._on_event({"stage": "download-summary"})
+
+        self.assertEqual(api.status()["message"], "Cleaning it up...")
+
+    def test_finished_run_reports_its_outputs(self):
+        api = gui.Api(run_pipeline=lambda *a, **k: {"outputs": ["/tmp/drums.wav"], "downloaded": 1})
+        api.start("https://example.com/song")
+        _wait_until(lambda: not api.status()["running"])
+
+        state = api.status()
+        self.assertEqual(state["stage"], "done")
+        self.assertEqual(state["outputs"], ["/tmp/drums.wav"])
+
+    def test_an_exception_in_the_worker_surfaces_instead_of_spinning_forever(self):
+        def exploding_pipeline(url, **kwargs):
+            raise RuntimeError("demucs blew up")
+
+        api = gui.Api(run_pipeline=exploding_pipeline)
+        api.start("https://example.com/song")
+
+        self.assertTrue(_wait_until(lambda: not api.status()["running"]))
+        state = api.status()
+        self.assertEqual(state["stage"], "error")
+        self.assertIn("demucs blew up", state["error"])
+
+    def test_a_pipeline_error_result_is_shown_as_an_error(self):
+        api = gui.Api(run_pipeline=lambda *a, **k: {"error": "no such video", "outputs": []})
+        api.start("https://example.com/song")
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(api.status()["stage"], "error")
+        self.assertIn("no such video", api.status()["error"])
+
+
+class TestApiCancel(unittest.TestCase):
+    def test_cancelling_signals_the_pipeline(self):
+        seen = {}
+
+        def watching_pipeline(url, should_cancel=None, **kwargs):
+            seen["before"] = should_cancel()
+            api.cancel()
+            seen["after"] = should_cancel()
+            return {"cancelled": True, "outputs": []}
+
+        api = gui.Api(run_pipeline=watching_pipeline)
+        api.start("https://example.com/song")
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertFalse(seen["before"])
+        self.assertTrue(seen["after"])
+        self.assertEqual(api.status()["stage"], "cancelled")
+
+    def test_a_new_run_after_a_cancel_starts_uncancelled(self):
+        api = gui.Api(run_pipeline=lambda *a, **k: {"outputs": []})
+        api.cancel()
+
+        seen = {}
+        api._run_pipeline = lambda url, should_cancel=None, **kwargs: (
+            seen.update(cancelled=should_cancel()) or {"outputs": []}
+        )
+        api.start("https://example.com/song")
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertFalse(seen["cancelled"])
+
+
+class TestApiReveal(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    @mock.patch("subprocess.run")
+    def test_reveals_an_existing_file_in_finder(self, mock_run):
+        path = os.path.join(self.tmp_dir, "drums.wav")
+        with open(path, "wb") as f:
+            f.write(b"x")
+
+        api = gui.Api(run_pipeline=lambda *a, **k: {})
+
+        self.assertTrue(api.reveal(path))
+        mock_run.assert_called_once_with(["open", "-R", path], check=False)
+
+    @mock.patch("subprocess.run")
+    def test_a_missing_file_is_not_handed_to_finder(self, mock_run):
+        api = gui.Api(run_pipeline=lambda *a, **k: {})
+
+        self.assertFalse(api.reveal(os.path.join(self.tmp_dir, "gone.wav")))
+        mock_run.assert_not_called()
+
+
+class TestDefaultOutput(unittest.TestCase):
+    def test_downloads_do_not_default_into_a_folder_macos_blocks(self):
+        # An app can't write to Desktop, Documents or Downloads without a
+        # permission grant that doesn't reliably reach a python3 subprocess,
+        # so defaulting there would fail on every single run.
+        home = os.path.expanduser("~")
+        blocked = [os.path.join(home, name) for name in ("Desktop", "Documents", "Downloads")]
+
+        self.assertFalse(
+            any(gui.DEFAULT_OUTPUT.startswith(path) for path in blocked), gui.DEFAULT_OUTPUT
+        )
+
+    def test_a_run_without_an_output_folder_uses_that_default(self):
+        calls = {}
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+
+        api.start("https://example.com/song")
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["output_dir"], gui.DEFAULT_OUTPUT)
+
+    def test_the_window_can_show_where_files_are_going(self):
+        api = gui.Api(run_pipeline=lambda *a, **k: {"outputs": []})
+
+        self.assertEqual(api.status()["output_dir"], gui.DEFAULT_OUTPUT)
+
+
+class TestUiFile(unittest.TestCase):
+    def test_the_page_the_window_loads_actually_exists(self):
+        self.assertTrue(os.path.exists(gui.UI_FILE), gui.UI_FILE)
+
+
+if __name__ == "__main__":
+    unittest.main()
