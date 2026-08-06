@@ -235,6 +235,58 @@ class TestSongAlignment(unittest.TestCase):
 
         self.assertAlmostEqual(tempo, 100.0, delta=2.0)
 
+    @mock.patch("builtins.input")
+    def test_interactive_false_never_prompts_even_from_a_real_terminal(self, mock_input):
+        # The GUI passes interactive=False explicitly rather than relying on
+        # isatty, so the answer can't depend on how the .app inherits stdin.
+        track = _click_track(bpm=100, beats=50) + _click_track(bpm=150, beats=70)
+        mp3_path = os.path.join(self.tmp_dir, "song.mp3")
+        track.export(mp3_path, format="mp3")
+
+        with mock.patch("sys.stdin") as mock_stdin:
+            mock_stdin.isatty.return_value = True
+            _, tempo = instrument_isolator.song_alignment(mp3_path, interactive=False)
+
+        mock_input.assert_not_called()
+        self.assertAlmostEqual(tempo, 100.0, delta=2.0)
+
+
+class TestRunDemucsProgress(unittest.TestCase):
+    """run_demucs parses demucs' own output for a percentage; where that
+    percentage goes is what these cover."""
+
+    def _run_with_output(self, raw_output, on_percent=None):
+        fake_proc = mock.MagicMock()
+        chunks = [raw_output.encode(), b""]
+        fake_proc.stdout.read.side_effect = chunks
+        fake_proc.returncode = 0
+        with mock.patch("subprocess.Popen", return_value=fake_proc):
+            with mock.patch("sys.stdout.write") as mock_write:
+                stem_dir = instrument_isolator.run_demucs(
+                    "/tmp/Some Song.mp3", "/tmp/out", "htdemucs", on_percent=on_percent
+                )
+        return stem_dir, mock_write
+
+    def test_percentages_go_to_the_callback_and_not_to_stdout(self):
+        percents = []
+        _, mock_write = self._run_with_output(
+            " 12%|##   |\r 58%|#####  |\r100%|######|\r", on_percent=percents.append
+        )
+
+        self.assertEqual(percents, [12, 58, 100])
+        mock_write.assert_not_called()
+
+    def test_without_a_callback_it_still_draws_the_terminal_bar(self):
+        _, mock_write = self._run_with_output(" 58%|#####  |\r")
+
+        written = "".join(call.args[0] for call in mock_write.call_args_list)
+        self.assertIn("58%", written)
+
+    def test_returns_the_stem_directory_for_the_track(self):
+        stem_dir, _ = self._run_with_output(" 100%|#|\r", on_percent=lambda p: None)
+
+        self.assertEqual(stem_dir, os.path.join("/tmp/out", "htdemucs", "Some Song"))
+
 
 class TestTrimAndExport(unittest.TestCase):
     def setUp(self):

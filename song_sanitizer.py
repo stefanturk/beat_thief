@@ -430,6 +430,40 @@ def resolve_flags(flags: list[dict], output_dir: str) -> None:
             remaining.pop(0)
 
 
+def auto_resolve_flags(flags: list[dict], output_dir: str) -> None:
+    """Resolve ambiguous cut flags without asking anyone — the counterpart to
+    resolve_flags() for callers that have no one to ask (the GUI, a piped run).
+
+    Every flag is faded rather than cut. A fade is the safe default: it can
+    only ever soften audio that's already there, so a wrongly-flagged intro
+    survives, where a wrong cut would silently delete the first seconds of a
+    song. Deciding otherwise needs ears on the actual audio, which is exactly
+    what resolve_flags() is for."""
+    for flag in flags:
+        filename = flag["filename"]
+        path = os.path.join(output_dir, filename)
+        try:
+            if not os.path.exists(path):
+                continue
+
+            audio = load_audio(path)
+
+            # Re-exporting drops any existing ID3 tags, so preserve
+            # title/artist across the re-export (same as resolve_flags).
+            try:
+                existing_tags = EasyID3(path)
+                title = existing_tags.get("title", [""])[0]
+                artist = existing_tags.get("artist", [""])[0]
+            except Exception:
+                title, artist = "", ""
+
+            export_audio(apply_fade(audio, flag["end"], flag["cut_ms"]), path)
+            write_id3_tags(path, title, artist)
+            _mark_as_sanitized(path)
+        except Exception as e:
+            print(f"  Could not fade {filename}, leaving it as-is: {e}")
+
+
 # --- Per-file / per-folder orchestration ------------------------------------
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
@@ -609,7 +643,7 @@ def sanitize_folder(output_dir: str) -> None:
         resolve_flags(all_flags, output_dir)
 
 
-def sanitize_new_downloads(filenames: list[str], output_dir: str) -> list[str]:
+def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: bool = True) -> list[str]:
     """Sanitize exactly the given (just-downloaded) filenames, rather than
     rescanning every mp3 already in output_dir - reprocessing/reporting on
     songs this run never touched is just noise. Duplicate detection still
@@ -620,7 +654,11 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str) -> list[str]:
     downloads (accounting for any cleanup rename, and dropping the loser of
     any duplicate pair that got moved into Duplicates/), so a caller can
     chain further per-song work (e.g. isolating drums/bass) onto exactly
-    what this run downloaded - not the whole library."""
+    what this run downloaded - not the whole library.
+
+    interactive=False resolves any ambiguous cut points by fading them (see
+    auto_resolve_flags) instead of playing snippets and prompting - for the
+    GUI and other callers with no terminal to answer from."""
     all_flags = []
     final_filenames = []
     for filename in filenames:
@@ -648,8 +686,11 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str) -> list[str]:
     final_filenames = [f for f in final_filenames if os.path.exists(os.path.join(output_dir, f))]
 
     if all_flags:
-        print(f"\n{len(all_flags)} song section(s) need your input.")
-        resolve_flags(all_flags, output_dir)
+        if interactive:
+            print(f"\n{len(all_flags)} song section(s) need your input.")
+            resolve_flags(all_flags, output_dir)
+        else:
+            auto_resolve_flags(all_flags, output_dir)
 
     return final_filenames
 

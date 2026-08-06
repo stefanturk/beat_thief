@@ -178,7 +178,7 @@ def _output_basename(title: str, tempo: float) -> str:
     return f"{title} ({_LABEL} at {tempo:.3f} BPM)"
 
 
-def isolate_drums(mp3_path: str, write_midi: bool = True) -> bool:
+def isolate_drums(mp3_path: str, write_midi: bool = True, context: instrument_isolator.RunContext | None = None) -> bool:
     """Produce an isolated drums wav (and, if write_midi, a matching MIDI)
     for a single song, written into its shared "<title> (Isolated)" folder
     alongside any other instrument exported from the same song. Returns
@@ -193,6 +193,7 @@ def isolate_drums(mp3_path: str, write_midi: bool = True) -> bool:
     existing wav instead of re-running demucs - demucs is by far the
     slowest part of this, and nothing about the wav changes based on
     whether MIDI is also requested."""
+    context = context or instrument_isolator.DEFAULT_CONTEXT
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = instrument_isolator.song_output_dir(mp3_path)
     marker_matches = instrument_isolator.source_marker_matches(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
@@ -211,11 +212,14 @@ def isolate_drums(mp3_path: str, write_midi: bool = True) -> bool:
         return True
 
     print(f"{title}: isolating drums (this can take a few minutes)...")
-    trim_ms, tempo = instrument_isolator.song_alignment(mp3_path)
+    trim_ms, tempo = instrument_isolator.song_alignment(mp3_path, interactive=context.interactive)
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        drums_stem_dir = instrument_isolator.run_demucs(mp3_path, tmp_dir, _HTDEMUCS_MODEL, two_stems="drums")
+        drums_stem_dir = instrument_isolator.run_demucs(
+            mp3_path, tmp_dir, _HTDEMUCS_MODEL, two_stems="drums", on_percent=context.on_percent,
+            should_cancel=context.should_cancel,
+        )
         drums_wav = os.path.join(drums_stem_dir, "drums.wav")
 
         os.makedirs(song_dir, exist_ok=True)
@@ -236,7 +240,7 @@ def isolate_drums(mp3_path: str, write_midi: bool = True) -> bool:
     return True
 
 
-def isolate_drums_for_folder(output_dir: str, write_midi: bool = True) -> None:
+def isolate_drums_for_folder(output_dir: str, write_midi: bool = True, context: instrument_isolator.RunContext | None = None) -> None:
     mp3_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
     if not mp3_files:
         print("No MP3s found to isolate drums from.")
@@ -245,23 +249,23 @@ def isolate_drums_for_folder(output_dir: str, write_midi: bool = True) -> None:
     for filename in mp3_files:
         path = os.path.join(output_dir, filename)
         try:
-            isolate_drums(path, write_midi=write_midi)
+            isolate_drums(path, write_midi=write_midi, context=context)
         except Exception as e:
             print(f"  Could not isolate drums for {filename}, skipping: {e}")
 
 
-def isolate_drums_for_single_file(path: str, write_midi: bool = True) -> None:
+def isolate_drums_for_single_file(path: str, write_midi: bool = True, context: instrument_isolator.RunContext | None = None) -> None:
     try:
-        isolate_drums(path, write_midi=write_midi)
+        isolate_drums(path, write_midi=write_midi, context=context)
     except Exception as e:
         print(f"  Could not isolate drums for {os.path.basename(path)}, skipping: {e}")
 
 
-def isolate_drums_for_path(path: str, write_midi: bool = True) -> None:
+def isolate_drums_for_path(path: str, write_midi: bool = True, context: instrument_isolator.RunContext | None = None) -> None:
     if os.path.isfile(path):
-        isolate_drums_for_single_file(path, write_midi=write_midi)
+        isolate_drums_for_single_file(path, write_midi=write_midi, context=context)
     else:
-        isolate_drums_for_folder(path, write_midi=write_midi)
+        isolate_drums_for_folder(path, write_midi=write_midi, context=context)
 
 
 def main() -> None:

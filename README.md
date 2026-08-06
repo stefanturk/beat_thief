@@ -13,6 +13,36 @@ Download all songs from a YouTube Music (or YouTube) playlist as MP3s.
    pip install -r requirements.txt
    ```
 
+## The app
+
+For the everyday job — one link, get its drums — there's a window:
+
+```
+./make_app.sh
+```
+
+That builds `beat_thief.app`. Double-click it (or drag it to your Dock) and
+you get a real Mac window: paste a link, arm the parts you want, press Steal
+it. Progress runs in the window, and each finished file has a Reveal button
+that opens it in Finder ready to drag into Ableton. When a run finishes the
+big readout shows the detected tempo — click it to copy.
+
+The first launch asks for permission to read the folder this repo lives in
+(macOS protects Desktop, Documents and Downloads). Say yes; the app can't
+read its own code otherwise. Denied it by accident? Undo that with
+`tccutil reset SystemPolicyDesktopFolder com.stefan.beatthief` and launch
+again.
+
+The window never asks questions. Where the terminal would stop and play you a
+quiet intro or ask which tempo to use, the app just fades the intro and takes
+the tempo from the start of the song. When you want that fine control, use the
+command line below — it's the same pipeline either way, so the files come out
+identical.
+
+The app is a launcher, not a package: it runs the code sitting in this folder,
+so edits take effect on the next launch, and it only works on a machine with
+this repo and its dependencies installed.
+
 ## Usage
 
 ```

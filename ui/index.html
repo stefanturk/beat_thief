@@ -1,0 +1,502 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beat Thief</title>
+
+<!--
+  The window's face. Everything it can do goes through pywebview.api, which
+  is gui.py's Api object - see gui.py for what each call does.
+
+  Designed as a piece of hardware rather than a web page: this sits open next
+  to Ableton, so it borrows a sampler's vocabulary - silkscreen section
+  labels, pads that light when armed, one big readout. Set in Avenir Next,
+  which is round and humanist where a monospace would be square, and which
+  ships with macOS so nothing is ever fetched over the network.
+
+  The readout is the point of the whole app. While a run is going it shows
+  progress; when it finishes it shows the tempo that got baked into the
+  filename, big enough to read across a desk and clickable to copy - because
+  that number is what gets typed into Ableton next.
+-->
+
+<style>
+  :root {
+    --panel: #16171b;
+    --raised: #1e2026;
+    --edge: #2c2f37;
+    --ink: #e9e7e2;
+    --dim: #8b8d95;
+    --violet: #a78bfa;
+    --violet-dim: #38265f;
+    --good: #5fd39a;
+    --bad: #ff6b5e;
+    --radius: 6px;
+
+    --display: "Avenir Next", "Avenir", -apple-system, sans-serif;
+    --ui: "Avenir Next", "Avenir", -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+  }
+
+  body {
+    background: var(--panel);
+    color: var(--ink);
+    font-family: var(--ui);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+    cursor: default;
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+
+  /* Silkscreen labels, the way a panel names its sections. */
+  .label {
+    font-family: var(--display);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin: 0 0 8px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 18px 22px 15px;
+    border-bottom: 1px solid var(--edge);
+  }
+
+  .wordmark { display: flex; align-items: center; gap: 10px; }
+
+  h1 {
+    font-family: var(--display);
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: 0.005em;
+    margin: 0;
+  }
+
+  #state {
+    font-family: var(--display);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  #led {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--edge);
+    flex: none;
+  }
+  body[data-state="running"] #led { background: var(--violet); animation: pulse 1.4s ease-in-out infinite; }
+  body[data-state="done"] #led { background: var(--good); }
+  body[data-state="error"] #led,
+  body[data-state="cancelled"] #led { background: var(--bad); }
+  body[data-state="running"] #state { color: var(--violet); }
+  body[data-state="error"] #state { color: var(--bad); }
+
+  @keyframes pulse { 50% { opacity: 0.25; } }
+
+  main {
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+    flex: 1;
+  }
+
+  input[type="url"] {
+    width: 100%;
+    padding: 11px 13px;
+    background: #0f1013;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-family: var(--display);
+    font-size: 12.5px;
+    user-select: text;
+    cursor: text;
+  }
+  input[type="url"]::placeholder { color: #5b5d64; }
+  input[type="url"]:focus {
+    outline: none;
+    border-color: var(--violet);
+    box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.16);
+  }
+
+  /* Armed pads: on or off at a glance, no hunting for a tick mark. */
+  .pads { display: flex; gap: 8px; }
+
+  .pad {
+    flex: 1;
+    padding: 13px 6px 11px;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    color: var(--dim);
+    font-family: var(--display);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    text-align: center;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+  }
+  .pad:hover { border-color: #3d414b; }
+  .pad[aria-pressed="true"] {
+    background: var(--violet-dim);
+    border-color: var(--violet);
+    color: var(--violet);
+  }
+  .pad:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+
+  .extras {
+    display: flex;
+    gap: 18px;
+    margin-top: 11px;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+  .extras label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
+  .extras input { accent-color: var(--violet); margin: 0; }
+  .extras .aside { color: #5b5d64; }
+
+  /* The readout: progress while working, tempo when finished. */
+  .readout {
+    background: #0d0e11;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    padding: 22px 18px 18px;
+    text-align: center;
+  }
+
+  #figure {
+    font-family: var(--display);
+    font-size: 46px;
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    line-height: 1;
+    color: #4a4d55;
+    font-variant-numeric: tabular-nums;
+    display: inline-block;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  body[data-state="running"] #figure { color: var(--violet); }
+  body[data-state="done"] #figure { color: var(--good); }
+  body[data-state="error"] #figure,
+  body[data-state="cancelled"] #figure { color: var(--bad); }
+
+  #figure[data-copyable="true"] { cursor: pointer; }
+  #figure[data-copyable="true"]:hover { background: rgba(95, 211, 154, 0.1); }
+
+  #unit {
+    font-family: var(--display);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-top: 9px;
+  }
+
+  #message {
+    font-size: 12.5px;
+    color: var(--dim);
+    margin-top: 13px;
+    min-height: 1.45em;
+    word-break: break-word;
+  }
+  body[data-state="error"] #message { color: var(--bad); }
+
+  .track {
+    height: 3px;
+    background: var(--edge);
+    border-radius: 2px;
+    margin-top: 14px;
+    overflow: hidden;
+  }
+  #bar {
+    height: 100%;
+    width: 0;
+    background: var(--violet);
+    transition: width 0.25s linear;
+  }
+  body[data-state="done"] #bar { background: var(--good); }
+
+  #go {
+    width: 100%;
+    padding: 14px;
+    background: var(--violet);
+    border: none;
+    border-radius: var(--radius);
+    color: #14102a;
+    font-family: var(--display);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  #go:hover { background: #b9a1fb; }
+  #go:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+  #go[data-mode="cancel"] {
+    background: transparent;
+    border: 1px solid var(--bad);
+    color: var(--bad);
+  }
+  #go[data-mode="cancel"]:hover { background: rgba(255, 107, 94, 0.12); }
+  #go:disabled { opacity: 0.45; cursor: default; }
+
+  .files { border-top: 1px solid var(--edge); padding: 18px 22px 22px; }
+
+  #empty { color: #5b5d64; font-size: 12.5px; margin: 0; }
+
+  #destination {
+    font-family: var(--display);
+    font-size: 10px;
+    color: #4a4d55;
+    margin: 12px 0 0;
+    word-break: break-all;
+  }
+
+  ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+
+  li button {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 12px;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    color: var(--ink);
+    font-family: var(--display);
+    font-size: 11.5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  li button:hover { border-color: var(--violet); }
+  li button:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+  li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li .reveal { color: var(--dim); flex: none; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; }
+  li button:hover .reveal { color: var(--violet); }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<body data-state="idle">
+  <header>
+    <div class="wordmark">
+      <img src="logo.svg" alt="" width="26" height="26">
+      <h1>Beat Thief</h1>
+    </div>
+    <div id="state"><span id="led"></span><span id="state-text">Ready</span></div>
+  </header>
+
+  <main>
+    <section>
+      <p class="label">Link</p>
+      <input id="url" type="url" placeholder="paste a YouTube or YouTube Music link" spellcheck="false" autofocus>
+    </section>
+
+    <section>
+      <p class="label">Take</p>
+      <div class="pads">
+        <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="true">Drums</button>
+        <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
+        <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
+      </div>
+      <!--
+        No "keep the song too" toggle: the song is always downloaded and
+        always kept. Deleting it afterwards would leave its entry in
+        yt-dlp's download archive, so the next run would skip the download,
+        find no mp3, and quietly isolate nothing.
+      -->
+      <div class="extras">
+        <label><input type="checkbox" id="midi"> MIDI as well <span class="aside">(rough)</span></label>
+      </div>
+    </section>
+
+    <section class="readout">
+      <div id="figure" data-copyable="false">···</div>
+      <div id="unit"></div>
+      <p id="message">Paste a link to get started.</p>
+      <div class="track"><div id="bar"></div></div>
+    </section>
+
+    <button id="go">Steal it</button>
+  </main>
+
+  <section class="files">
+    <p class="label">Files</p>
+    <p id="empty">Nothing yet. Finished files land here, ready to drag into Ableton.</p>
+    <ul id="outputs"></ul>
+    <p id="destination"></p>
+  </section>
+
+<script>
+  const el = (id) => document.getElementById(id);
+  const body = document.body;
+
+  let polling = null;
+  let running = false;
+
+  // --- reading a run's state -------------------------------------------
+
+  // The tempo lives in the filename ("... at 121.132 BPM).wav") because that's
+  // where the pipeline puts it. Pulling it back out is what lets the readout
+  // finish on the number worth knowing rather than a bare "100%".
+  const TEMPO = /at ([\d.]+) BPM\)/;
+
+  function tempoOf(paths) {
+    for (const path of paths) {
+      const found = path.match(TEMPO);
+      if (found) return found[1];
+    }
+    return null;
+  }
+
+  function basename(path) {
+    return path.split("/").pop();
+  }
+
+  // --- painting ---------------------------------------------------------
+
+  function setFigure(text, unit, copyable) {
+    el("figure").textContent = text;
+    el("figure").dataset.copyable = copyable ? "true" : "false";
+    el("unit").textContent = unit;
+  }
+
+  function render(state) {
+    running = state.running;
+    const mode = state.error ? "error" : state.running ? "running" : state.stage;
+    body.dataset.state = mode === "done" || mode === "cancelled" || mode === "error" ? mode : (state.running ? "running" : "idle");
+
+    el("state-text").textContent = {
+      running: "Working",
+      done: "Done",
+      error: "Stopped",
+      cancelled: "Cancelled",
+    }[body.dataset.state] || "Ready";
+
+    el("message").textContent = state.error || state.message || "Paste a link to get started.";
+
+    const percent = state.percent;
+    el("bar").style.width = (percent === null || percent === undefined ? 0 : percent) + "%";
+
+    if (state.running) {
+      setFigure(percent === null || percent === undefined ? "···" : Math.round(percent) + "%", state.stage.replace("-", " "), false);
+    } else if (body.dataset.state === "done") {
+      const tempo = tempoOf(state.outputs || []);
+      if (tempo) setFigure(tempo, "BPM — click to copy", true);
+      else setFigure("✓", "Finished", false);
+    } else if (body.dataset.state === "error" || body.dataset.state === "cancelled") {
+      setFigure("···", body.dataset.state === "cancelled" ? "Cancelled" : "Stopped", false);
+    } else {
+      setFigure("···", "", false);
+    }
+
+    el("go").textContent = state.running ? "Stop" : "Steal it";
+    el("go").dataset.mode = state.running ? "cancel" : "go";
+    if (state.output_dir) el("destination").textContent = "Saving to " + state.output_dir;
+    renderOutputs(state.outputs || []);
+  }
+
+  function renderOutputs(paths) {
+    const list = el("outputs");
+    if (!paths.length) {
+      el("empty").hidden = false;
+      list.replaceChildren();
+      return;
+    }
+    el("empty").hidden = true;
+    list.replaceChildren(...paths.map((path) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.innerHTML = '<span class="name"></span><span class="reveal">Reveal</span>';
+      button.querySelector(".name").textContent = basename(path);
+      button.title = path;
+      button.addEventListener("click", () => window.pywebview.api.reveal(path));
+      item.append(button);
+      return item;
+    }));
+  }
+
+  // --- talking to Python -------------------------------------------------
+
+  function poll() {
+    window.pywebview.api.status().then((state) => {
+      render(state);
+      if (!state.running && polling) {
+        clearInterval(polling);
+        polling = null;
+      }
+    });
+  }
+
+  function start() {
+    const options = { midi: el("midi").checked };
+    document.querySelectorAll(".pad").forEach((pad) => {
+      options[pad.dataset.stem] = pad.getAttribute("aria-pressed") === "true";
+    });
+
+    window.pywebview.api.start(el("url").value, options).then((state) => {
+      render(state);
+      if (state.running && !polling) polling = setInterval(poll, 250);
+    });
+  }
+
+  // --- wiring ------------------------------------------------------------
+
+  document.querySelectorAll(".pad").forEach((pad) => {
+    pad.addEventListener("click", () => {
+      pad.setAttribute("aria-pressed", pad.getAttribute("aria-pressed") === "true" ? "false" : "true");
+    });
+  });
+
+  el("go").addEventListener("click", () => {
+    if (running) window.pywebview.api.cancel().then(render);
+    else start();
+  });
+
+  el("url").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !running) start();
+  });
+
+  el("figure").addEventListener("click", () => {
+    if (el("figure").dataset.copyable !== "true") return;
+    const tempo = el("figure").textContent;
+    // A file:// page can't rely on the async clipboard API, so go through a
+    // throwaway textarea - the copy is the whole point of showing the number.
+    const scratch = document.createElement("textarea");
+    scratch.value = tempo;
+    document.body.append(scratch);
+    scratch.select();
+    document.execCommand("copy");
+    scratch.remove();
+    el("unit").textContent = "BPM — copied";
+  });
+
+  window.addEventListener("pywebviewready", poll);
+</script>
+</body>

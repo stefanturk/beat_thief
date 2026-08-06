@@ -10,3 +10,5 @@ venv/
 .DS_Store
 .claude/
 Funky Drummer (100 BPM).mid
+# Built by make_app.sh, and it bakes in this machine's absolute paths.
+beat_thief.app/

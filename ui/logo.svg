@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    Beat Thief's mark: a record. No rounded-square plate behind it - the disc
+    is the whole icon, so it reads as an actual record sitting in the Dock
+    rather than another app tile in a row of app tiles.
+
+    Grooves are drawn as concentric strokes rather than a texture so the
+    whole thing stays a few kilobytes of vector and survives being scaled
+    from a 1024px icon down to the 20px mark in the app's own header.
+  -->
+  <defs>
+    <radialGradient id="sheen" cx="0.32" cy="0.26" r="0.85">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="0.45" stop-color="#FFFFFF" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Vinyl. The white rim keeps the disc's edge readable against a dark
+       Dock or a black background, where black-on-black would just vanish. -->
+  <circle cx="512" cy="512" r="484" fill="#0C0D10" stroke="#FFFFFF" stroke-width="26"/>
+
+  <!-- Grooves -->
+  <g fill="none" stroke="#22232A">
+    <circle cx="512" cy="512" r="206" stroke-width="9"/>
+    <circle cx="512" cy="512" r="219" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="232" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="245" stroke-width="9"/>
+    <circle cx="512" cy="512" r="258" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="271" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="284" stroke-width="9"/>
+    <circle cx="512" cy="512" r="297" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="310" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="323" stroke-width="9"/>
+    <circle cx="512" cy="512" r="336" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="349" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="362" stroke-width="9"/>
+    <circle cx="512" cy="512" r="375" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="388" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="401" stroke-width="9"/>
+    <circle cx="512" cy="512" r="414" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="427" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="440" stroke-width="9"/>
+    <circle cx="512" cy="512" r="453" stroke-width="5" opacity="0.9"/>
+    <circle cx="512" cy="512" r="466" stroke-width="5" opacity="0.9"/>
+  </g>
+
+  <!-- Light catching the surface -->
+  <circle cx="512" cy="512" r="483" fill="url(#sheen)"/>
+
+  <!-- Label -->
+  <circle cx="512" cy="512" r="178" fill="#8B5CF6"/>
+  <circle cx="512" cy="512" r="178" fill="none" stroke="#FFFFFF" stroke-width="16"/>
+
+  <!-- Spindle hole -->
+  <circle cx="512" cy="512" r="30" fill="#FFFFFF"/>
+</svg>

@@ -22,7 +22,7 @@ class TestIsolateHarmony(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None):
+    def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None, on_percent=None, should_cancel=None):
         self.assertIsNone(two_stems)  # harmony needs a full separation, not two-stems
         track_name = os.path.splitext(os.path.basename(input_path))[0]
         stem_dir = os.path.join(out_dir, model_name, track_name)
@@ -182,12 +182,12 @@ class TestIsolateHarmonyForPath(unittest.TestCase):
 
         harmony_isolator.isolate_harmony_for_path(mp3_path)
 
-        mock_isolate.assert_called_once_with(mp3_path)
+        mock_isolate.assert_called_once_with(mp3_path, context=None)
 
     @mock.patch("harmony_isolator.isolate_harmony_for_folder")
     def test_folder_dispatches_to_folder_handler(self, mock_folder):
         harmony_isolator.isolate_harmony_for_path(self.tmp_dir)
-        mock_folder.assert_called_once_with(self.tmp_dir)
+        mock_folder.assert_called_once_with(self.tmp_dir, context=None)
 
 
 if __name__ == "__main__":

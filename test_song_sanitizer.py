@@ -668,6 +668,82 @@ class TestSanitizeNewDownloads(unittest.TestCase):
         final_filenames = sanitizer.sanitize_new_downloads(["Nonexistent.mp3"], self.tmp_dir)
         self.assertEqual(final_filenames, [])
 
+    @mock.patch("song_sanitizer._prompt_choice")
+    @mock.patch("song_sanitizer.play_snippet")
+    @mock.patch("song_sanitizer._wait_for_space")
+    def test_non_interactive_run_fades_an_ambiguous_intro_without_asking(
+        self, mock_wait, mock_play, mock_choice
+    ):
+        filename = "Song - Artist.mp3"
+        path = os.path.join(self.tmp_dir, filename)
+        track = _tone(3000, dbfs_gain=-45) + _tone(5000, dbfs_gain=-3)
+        sanitizer.export_audio(track, path)
+
+        final_filenames = sanitizer.sanitize_new_downloads(
+            [filename], self.tmp_dir, interactive=False
+        )
+
+        # Nothing was played and nothing was asked - the GUI can't answer.
+        mock_wait.assert_not_called()
+        mock_play.assert_not_called()
+        mock_choice.assert_not_called()
+        self.assertEqual(final_filenames, [filename])
+        # Faded, not trimmed: the file is still its original length.
+        self.assertAlmostEqual(len(sanitizer.load_audio(path)), len(track), delta=200)
+
+
+class TestAutoResolveFlags(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _flagged_song(self, filename="Song - Artist.mp3"):
+        path = os.path.join(self.tmp_dir, filename)
+        track = _tone(3000, dbfs_gain=-45) + _tone(5000, dbfs_gain=-3)
+        sanitizer.export_audio(track, path)
+        flags = sanitizer.sanitize_file(filename, self.tmp_dir)
+        self.assertEqual(len(flags), 1)  # guard: the fixture really is ambiguous
+        return path, flags, len(track)
+
+    def test_fades_the_flagged_intro_instead_of_cutting_it(self):
+        path, flags, original_len = self._flagged_song()
+        before = sanitizer.load_audio(path)
+        cut_ms = flags[0]["cut_ms"]
+        head_before = sanitizer._region_dbfs(before, 0, cut_ms)
+
+        sanitizer.auto_resolve_flags(flags, self.tmp_dir)
+
+        after = sanitizer.load_audio(path)
+        self.assertAlmostEqual(len(after), original_len, delta=200)  # faded, not trimmed
+        self.assertLess(sanitizer._region_dbfs(after, 0, cut_ms), head_before)
+
+    def test_marks_the_file_so_a_later_run_never_re_flags_it(self):
+        path, flags, _ = self._flagged_song()
+
+        sanitizer.auto_resolve_flags(flags, self.tmp_dir)
+
+        self.assertTrue(sanitizer._is_already_sanitized(path))
+
+    def test_preserves_id3_tags_across_the_re_export(self):
+        path, flags, _ = self._flagged_song()
+        sanitizer.write_id3_tags(path, "Real Title", "Real Artist")
+
+        sanitizer.auto_resolve_flags(flags, self.tmp_dir)
+
+        tags = EasyID3(path)
+        self.assertEqual(tags.get("title", [""])[0], "Real Title")
+        self.assertEqual(tags.get("artist", [""])[0], "Real Artist")
+
+    def test_missing_file_is_skipped_without_raising(self):
+        flags = [{"filename": "Gone.mp3", "end": "start", "cut_ms": 1000}]
+        sanitizer.auto_resolve_flags(flags, self.tmp_dir)  # must not raise
+
+    def test_no_flags_does_nothing(self):
+        sanitizer.auto_resolve_flags([], self.tmp_dir)
+        self.assertEqual(os.listdir(self.tmp_dir), [])
+
 
 class TestSanitizeFileReplace(unittest.TestCase):
     def setUp(self):
