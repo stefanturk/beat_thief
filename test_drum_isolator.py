@@ -32,6 +32,7 @@ class TestIsolateDrums(unittest.TestCase):
         self.song_dir = os.path.join(self.tmp_dir, "Song - Artist (Isolated)")
 
     def tearDown(self):
+        instrument_isolator.clear_stem_cache()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None, on_percent=None, should_cancel=None):

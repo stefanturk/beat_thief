@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""Isolate a song's "harmony" from downloaded MP3s: everything left after
-drums and bass are pulled out (vocals, guitars, keys, pads, whatever else
-is in the mix). Just audio, no MIDI step - meant to drop straight into a
-DAW alongside the drums/bass exports from the same song (see
-drum_isolator.py, bass_isolator.py, instrument_isolator.py)."""
+"""Isolate a song's harmony from downloaded MP3s: everything left after
+drums, bass and vocals are pulled out - guitars, keys, pads, whatever else
+is holding the chords up. Just audio, no MIDI step - meant to drop straight
+into a DAW alongside the drums/bass/vocals exports from the same song (see
+drum_isolator.py, bass_isolator.py, vocals_isolator.py,
+instrument_isolator.py).
+
+Together those four stems are the whole song: nothing belongs to two of
+them and nothing to none of them, so playing them at once gives the song
+back. Harmony used to include the vocals as well, which made that
+impossible - there was no instrumental and no way to hear a vocal on its
+own."""
 
 from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sys
-import tempfile
-
-from pydub import AudioSegment
 
 import instrument_isolator
 
@@ -30,19 +33,14 @@ _LABEL = "Isolated Harmony"
 # which source mp3 it was produced from - see instrument_isolator.
 # source_marker_matches. Doesn't depend on the filename, so it can be
 # checked before song_alignment() ever runs.
-_SOURCE_MARKER_FILENAME = ".harmony_source.json"
-
-
-def _mix_harmony(other_wav_path: str, vocals_wav_path: str, out_path: str) -> None:
-    """Overlay demucs' "other" and "vocals" stems into a single wav -
-    together they're everything demucs separated out that isn't drums or
-    bass. pydub's overlay handles the two stems' differing length/channels
-    itself (demucs' stems for one track are all the same length/channels in
-    practice, but overlay is robust to it either way)."""
-    other = AudioSegment.from_wav(other_wav_path)
-    vocals = AudioSegment.from_wav(vocals_wav_path)
-    mixed = other.overlay(vocals)
-    mixed.export(out_path, format="wav")
+#
+# The "_v2" is deliberate and load-bearing: harmony used to mean "other +
+# vocals", and every harmony wav produced before that change still has the
+# vocals in it. Those files sit in folders whose old .harmony_source.json
+# says they're up to date, so under the old name they'd be trusted forever
+# and quietly hand back a stem that isn't what harmony means any more.
+# Changing the name makes every one of them read as stale, so it's rebuilt.
+_SOURCE_MARKER_FILENAME = ".harmony_source_v2.json"
 
 
 def _output_basename(title: str) -> str:
@@ -52,8 +50,8 @@ def _output_basename(title: str) -> str:
 
 
 def isolate_harmony(mp3_path: str, context: instrument_isolator.RunContext | None = None) -> bool:
-    """Produce an isolated harmony wav (everything but drums/bass) for a
-    single song, written into its shared "<title> (Isolated)" folder
+    """Produce an isolated harmony wav (everything but drums, bass and
+    vocals) for a single song, written into its shared "<title> (Isolated)" folder
     alongside any other instrument exported from the same song. Returns
     False (skipped) if a harmony output already exists for this exact
     source mp3 (see instrument_isolator.source_marker_matches) - an
@@ -71,27 +69,16 @@ def isolate_harmony(mp3_path: str, context: instrument_isolator.RunContext | Non
     print(f"{title}: isolating harmony (this can take a few minutes)...")
     trim_ms, _tempo = instrument_isolator.song_alignment(mp3_path, interactive=context.interactive)
 
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        stem_dir = instrument_isolator.run_demucs(
-            mp3_path, tmp_dir, _HTDEMUCS_MODEL, on_percent=context.on_percent,
-            should_cancel=context.should_cancel,
-        )
-        other_wav = os.path.join(stem_dir, "other.wav")
-        vocals_wav = os.path.join(stem_dir, "vocals.wav")
+    stem_dir = instrument_isolator.separated_stems(mp3_path, _HTDEMUCS_MODEL, context)
+    other_wav = os.path.join(stem_dir, "other.wav")
 
-        mixed_wav = os.path.join(tmp_dir, "harmony.wav")
-        _mix_harmony(other_wav, vocals_wav, mixed_wav)
+    os.makedirs(song_dir, exist_ok=True)
+    instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
+    basename = _output_basename(title)
+    wav_path = os.path.join(song_dir, basename + ".wav")
+    instrument_isolator.trim_and_export(other_wav, trim_ms, wav_path)
 
-        os.makedirs(song_dir, exist_ok=True)
-        instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
-        basename = _output_basename(title)
-        wav_path = os.path.join(song_dir, basename + ".wav")
-        instrument_isolator.trim_and_export(mixed_wav, trim_ms, wav_path)
-
-        instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
 
     print(f"{title}: harmony isolated.")
     return True
@@ -127,7 +114,7 @@ def isolate_harmony_for_path(path: str, context: instrument_isolator.RunContext 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Isolate harmony (everything but drums/bass) from downloaded MP3s."
+        description="Isolate harmony (everything but drums, bass and vocals) from downloaded MP3s."
     )
     parser.add_argument(
         "path",
@@ -143,6 +130,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopped.")
         sys.exit(130)
+    finally:
+        instrument_isolator.clear_stem_cache()
 
 
 if __name__ == "__main__":

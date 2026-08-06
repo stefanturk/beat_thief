@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -144,6 +145,76 @@ def run_demucs(
 
     track_name = os.path.splitext(os.path.basename(input_path))[0]
     return os.path.join(out_dir, model_name, track_name)
+
+
+_stem_cache: dict[tuple[str, float, str], str] = {}
+_stem_temp_dirs: list[str] = []
+
+
+def separated_stems(
+    mp3_path: str,
+    model_name: str,
+    context: "RunContext | None" = None,
+) -> str:
+    """Separate a song into all four of demucs' sources and return the
+    directory holding drums.wav / bass.wav / other.wav / vocals.wav.
+
+    Cached per song, because demucs computes all four sources whether you
+    ask for one or all of them - --two-stems only sums three of them
+    afterwards. Isolating drums, bass, harmony and vocals from one song used
+    to mean four full separations of identical audio; now it means one.
+
+    The key includes the mp3's mtime, so a song that's been re-downloaded or
+    re-sanitized since the pass is separated again rather than served from a
+    result that no longer describes it.
+
+    Only the song currently being worked on is held. Every instrument for a
+    song is isolated before moving to the next one, so one is all that's
+    ever wanted - and a separated song is hundreds of megabytes, which a
+    folder of fifty would turn into a full disk.
+
+    Callers must not delete the directory they get back - it belongs to the
+    cache and is shared. clear_stem_cache() disposes of it, and should be
+    called once the run that needed it is over (see pipeline.run)."""
+    context = context or DEFAULT_CONTEXT
+    key = (os.path.abspath(mp3_path), os.path.getmtime(mp3_path), model_name)
+
+    cached = _stem_cache.get(key)
+    if cached is not None:
+        if context.on_percent is not None:
+            # An instant stage would otherwise leave the window's bar sitting
+            # at whatever the last real percentage was.
+            context.on_percent(100)
+        return cached
+
+    clear_stem_cache()
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        stem_dir = run_demucs(
+            mp3_path,
+            tmp_dir,
+            model_name,
+            on_percent=context.on_percent,
+            should_cancel=context.should_cancel,
+        )
+    except BaseException:
+        # Includes Cancelled: nothing half-separated is worth keeping, and a
+        # temp dir left behind is hundreds of megabytes.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    _stem_temp_dirs.append(tmp_dir)
+    _stem_cache[key] = stem_dir
+    return stem_dir
+
+
+def clear_stem_cache() -> None:
+    """Throw away the separated pass and the temp directory holding it.
+    Safe to call when there's nothing cached."""
+    for tmp_dir in _stem_temp_dirs:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    _stem_temp_dirs.clear()
+    _stem_cache.clear()
 
 
 ISOLATED_SUFFIX = " (Isolated)"

@@ -167,6 +167,8 @@
 
   .extras {
     display: flex;
+    justify-content: space-between;
+    align-items: center;
     gap: 18px;
     margin-top: 11px;
     font-size: 12.5px;
@@ -360,6 +362,7 @@
         <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="true">Drums</button>
         <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
         <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
+        <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
       </div>
       <!--
         No "keep the song too" toggle: the song is always downloaded and
@@ -369,6 +372,7 @@
       -->
       <div class="extras">
         <label><input type="checkbox" id="midi"> MIDI as well <span class="aside">(rough)</span></label>
+        <span class="aside">All four together give the song back.</span>
       </div>
     </section>
 

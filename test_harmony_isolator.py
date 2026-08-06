@@ -4,7 +4,6 @@ import tempfile
 import unittest
 from unittest import mock
 
-from pydub import AudioSegment
 from pydub.generators import Sine
 
 import harmony_isolator
@@ -20,10 +19,11 @@ class TestIsolateHarmony(unittest.TestCase):
         self.song_dir = os.path.join(self.tmp_dir, "Song - Artist (Isolated)")
 
     def tearDown(self):
+        instrument_isolator.clear_stem_cache()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None, on_percent=None, should_cancel=None):
-        self.assertIsNone(two_stems)  # harmony needs a full separation, not two-stems
+        self.assertIsNone(two_stems)  # one full separation, shared by every instrument
         track_name = os.path.splitext(os.path.basename(input_path))[0]
         stem_dir = os.path.join(out_dir, model_name, track_name)
         os.makedirs(stem_dir, exist_ok=True)
@@ -106,26 +106,42 @@ class TestIsolateHarmony(unittest.TestCase):
         mock_run_demucs.assert_called_once()
 
 
-class TestMixHarmony(unittest.TestCase):
-    def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp()
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_the_harmony_is_the_other_stem_with_no_vocal_in_it(self, mock_alignment, mock_run_demucs, mock_trim):
+        # Harmony used to be "other + vocals" overlaid together, which left no
+        # way to get an instrumental and made the four stems overlap rather
+        # than add up to the song.
+        mock_alignment.return_value = (0, 120.0)
+        mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
 
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+        harmony_isolator.isolate_harmony(self.mp3_path)
 
-    def test_mixes_both_stems_into_one_wav(self):
-        other_wav = os.path.join(self.tmp_dir, "other.wav")
-        vocals_wav = os.path.join(self.tmp_dir, "vocals.wav")
-        out_path = os.path.join(self.tmp_dir, "harmony.wav")
-        Sine(220).to_audio_segment(duration=500).export(other_wav, format="wav")
-        Sine(440).to_audio_segment(duration=500).export(vocals_wav, format="wav")
+        exported = mock_trim.call_args.args[0]
+        self.assertEqual(os.path.basename(exported), "other.wav")
 
-        harmony_isolator._mix_harmony(other_wav, vocals_wav, out_path)
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_a_harmony_file_from_before_vocals_were_split_out_is_rebuilt(self, mock_alignment, mock_run_demucs, mock_trim):
+        # Those files still have the vocals in them. Their old marker would
+        # otherwise pass them off as current forever.
+        os.makedirs(self.song_dir)
+        basename = "Song - Artist (Isolated Harmony)"
+        with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
+            f.write(b"x")
+        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, ".harmony_source.json")
 
-        self.assertTrue(os.path.exists(out_path))
-        mixed = AudioSegment.from_wav(out_path)
-        self.assertGreater(mixed.rms, 0)
-        self.assertAlmostEqual(len(mixed), 500, delta=50)
+        mock_alignment.return_value = (0, 120.0)
+        mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
+
+        result = harmony_isolator.isolate_harmony(self.mp3_path)
+
+        self.assertTrue(result)
+        mock_run_demucs.assert_called_once()
 
 
 class TestIsolateHarmonyForFolder(unittest.TestCase):

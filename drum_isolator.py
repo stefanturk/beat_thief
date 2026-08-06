@@ -11,9 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sys
-import tempfile
 
 import librosa
 import numpy as np
@@ -214,27 +212,20 @@ def isolate_drums(mp3_path: str, write_midi: bool = True, context: instrument_is
     print(f"{title}: isolating drums (this can take a few minutes)...")
     trim_ms, tempo = instrument_isolator.song_alignment(mp3_path, interactive=context.interactive)
 
-    tmp_dir = tempfile.mkdtemp()
-    try:
-        drums_stem_dir = instrument_isolator.run_demucs(
-            mp3_path, tmp_dir, _HTDEMUCS_MODEL, two_stems="drums", on_percent=context.on_percent,
-            should_cancel=context.should_cancel,
-        )
-        drums_wav = os.path.join(drums_stem_dir, "drums.wav")
+    stem_dir = instrument_isolator.separated_stems(mp3_path, _HTDEMUCS_MODEL, context)
+    drums_wav = os.path.join(stem_dir, "drums.wav")
 
-        os.makedirs(song_dir, exist_ok=True)
-        instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
-        basename = _output_basename(title, tempo)
-        wav_path = os.path.join(song_dir, basename + ".wav")
-        instrument_isolator.trim_and_export(drums_wav, trim_ms, wav_path)
+    os.makedirs(song_dir, exist_ok=True)
+    instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
+    basename = _output_basename(title, tempo)
+    wav_path = os.path.join(song_dir, basename + ".wav")
+    instrument_isolator.trim_and_export(drums_wav, trim_ms, wav_path)
 
-        if write_midi:
-            midi_path = os.path.join(song_dir, basename + ".mid")
-            _write_drum_midi(wav_path, midi_path, tempo)
+    if write_midi:
+        midi_path = os.path.join(song_dir, basename + ".mid")
+        _write_drum_midi(wav_path, midi_path, tempo)
 
-        instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+    instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
 
     print(f"{title}: drums isolated{' + MIDI' if write_midi else ''} ({tempo:.3f} BPM).")
     return True
@@ -295,6 +286,8 @@ def main() -> None:
     except KeyboardInterrupt:
         print("\nStopped.")
         sys.exit(130)
+    finally:
+        instrument_isolator.clear_stem_cache()
 
 
 if __name__ == "__main__":

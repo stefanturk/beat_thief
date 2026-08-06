@@ -288,6 +288,99 @@ class TestRunDemucsProgress(unittest.TestCase):
         self.assertEqual(stem_dir, os.path.join("/tmp/out", "htdemucs", "Some Song"))
 
 
+class TestSeparatedStems(unittest.TestCase):
+    """One demucs pass per song, shared by every instrument that wants it -
+    demucs computes all four sources whichever one you asked for."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.mp3_path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
+        with open(self.mp3_path, "wb") as f:
+            f.write(b"fake mp3 bytes")
+
+    def tearDown(self):
+        instrument_isolator.clear_stem_cache()
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _fake_run_demucs(self, input_path, out_dir, model_name, two_stems=None, on_percent=None, should_cancel=None):
+        stem_dir = os.path.join(out_dir, model_name, "Song - Artist")
+        os.makedirs(stem_dir, exist_ok=True)
+        return stem_dir
+
+    def test_asking_twice_for_the_same_song_separates_it_once(self):
+        with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs) as mock_demucs:
+            first = instrument_isolator.separated_stems(self.mp3_path, "htdemucs")
+            second = instrument_isolator.separated_stems(self.mp3_path, "htdemucs")
+
+        self.assertEqual(first, second)
+        mock_demucs.assert_called_once()
+
+    def test_it_asks_for_every_stem_not_just_two(self):
+        with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs) as mock_demucs:
+            instrument_isolator.separated_stems(self.mp3_path, "htdemucs")
+
+        self.assertNotIn("two_stems", mock_demucs.call_args.kwargs)
+
+    def test_a_changed_song_is_separated_again(self):
+        # A re-download or a sanitizer pass rewrites the mp3; the previous
+        # separation no longer describes it.
+        with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs) as mock_demucs:
+            instrument_isolator.separated_stems(self.mp3_path, "htdemucs")
+            os.utime(self.mp3_path, (0, 0))
+            instrument_isolator.separated_stems(self.mp3_path, "htdemucs")
+
+        self.assertEqual(mock_demucs.call_count, 2)
+
+    def test_a_cached_pass_still_reports_progress(self):
+        # An instant stage would otherwise leave a window's bar stuck at
+        # whatever the last real percentage was.
+        seen = []
+        context = instrument_isolator.RunContext(on_percent=seen.append)
+        with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs):
+            instrument_isolator.separated_stems(self.mp3_path, "htdemucs", context)
+            seen.clear()
+            instrument_isolator.separated_stems(self.mp3_path, "htdemucs", context)
+
+        self.assertEqual(seen, [100])
+
+    def test_clearing_the_cache_removes_the_separated_audio(self):
+        with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs):
+            stem_dir = instrument_isolator.separated_stems(self.mp3_path, "htdemucs")
+        self.assertTrue(os.path.isdir(stem_dir))
+
+        instrument_isolator.clear_stem_cache()
+
+        self.assertFalse(os.path.exists(stem_dir))
+
+    def test_moving_on_to_the_next_song_frees_the_previous_one(self):
+        # A separated song is hundreds of megabytes; a folder run would fill
+        # a disk if every song's stayed around.
+        other_mp3 = os.path.join(self.tmp_dir, "Other - Artist.mp3")
+        with open(other_mp3, "wb") as f:
+            f.write(b"another song")
+
+        with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs):
+            first = instrument_isolator.separated_stems(self.mp3_path, "htdemucs")
+            second = instrument_isolator.separated_stems(other_mp3, "htdemucs")
+
+        self.assertFalse(os.path.exists(first))
+        self.assertTrue(os.path.isdir(second))
+
+    def test_clearing_an_empty_cache_is_fine(self):
+        instrument_isolator.clear_stem_cache()  # nothing separated yet
+
+    def test_a_cancelled_pass_leaves_nothing_behind_and_nothing_cached(self):
+        def cancel_immediately(*args, **kwargs):
+            raise instrument_isolator.Cancelled()
+
+        with mock.patch("instrument_isolator.run_demucs", side_effect=cancel_immediately):
+            with self.assertRaises(instrument_isolator.Cancelled):
+                instrument_isolator.separated_stems(self.mp3_path, "htdemucs")
+
+        self.assertEqual(instrument_isolator._stem_cache, {})
+        self.assertEqual(instrument_isolator._stem_temp_dirs, [])
+
+
 class TestTrimAndExport(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
