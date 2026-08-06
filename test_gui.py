@@ -52,12 +52,23 @@ class TestApiStart(unittest.TestCase):
             return {"outputs": []}
 
         api = gui.Api(run_pipeline=capture)
-        api.start("https://example.com/song", {"drums": True, "harmony": True, "midi": True})
+        api.start("https://example.com/song", {"drums": True, "harmony": True, "midi": ["drums"]})
         _wait_until(lambda: not api.status()["running"])
 
         self.assertEqual(calls["url"], "https://example.com/song")
         self.assertEqual(calls["instruments"], ["drums", "harmony"])
-        self.assertIs(calls["write_midi"], True)
+        self.assertEqual(calls["midi_for"], frozenset({"drums"}))
+
+    def test_a_midi_box_left_ticked_for_a_stem_that_is_off_is_ignored(self):
+        # The page leaves the tick behind when a pad is switched back off,
+        # and a MIDI file for a stem nobody asked for can't be written.
+        calls = {}
+
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+        api.start("https://example.com/song", {"drums": True, "midi": ["drums", "bass"]})
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["midi_for"], frozenset({"drums"}))
 
     def test_every_pad_armed_asks_for_the_whole_song(self):
         calls = {}

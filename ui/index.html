@@ -177,6 +177,10 @@
   .extras label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
   .extras input { accent-color: var(--violet); margin: 0; }
   .extras .aside { color: #5b5d64; }
+  .midi-picks { display: flex; align-items: center; gap: 16px; }
+  /* A stem you haven't asked for can't have MIDI written for it, so its box
+     is unavailable rather than quietly ignored. */
+  .midi-picks label.off { opacity: 0.38; cursor: default; }
 
   /* The readout: progress while working, tempo when finished. */
   .readout {
@@ -371,8 +375,11 @@
         find no mp3, and quietly isolate nothing.
       -->
       <div class="extras">
-        <label><input type="checkbox" id="midi"> MIDI as well <span class="aside">(rough)</span></label>
-        <span class="aside">All four together give the song back.</span>
+        <div class="midi-picks">
+          <label data-midi="drums"><input type="checkbox" id="midi-drums"> Drums MIDI</label>
+          <label data-midi="bass"><input type="checkbox" id="midi-bass"> Bass MIDI <span class="aside">(rough)</span></label>
+        </div>
+        <span class="aside">All four rebuild the song.</span>
       </div>
     </section>
 
@@ -532,10 +539,23 @@
     });
   }
 
+  // A MIDI box only means something while its stem is switched on.
+  function syncMidiPicks() {
+    document.querySelectorAll(".midi-picks label").forEach((label) => {
+      const pad = el("pad-" + label.dataset.midi);
+      const on = pad.getAttribute("aria-pressed") === "true";
+      label.classList.toggle("off", !on);
+      label.querySelector("input").disabled = !on;
+    });
+  }
+
   function start() {
-    const options = { midi: el("midi").checked };
+    const options = { midi: [] };
     document.querySelectorAll(".pad").forEach((pad) => {
       options[pad.dataset.stem] = pad.getAttribute("aria-pressed") === "true";
+    });
+    document.querySelectorAll(".midi-picks input").forEach((box) => {
+      if (box.checked && !box.disabled) options.midi.push(box.closest("label").dataset.midi);
     });
 
     window.pywebview.api.start(el("url").value, options).then((state) => {
@@ -549,8 +569,10 @@
   document.querySelectorAll(".pad").forEach((pad) => {
     pad.addEventListener("click", () => {
       pad.setAttribute("aria-pressed", pad.getAttribute("aria-pressed") === "true" ? "false" : "true");
+      syncMidiPicks();
     });
   });
+  syncMidiPicks();
 
   el("go").addEventListener("click", () => {
     if (running) window.pywebview.api.cancel().then(render);

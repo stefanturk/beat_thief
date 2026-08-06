@@ -153,19 +153,21 @@ containing whichever instruments you asked for, side by side — no separate
 top-level `Drums`/`Bass`/`Harmony` folders to dig through.
 
 By default only the isolated `.wav` is written for each instrument. Add
-`midi` (or `--midi`) to also get a matching `.mid` file for drums/bass,
-built by detecting hits/notes directly in the wav. **This is deprecated and
-may be removed later** — the transcription quality is currently worse than
-Ableton's own audio-to-MIDI conversion, so it's mostly useful as a rough
-starting point rather than something to rely on. `harmony` and `vocals` have
-no MIDI step; they're audio only.
+`midi` (or `--midi`) to also get a matching `.mid` file, transcribed from
+the wav. `harmony` and `vocals` have no MIDI step; they're audio only.
+
+MIDI is chosen per instrument, because drums and bass are not the same
+proposition: drums are transcribed by a trained model and are good, bass is
+still a rough pitch-tracked guess. `midi` on its own covers everything you
+asked for; `--midi drums` names one.
 
 ```
-python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass midi
+python3 beat_thief.py "https://.../playlist?list=YOUR_ID" drums bass midi
+python3 beat_thief.py "https://.../playlist?list=YOUR_ID" drums bass --midi drums
 ```
 
-Every instrument you isolate for a song shares the exact same beat-1 start
-and the exact same tempo grid, so e.g. the drums and bass MIDI line up
+Every instrument you isolate for a song shares the exact same start and
+the exact same tempo, so e.g. the drums and bass MIDI line up
 exactly when dragged into a DAW together — and if a song's tempo turns out
 to drift (see below) you're only asked about it once per song, even when
 isolating both instruments. Both the trim point and the tempo are computed
@@ -177,18 +179,52 @@ detail.
 ### Drums
 
 `<Song Title> (Isolated Drums at N.NNN BPM).wav` is the isolated drum mix;
-with `midi`, the matching `.mid` is a MIDI file built by detecting hits
-directly in the wav and writing them all onto one drum track. Drag the
-`.mid` file straight onto a MIDI track with a drum rack loaded; the exact
-BPM in the filename is the same one baked into the MIDI file itself, so
+with `midi`, the matching `.mid` is a MIDI file transcribed from it. Drag
+the `.mid` straight onto a MIDI track with a Drum Rack loaded — every note
+it uses sits inside the rack's default 16 pads, so nothing needs remapping.
+The exact BPM in the filename is the same one baked into the MIDI file, so
 it's there to read at a glance, not just to look up.
 
-Each hit is guessed as kick, snare, or cymbal/hi-hat from its spectral
-centroid (low-frequency hits are kicks, mid is snare, high is
-cymbal/hi-hat) and written to Ableton's default Drum Rack note for that
-piece (kick=36, snare=38, cymbal=42) — a cheap heuristic rather than a
-second ML model, so expect it to be right most of the time on clean hits
-and to need some manual cleanup on busier or more layered passages.
+**Six pieces**, against Ableton's three:
+
+| Piece | Note | |
+| --- | --- | --- |
+| Kick | 36 | Bass Drum 1 |
+| Snare | 38 | Acoustic Snare |
+| Closed hi-hat | 42 | Closed Hi-Hat |
+| Open hi-hat | 46 | Open Hi-Hat |
+| Toms | 47 | Low-Mid Tom |
+| Cymbal | 49 | Crash Cymbal 1 |
+
+The transcription is [ADTOF](https://github.com/MZehren/ADTOF) — a
+convolutional-recurrent network trained on 114 hours of real annotated
+music — via [ADTOF-pytorch](https://github.com/xavriley/ADTOF-pytorch). The
+model and its weights are vendored in `adtof/`; see `adtof/NOTICE.md` for
+the attribution and the licence. It adds no dependencies Beat Thief didn't
+already have, and it reproduces the published implementation note for note
+on that project's own test file.
+
+The model predicts five classes. Open vs closed hi-hat is Beat Thief's own
+work on top: each hi-hat's high-frequency energy is followed to see whether
+it's still ringing when the next hat lands. That part is a measurement, not
+a trained behaviour, and it's deliberately biased toward calling a hat
+closed — a closed hat written as open rings over the next one and sounds
+wrong, while an open hat written as closed just sounds tight.
+
+Velocity is measured per hit from the audio, in a frequency band belonging
+to that piece — so a crash on beat 1 doesn't inflate the kick underneath
+it — and scaled in decibels against the loudest hit **of the same piece**.
+Hi-hats sit around 20dB under the kick in most mixes, so scaling everything
+together would push every hat to the bottom of the range and flatten the
+part.
+
+Nothing is quantized. Hits keep the exact moment they were played, so ghost
+notes, flams and swing survive — correcting that is a keystroke in Ableton
+and is not something this should decide for you.
+
+If you already have a `.mid` from an older version, asking for drums MIDI
+again rebuilds it. That reuses the wav that's already there rather than
+separating the song a second time, so it takes seconds.
 
 ### Bass
 
@@ -222,12 +258,24 @@ time you ask for harmony on that song.
 `<Song Title> (Isolated Vocals).wav` is the singing — lead and backing —
 with the band taken out from under it. Audio only, no MIDI.
 
-### The shared beat-1 / tempo grid
+### The shared start / tempo grid
 
 Any dead air or drum-less/bass-less intro is trimmed off the front of the
 whole song first (reusing the same intro-cut detection as the sanitizer),
-so every isolated instrument's wav and MIDI start right on beat 1 instead
-of however many seconds into the file the original intro happened to be.
+so every isolated instrument's wav and MIDI start where the music does
+instead of however many seconds into the file the original intro happened
+to be.
+
+Nothing is snapped to a grid at any point — not the audio, not the notes.
+Where the beats fall relative to that start is Ableton's business, and
+nudging a clip is a drag.
+
+**On dragging MIDI into Ableton.** Live ignores a MIDI file's tempo header
+on import — it drops the notes onto your set's grid at whatever tempo the
+set is. The notes are placed correctly in *beats*, so at a 120 BPM set a
+157 BPM song's clip takes 1.3× as long in seconds and reads as everything
+slowed down. Set the tempo to the BPM in the filename and it lines up. This
+is Live's import behaviour, not something the file can carry.
 
 Each song's tempo is detected once from the full mix, then precisely
 refined by fitting a constant grid through every onset across the whole
@@ -258,8 +306,8 @@ This is off by default because it's slow — each song runs through a
 machine-learning model. That happens once per song per run, though, not once
 per instrument: asking for all four parts is roughly the cost of asking for
 one. Each instrument also runs standalone against an existing folder or
-file — drums/bass with the same optional (deprecated) `midi`/`--midi` flag,
-harmony and vocals with no flags:
+file — drums/bass with the same optional `midi`/`--midi` flag, harmony and
+vocals with no flags:
 
 ```
 python3 drum_isolator.py ["path/to/folder-or-file.mp3"] [midi]

@@ -147,16 +147,31 @@ class TestInstrumentRuns(PipelineTestCase):
         # either would be a TypeError.
         with mock.patch("harmony_isolator.isolate_harmony_for_single_file") as mock_harmony, \
              mock.patch("vocals_isolator.isolate_vocals_for_single_file") as mock_vocals:
-            self._run(instruments=["harmony", "vocals"], write_midi=True)
+            self._run(instruments=["harmony", "vocals"], midi_for={"harmony", "vocals"})
 
         self.assertNotIn("write_midi", mock_harmony.call_args.kwargs)
         self.assertNotIn("write_midi", mock_vocals.call_args.kwargs)
 
-    def test_write_midi_reaches_the_instruments_that_support_it(self):
+    def test_midi_reaches_the_instrument_it_was_asked_for(self):
         with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
-            self._run(instruments=["drums"], write_midi=True)
+            self._run(instruments=["drums"], midi_for={"drums"})
 
         self.assertIs(mock_drums.call_args.kwargs["write_midi"], True)
+
+    def test_midi_is_chosen_per_instrument_not_for_all_of_them(self):
+        # Asking for drums MIDI must not also produce the rough bass MIDI.
+        with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums, \
+             mock.patch("bass_isolator.isolate_bass_for_single_file") as mock_bass:
+            self._run(instruments=["drums", "bass"], midi_for={"drums"})
+
+        self.assertIs(mock_drums.call_args.kwargs["write_midi"], True)
+        self.assertIs(mock_bass.call_args.kwargs["write_midi"], False)
+
+    def test_no_midi_asked_for_means_none_written(self):
+        with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
+            self._run(instruments=["drums"])
+
+        self.assertIs(mock_drums.call_args.kwargs["write_midi"], False)
 
     def test_non_interactive_choice_reaches_both_the_sanitizer_and_the_isolators(self):
         with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
