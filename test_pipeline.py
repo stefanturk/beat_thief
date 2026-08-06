@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import history
 import instrument_isolator
 import pipeline
 
@@ -228,6 +229,87 @@ class TestCancelling(PipelineTestCase):
             result = self._run(instruments=["drums"], should_cancel=lambda: False)
 
         self.assertFalse(result["cancelled"])
+
+
+class TestRemembersWhereSongsCameFrom(PipelineTestCase):
+    def setUp(self):
+        super().setUp()
+        self.history_path = os.path.join(self.tmp_dir, "history.json")
+        patcher = mock.patch("history.HISTORY_PATH", self.history_path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_downloaded_song_records_the_link_it_came_from(self):
+        self._run()
+
+        song = os.path.join(self.tmp_dir, "Some Song - Artist.mp3")
+        self.assertEqual(history.url_for(song, self.history_path), "https://example.com/song")
+
+    def test_the_library_lists_the_song_with_its_link_and_its_files(self):
+        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
+        wav = os.path.join(song_dir, "Some Song - Artist (Isolated Drums at 120.000 BPM).wav")
+
+        def fake_isolate(path, write_midi=False, context=None):
+            os.makedirs(song_dir, exist_ok=True)
+            with open(wav, "wb") as f:
+                f.write(b"x")
+
+        with mock.patch("drum_isolator.isolate_drums_for_single_file", side_effect=fake_isolate):
+            self._run(instruments=["drums"])
+
+        library = pipeline.library()
+
+        self.assertEqual(len(library), 1)
+        self.assertEqual(library[0]["title"], "Some Song - Artist")
+        self.assertEqual(library[0]["url"], "https://example.com/song")
+        self.assertIn(wav, library[0]["files"])
+        self.assertIn(os.path.join(self.tmp_dir, "Some Song - Artist.mp3"), library[0]["files"])
+
+    def test_the_isolators_own_marker_files_are_not_listed_as_output(self):
+        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
+
+        def fake_isolate(path, write_midi=False, context=None):
+            os.makedirs(song_dir, exist_ok=True)
+            for name in ("stem.wav", ".drums_source.json"):
+                with open(os.path.join(song_dir, name), "wb") as f:
+                    f.write(b"x")
+
+        with mock.patch("drum_isolator.isolate_drums_for_single_file", side_effect=fake_isolate):
+            self._run(instruments=["drums"])
+
+        listed = [os.path.basename(p) for p in pipeline.library()[0]["files"]]
+
+        self.assertIn("stem.wav", listed)
+        self.assertNotIn(".drums_source.json", listed)
+
+    def test_a_song_with_no_isolated_folder_still_lists_its_mp3(self):
+        self._run()
+
+        self.assertEqual(
+            pipeline.library()[0]["files"],
+            [os.path.join(self.tmp_dir, "Some Song - Artist.mp3")],
+        )
+
+
+class TestMissingFfmpeg(PipelineTestCase):
+    def test_says_so_up_front_instead_of_downloading_something_it_cannot_convert(self):
+        # Without this check the run looks like it worked - full progress bar,
+        # a stray .mp4 on disk, and a baffling "nothing came back".
+        with mock.patch("shutil.which", return_value=None), \
+             mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
+            result = self._run(instruments=["drums"])
+
+        self.assertIn("ffmpeg", result["error"])
+        self.assertEqual(_FakeYoutubeDL.downloads, [])  # never even started
+        mock_drums.assert_not_called()
+        self.assertEqual(self._stages(), ["error"])
+
+    def test_a_present_ffmpeg_does_not_get_in_the_way(self):
+        with mock.patch("shutil.which", return_value="/opt/homebrew/bin/ffmpeg"):
+            result = self._run()
+
+        self.assertNotIn("error", result)
+        self.assertEqual(result["downloaded"], 1)
 
 
 class TestFailures(PipelineTestCase):

@@ -234,6 +234,21 @@ class TestDefaultOutput(unittest.TestCase):
         self.assertEqual(api.status()["output_dir"], gui.DEFAULT_OUTPUT)
 
 
+class TestLibrary(unittest.TestCase):
+    def test_hands_the_page_recent_songs_with_their_links(self):
+        songs = [{"title": "Redbone", "url": "https://youtu.be/x", "song": "/m/Redbone.mp3", "files": []}]
+        api = gui.Api(run_pipeline=lambda *a, **k: {})
+
+        with mock.patch("pipeline.library", return_value=songs):
+            self.assertEqual(api.library(), songs)
+
+    def test_an_unreadable_library_returns_nothing_rather_than_breaking_the_window(self):
+        api = gui.Api(run_pipeline=lambda *a, **k: {})
+
+        with mock.patch("pipeline.library", side_effect=OSError("disk gone")):
+            self.assertEqual(api.library(), [])
+
+
 class TestUiFile(unittest.TestCase):
     def test_the_page_the_window_loads_actually_exists(self):
         self.assertTrue(os.path.exists(gui.UI_FILE), gui.UI_FILE)
