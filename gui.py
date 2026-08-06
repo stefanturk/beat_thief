@@ -118,6 +118,16 @@ class Api:
         subprocess.run(["open", "-R", path], check=False)
         return True
 
+    def library(self) -> list:
+        """Recently downloaded songs with their files and their original
+        links, so the page can offer to go back for another stem."""
+        try:
+            return pipeline.library()
+        except Exception:
+            # A listing that can't be built is worth nothing, but it's never
+            # worth breaking the window over.
+            return []
+
     def default_output_dir(self) -> str:
         return DEFAULT_OUTPUT
 

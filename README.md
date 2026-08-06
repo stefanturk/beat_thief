@@ -13,35 +13,52 @@ Download all songs from a YouTube Music (or YouTube) playlist as MP3s.
    pip install -r requirements.txt
    ```
 
-## The app
+## Beat Thief, the app
 
 For the everyday job — one link, get its drums — there's a window:
 
 ```
-./make_app.sh
+./make_app.sh /Applications
 ```
 
-That builds `beat_thief.app`. Double-click it (or drag it to your Dock) and
-you get a real Mac window: paste a link, arm the parts you want, press Steal
-it. Progress runs in the window, and each finished file has a Reveal button
-that opens it in Finder ready to drag into Ableton. When a run finishes the
-big readout shows the detected tempo — click it to copy.
+That builds `Beat Thief.app` (leave off the path and it goes to
+`~/Applications` instead). Double-click it, or drag it to your Dock, and you
+get a real Mac window: paste a link, arm the parts you want, press Steal it.
+Progress runs in the window, and each finished file has a Reveal button that
+opens it in Finder ready to drag into Ableton. When a run finishes the big
+readout shows the detected tempo — click it to copy.
 
-The first launch asks for permission to read the folder this repo lives in
-(macOS protects Desktop, Documents and Downloads). Say yes; the app can't
-read its own code otherwise. Denied it by accident? Undo that with
-`tccutil reset SystemPolicyDesktopFolder com.stefan.beatthief` and launch
-again.
+Every song is listed under **Files** with the link it came from and a **Get
+more** button, which puts that link back in the box — so coming back a week
+later for the bass when you only took the drums is two clicks, not a hunt
+through your browser history. The list survives quitting the app, reads which
+files exist from disk (delete a stem in Finder and it stops being listed), and
+covers songs downloaded from the command line too. Only the link and the
+song's path are remembered, in `~/Library/Application Support/Beat Thief`.
+
+Downloads go to `~/Music/Beat Thief`, not the `~/Downloads/Song Downloads`
+the command line uses. macOS blocks apps from writing to Downloads (as it
+does Desktop and Documents) without a permission grant that doesn't reliably
+apply to a `python3` subprocess, so an app defaulting there would fail every
+run. The window shows the destination at the bottom.
+
+For the same reason the app carries a copy of the code inside its own bundle
+rather than running the files in this folder — see the comments at the top of
+`make_app.sh`. **Re-run `make_app.sh` after changing any Python or UI file**;
+the app holds a snapshot. The terminal front end always runs the live code.
 
 The window never asks questions. Where the terminal would stop and play you a
 quiet intro or ask which tempo to use, the app just fades the intro and takes
 the tempo from the start of the song. When you want that fine control, use the
-command line below — it's the same pipeline either way, so the files come out
-identical.
+command line below — it's the same pipeline either way (`pipeline.py`), so the
+files come out identical.
 
-The app is a launcher, not a package: it runs the code sitting in this folder,
-so edits take effect on the next launch, and it only works on a machine with
-this repo and its dependencies installed.
+If the app ever fails to start it says so in a dialog and writes the details
+to `~/Library/Logs/beat_thief.log`.
+
+The icon is `ui/logo.svg`, rendered to `.icns` at build time by
+`render_logo.py`. Edit the SVG and rebuild to change both the Dock icon and
+the mark in the window header.
 
 ## Usage
 

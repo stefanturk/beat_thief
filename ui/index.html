@@ -276,6 +276,42 @@
 
   ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 
+  #outputs { gap: 14px; }
+
+  .song-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+
+  .song-title {
+    font-size: 12.5px;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .again {
+    flex: none;
+    padding: 5px 10px;
+    background: transparent;
+    border: 1px solid var(--violet);
+    border-radius: 4px;
+    color: var(--violet);
+    font-family: var(--display);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .again:hover { background: var(--violet-dim); }
+  .again:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+
+  .song-files { gap: 4px; }
+
   li button {
     width: 100%;
     display: flex;
@@ -348,7 +384,7 @@
 
   <section class="files">
     <p class="label">Files</p>
-    <p id="empty">Nothing yet. Finished files land here, ready to drag into Ableton.</p>
+    <p id="empty">Nothing yet. Songs you take land here, ready to drag into Ableton.</p>
     <ul id="outputs"></ul>
     <p id="destination"></p>
   </section>
@@ -419,27 +455,64 @@
     el("go").textContent = state.running ? "Stop" : "Steal it";
     el("go").dataset.mode = state.running ? "cancel" : "go";
     if (state.output_dir) el("destination").textContent = "Saving to " + state.output_dir;
-    renderOutputs(state.outputs || []);
   }
 
-  function renderOutputs(paths) {
+  // Songs are listed rather than loose files so "go back for another stem"
+  // has something to hang off: the link belongs to the song, not to any one
+  // wav it produced.
+  function renderLibrary(songs) {
     const list = el("outputs");
-    if (!paths.length) {
-      el("empty").hidden = false;
-      list.replaceChildren();
-      return;
+    el("empty").hidden = songs.length > 0;
+    list.replaceChildren(...songs.map(renderSong));
+  }
+
+  function renderSong(song) {
+    const item = document.createElement("li");
+
+    const head = document.createElement("div");
+    head.className = "song-head";
+
+    const title = document.createElement("span");
+    title.className = "song-title";
+    title.textContent = song.title;
+    title.title = song.song;
+    head.append(title);
+
+    if (song.url) {
+      const again = document.createElement("button");
+      again.className = "again";
+      again.textContent = "Get more";
+      again.title = "Put this song's link back in the box";
+      again.addEventListener("click", () => {
+        el("url").value = song.url;
+        el("url").focus();
+        el("message").textContent = "Link ready — arm what you want and take it.";
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      });
+      head.append(again);
     }
-    el("empty").hidden = true;
-    list.replaceChildren(...paths.map((path) => {
-      const item = document.createElement("li");
+
+    item.append(head);
+
+    const files = document.createElement("ul");
+    files.className = "song-files";
+    files.append(...song.files.map((path) => {
+      const row = document.createElement("li");
       const button = document.createElement("button");
       button.innerHTML = '<span class="name"></span><span class="reveal">Reveal</span>';
       button.querySelector(".name").textContent = basename(path);
       button.title = path;
       button.addEventListener("click", () => window.pywebview.api.reveal(path));
-      item.append(button);
-      return item;
+      row.append(button);
+      return row;
     }));
+    item.append(files);
+
+    return item;
+  }
+
+  function refreshLibrary() {
+    window.pywebview.api.library().then(renderLibrary);
   }
 
   // --- talking to Python -------------------------------------------------
@@ -450,6 +523,7 @@
       if (!state.running && polling) {
         clearInterval(polling);
         polling = null;
+        refreshLibrary();
       }
     });
   }
@@ -497,6 +571,9 @@
     el("unit").textContent = "BPM — copied";
   });
 
-  window.addEventListener("pywebviewready", poll);
+  window.addEventListener("pywebviewready", () => {
+    poll();
+    refreshLibrary();
+  });
 </script>
 </body>

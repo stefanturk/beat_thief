@@ -16,12 +16,14 @@ in a window."""
 from __future__ import annotations
 
 import os
+import shutil
 
 import yt_dlp
 
 import bass_isolator
 import drum_isolator
 import harmony_isolator
+import history
 import instrument_isolator
 import song_sanitizer
 
@@ -213,6 +215,38 @@ def _instrument_outputs(mp3_path: str, label: str) -> list[str]:
     return [path for path in candidates if os.path.exists(path)]
 
 
+def library(limit: int = 20) -> list[dict]:
+    """Recently downloaded songs, newest first, each with the link it came
+    from and whatever files exist for it right now.
+
+    Files are read from disk rather than remembered, so a stem deleted in
+    Finder simply stops being listed."""
+    songs = []
+    for entry in history.entries()[:limit]:
+        song_path = entry["song"]
+        files = [song_path]
+
+        song_dir = instrument_isolator.song_output_dir(song_path)
+        if os.path.isdir(song_dir):
+            for name in sorted(os.listdir(song_dir)):
+                # Skip the .source.json markers the isolators keep for their
+                # own "is this still up to date" checks - not output anyone
+                # asked for.
+                if name.startswith("."):
+                    continue
+                files.append(os.path.join(song_dir, name))
+
+        songs.append(
+            {
+                "title": os.path.splitext(os.path.basename(song_path))[0],
+                "url": entry.get("url", ""),
+                "song": song_path,
+                "files": files,
+            }
+        )
+    return songs
+
+
 def run(
     url: str,
     output_dir: str = DEFAULT_OUTPUT,
@@ -253,6 +287,20 @@ def run(
 
     def cancelled() -> bool:
         return should_cancel is not None and should_cancel()
+
+    # Checked up front rather than left to fail mid-run: without ffmpeg,
+    # yt-dlp downloads the whole video happily and only then can't convert it
+    # to mp3, so the symptom is a full progress bar, a stray .mp4 on disk and
+    # nothing to show for it. Saying so before the download starts costs
+    # nothing and names the actual problem.
+    if shutil.which("ffmpeg") is None:
+        message = (
+            "ffmpeg isn't installed (or isn't on this app's PATH), so downloads "
+            "can't be converted to mp3. Install it with: brew install ffmpeg"
+        )
+        on_event({"stage": "error", "message": message})
+        result["error"] = message
+        return result
 
     download = _Download(url, output_dir, on_event)
     try:
@@ -306,6 +354,10 @@ def run(
                 seen.add(filename)
     result["songs"] = [os.path.join(output_dir, f) for f in filenames]
     result["outputs"] = list(result["songs"])
+
+    # Remember where these came from, so coming back later for another stem
+    # doesn't mean going and finding the link again (see history.py).
+    history.remember(url, result["songs"])
 
     context = instrument_isolator.RunContext(interactive=interactive, should_cancel=should_cancel)
 

@@ -38,10 +38,25 @@ PYTHON="$(command -v python3)"
 # reports the wrong answer for its own machine.
 ARCH="$(uname -m)"
 
+# An app launched from Finder inherits a bare PATH (/usr/bin:/bin:/usr/sbin:
+# /sbin) - not the one your shell has. ffmpeg lives in /opt/homebrew/bin, so
+# without this yt-dlp downloads the video fine and then silently fails to
+# convert it to mp3, leaving a stray .mp4 and an app that says nothing came
+# back. Bake in wherever ffmpeg actually is on this machine.
+FFMPEG="$(command -v ffmpeg || true)"
+if [ -z "$FFMPEG" ]; then
+    echo "Warning: ffmpeg isn't on your PATH. Install it with: brew install ffmpeg" >&2
+    echo "The app will download songs but won't be able to convert them to mp3." >&2
+    FFMPEG_DIR="/opt/homebrew/bin"
+else
+    FFMPEG_DIR="$(dirname "$FFMPEG")"
+fi
+
 # Everything the GUI imports, directly or indirectly.
 SOURCES=(
     gui.py
     pipeline.py
+    history.py
     song_sanitizer.py
     instrument_isolator.py
     drum_isolator.py
@@ -125,6 +140,8 @@ cat > "$APP/Contents/MacOS/Beat Thief" <<LAUNCHER
 LOG="\$HOME/Library/Logs/beat_thief.log"
 mkdir -p "\$(dirname "\$LOG")"
 echo "--- \$(date) ---" >> "\$LOG"
+
+export PATH="$FFMPEG_DIR:/opt/homebrew/bin:/usr/local/bin:\$PATH"
 
 cd "\$(dirname "\$0")/../Resources" || exit 1
 /usr/bin/arch -$ARCH "$PYTHON" gui.py >> "\$LOG" 2>&1
