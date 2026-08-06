@@ -40,8 +40,9 @@ _INSTRUMENTS = {
 
 # Which of those have a MIDI transcription step. Harmony and vocals are
 # audio only - there's no single line to transcribe out of a wall of pads or
-# a sung phrase.
-_TAKES_MIDI = frozenset({"drums", "bass"})
+# a sung phrase. Public, because the front ends have to be able to say which
+# instruments it's meaningful to ask for MIDI from.
+TAKES_MIDI = frozenset({"drums", "bass"})
 
 # The order instruments are worked through, so two runs asking for the same
 # set produce the same sequence regardless of how the set was built.
@@ -264,7 +265,7 @@ def run(
     url: str,
     output_dir: str = DEFAULT_OUTPUT,
     instruments=(),
-    write_midi: bool = False,
+    midi_for=(),
     on_event=None,
     should_cancel=None,
     interactive: bool | None = None,
@@ -272,8 +273,11 @@ def run(
     """Download url into output_dir, sanitize it, and isolate the requested
     instruments. Returns a result dict describing what happened.
 
-    instruments is any iterable of "drums"/"bass"/"harmony"; empty means the
-    song only. interactive=False suppresses every question the sanitizer and
+    instruments is any iterable of "drums"/"bass"/"harmony"/"vocals"; empty
+    means the song only. midi_for is which of those also get a MIDI file -
+    a separate choice per instrument, because drums MIDI is transcribed by a
+    trained model while bass MIDI is still a rough pitch-tracked guess, and
+    wanting one is no reason to be handed the other. interactive=False suppresses every question the sanitizer and
     tempo detection would otherwise ask (see song_sanitizer.auto_resolve_flags
     and instrument_isolator.song_alignment) - what the GUI passes, since it
     has no way to answer them.
@@ -287,6 +291,7 @@ def run(
             pass
 
     wanted = [name for name in INSTRUMENT_ORDER if name in set(instruments)]
+    midi_set = set(midi_for)
     result = {
         "download_status": 0,
         "downloaded": 0,
@@ -397,8 +402,8 @@ def run(
 
                 isolate = getattr(module, f"isolate_{name}_for_single_file")
                 kwargs = {"context": context._replace(on_percent=report)}
-                if name in _TAKES_MIDI:
-                    kwargs["write_midi"] = write_midi
+                if name in TAKES_MIDI:
+                    kwargs["write_midi"] = name in midi_set
                 try:
                     isolate(mp3_path, **kwargs)
                 except instrument_isolator.Cancelled:

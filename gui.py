@@ -84,12 +84,16 @@ class Api:
             state_snapshot = dict(self._state)
 
         instruments = [name for name in pipeline.INSTRUMENT_ORDER if options.get(name)]
-        write_midi = bool(options.get("midi"))
+        # MIDI is asked for per instrument, so a page that only wants drum
+        # MIDI doesn't also get the rough bass one. Intersected with what was
+        # actually requested, since the page leaves a tick behind when a pad
+        # is switched back off.
+        midi_for = frozenset(options.get("midi") or ()) & pipeline.TAKES_MIDI & set(instruments)
         output_dir = options.get("output_dir") or DEFAULT_OUTPUT
 
         self._thread = threading.Thread(
             target=self._work,
-            args=(url, output_dir, instruments, write_midi),
+            args=(url, output_dir, instruments, midi_for),
             daemon=True,
         )
         self._thread.start()
@@ -139,13 +143,13 @@ class Api:
             self._state["error"] = message
             return dict(self._state)
 
-    def _work(self, url, output_dir, instruments, write_midi):
+    def _work(self, url, output_dir, instruments, midi_for):
         try:
             result = self._run_pipeline(
                 url,
                 output_dir=output_dir,
                 instruments=instruments,
-                write_midi=write_midi,
+                midi_for=midi_for,
                 on_event=self._on_event,
                 should_cancel=self._cancel.is_set,
                 interactive=False,

@@ -64,16 +64,55 @@ class TestChoosingInstruments(CliTestCase):
 
         self.assertEqual(captured["instruments"], ["drums", "vocals"])
 
-    def test_midi_is_a_separate_choice_from_which_instruments(self):
-        captured = self._instruments_for([self.URL, "drums", "midi"])
 
-        self.assertEqual(captured["instruments"], ["drums"])
-        self.assertIs(captured["write_midi"], True)
+class TestChoosingMidi(CliTestCase):
+    URL = "https://youtu.be/abc"
 
     def test_midi_is_off_unless_asked_for(self):
         captured = self._instruments_for([self.URL, "all"])
 
-        self.assertIs(captured["write_midi"], False)
+        self.assertEqual(captured["midi_for"], frozenset())
+
+    def test_bare_midi_covers_everything_asked_for_that_has_it(self):
+        captured = self._instruments_for([self.URL, "all", "midi"])
+
+        self.assertEqual(captured["instruments"], ["drums", "bass", "harmony", "vocals"])
+        self.assertEqual(captured["midi_for"], frozenset({"drums", "bass"}))
+
+    def test_bare_midi_does_not_reach_instruments_that_were_not_asked_for(self):
+        captured = self._instruments_for([self.URL, "drums", "midi"])
+
+        self.assertEqual(captured["midi_for"], frozenset({"drums"}))
+
+    def test_midi_can_name_one_instrument(self):
+        captured = self._instruments_for([self.URL, "drums", "bass", "--midi", "drums"])
+
+        self.assertEqual(captured["instruments"], ["drums", "bass"])
+        self.assertEqual(captured["midi_for"], frozenset({"drums"}))
+
+    def test_an_instrument_named_after_midi_is_not_also_isolated(self):
+        # "--midi drums" is a MIDI choice, not a request for the drums.
+        captured = self._instruments_for([self.URL, "bass", "--midi", "drums"])
+
+        self.assertEqual(captured["instruments"], ["bass"])
+        self.assertEqual(captured["midi_for"], frozenset({"drums"}))
+
+    def test_a_url_after_midi_is_still_the_url(self):
+        captured = self._instruments_for(["--midi", self.URL, "drums"])
+
+        self.assertEqual(captured["url"], self.URL)
+        self.assertEqual(captured["instruments"], ["drums"])
+        self.assertEqual(captured["midi_for"], frozenset({"drums"}))
+
+    def test_an_output_folder_named_after_a_stem_is_a_folder(self):
+        captured = self._instruments_for([self.URL, "-o", "drums"])
+
+        self.assertEqual(captured["output_dir"], "drums")
+        self.assertEqual(captured["instruments"], [])
+
+    def test_naming_an_instrument_with_no_midi_step_is_an_error(self):
+        with self.assertRaises(SystemExit):
+            self._instruments_for([self.URL, "vocals", "--midi", "vocals"])
 
 
 if __name__ == "__main__":

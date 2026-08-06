@@ -6,5 +6,6 @@ torch<2.6
 torchaudio<2.6
 soundfile
 librosa
+scipy
 pretty_midi
 pywebview

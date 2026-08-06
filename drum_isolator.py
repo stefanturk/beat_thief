@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Isolate a song's drums from downloaded MP3s: an isolated drum wav (the
 full drum mix, pulled out of the song with Demucs) and a matching MIDI file
-built by detecting hits directly in it — no manual conversion needed. Both
-are trimmed and tempo-aligned to the same shared song_alignment() as every
-other isolated instrument (see instrument_isolator.py), so the drums MIDI
-lines up exactly with the bass MIDI and any future instrument exports from
-the same song."""
+transcribed from it - no manual conversion needed. Both are trimmed and
+tempo-aligned to the same shared song_alignment() as every other isolated
+instrument (see instrument_isolator.py), so the drums MIDI lines up exactly
+with the bass MIDI and any future instrument exports from the same song.
+
+The transcription itself lives in drum_transcriber.py, which runs a trained
+model over the drum wav and works out six pieces (kick, snare, toms, closed
+and open hi-hat, cymbal) with per-hit velocity. This module is about which
+files get written where."""
 
 from __future__ import annotations
 
@@ -13,17 +17,14 @@ import argparse
 import os
 import sys
 
-import librosa
-import numpy as np
 import pretty_midi
 
+import drum_transcriber
 import instrument_isolator
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
 _HTDEMUCS_MODEL = "htdemucs"
-
-_NOTE_DURATION_SEC = 0.05
 
 # What every drums output filename for a song contains, and what
 # identifies drum files (vs. e.g. a sibling bass export) within a song's
@@ -37,133 +38,32 @@ _LABEL = "Isolated Drums"
 # interactive drift prompt) ever runs.
 _SOURCE_MARKER_FILENAME = ".drums_source.json"
 
-# Without per-instrument stems there's no ML model telling a kick hit from
-# a snare hit apart anymore, but the mixed drums.wav still carries enough
-# spectral information to guess: kick hits are almost all low-frequency
-# energy, snares and toms sit in the middle, and cymbals/hi-hats are
-# dominated by high-frequency energy. A hit's spectral centroid (the
-# "center of mass" of its frequency content, in Hz) right after each onset
-# is a simple, cheap way to tell those apart without a second model.
-# Notes match Ableton's default Drum Rack mapping.
-_KICK_NOTE = 36     # Bass Drum 1
-_SNARE_NOTE = 38    # Acoustic Snare
-_CYMBAL_NOTE = 42   # Closed Hi-Hat
-
-# Fallback absolute thresholds, used only when a song has too few onsets to
-# derive its own (see _detect_note_events) - real, in-context drum hits run
-# far hotter than these, since a mixed recording's attack transients carry
-# broadband energy that a clean isolated tone doesn't.
-_KICK_MAX_CENTROID_HZ = 300.0
-_SNARE_MAX_CENTROID_HZ = 2000.0
-
-# How many onsets are needed before classifying hits relative to the song's
-# own centroid distribution instead of falling back to the absolute
-# thresholds above.
-_MIN_ONSETS_FOR_RELATIVE_CLASSIFICATION = 12
-_KICK_PERCENTILE = 33  # bottom third of a song's onsets -> kick
-_SNARE_PERCENTILE = 67  # middle third -> snare, top third -> cymbal
-
-
-_VELOCITY_WINDOW_SEC = 0.03
-_CLASSIFY_WINDOW_SEC = 0.06  # longer than the velocity window, to capture more of a kick's low-frequency sustain past its initial (broadband) attack click
-
-
-def _hit_centroid(window: np.ndarray, sr: int) -> float | None:
-    """Spectral centroid (the "center of mass" of frequency content, in Hz)
-    of a short hit window, or None if the window is silent/too small.
-
-    Computed directly with numpy rather than librosa.feature.spectral_
-    centroid, which defaults to n_fft=2048 - larger than our short hit
-    window, so it silently zero-pads. Zero-padding a signal with sharp
-    edges introduces spectral leakage (artificial high-frequency energy
-    from the abrupt discontinuity), which was skewing nearly every real
-    hit toward "cymbal" regardless of its actual pitch. A Hann window
-    tapers those edges instead of leaving them abrupt, and sizing the FFT
-    to the window itself avoids the padding altogether."""
-    if window.size < 2:
-        return None
-    windowed = window * np.hanning(window.size)
-    spectrum = np.abs(np.fft.rfft(windowed))
-    total_energy = spectrum.sum()
-    if total_energy <= 0:
-        return None
-    freqs = np.fft.rfftfreq(window.size, d=1.0 / sr)
-    return float(np.sum(freqs * spectrum) / total_energy)
-
-
-def _note_for_centroid(centroid: float | None, kick_threshold: float, snare_threshold: float) -> int:
-    if centroid is None or centroid < kick_threshold:
-        return _KICK_NOTE
-    if centroid < snare_threshold:
-        return _SNARE_NOTE
-    return _CYMBAL_NOTE
-
-
-def _detect_note_events(wav_path: str) -> list[pretty_midi.Note]:
-    """Detect hit onsets in the isolated drum mix and turn each one into a
-    MIDI note, guessing kick/snare/cymbal per hit from its spectral content
-    since there's no separate stem per instrument.
-
-    Classification is relative to the song's own onsets rather than fixed
-    Hz cutoffs: a mixed recording's attack transients carry broadband
-    energy no matter the instrument, so absolute thresholds tuned on clean
-    isolated tones read almost every real hit as "cymbal". Splitting a
-    song's own onsets into thirds by centroid (kick = lowest third, snare =
-    middle third, cymbal = top third) adapts to each song's own mix/EQ
-    instead. Falls back to fixed thresholds when there are too few onsets
-    to make that split meaningful.
-
-    Velocity is derived from the waveform's peak amplitude just after each
-    onset, normalized against the loudest hit in the file (see
-    instrument_isolator.velocities_from_amplitudes)."""
-    y, sr = librosa.load(wav_path, sr=None, mono=True)
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-    if onset_env.size == 0 or not np.isfinite(onset_env).any() or onset_env.max() <= 0:
-        return []
-
-    onset_frames = librosa.onset.onset_detect(onset_envelope=onset_env, sr=sr, backtrack=True)
-    onset_times = librosa.frames_to_time(onset_frames, sr=sr)
-
-    velocity_window_samples = max(1, int(_VELOCITY_WINDOW_SEC * sr))
-    classify_window_samples = max(1, int(_CLASSIFY_WINDOW_SEC * sr))
-
-    amplitudes = []
-    centroids = []
-    for start in onset_times:
-        start_sample = int(start * sr)
-        velocity_window = y[start_sample:start_sample + velocity_window_samples]
-        classify_window = y[start_sample:start_sample + classify_window_samples]
-        amplitudes.append(np.abs(velocity_window).max() if velocity_window.size else 0.0)
-        centroids.append(_hit_centroid(classify_window, sr))
-
-    if not amplitudes:
-        return []
-
-    velocities = instrument_isolator.velocities_from_amplitudes(amplitudes)
-
-    valid_centroids = np.array([c for c in centroids if c is not None], dtype=np.float64)
-    if valid_centroids.size >= _MIN_ONSETS_FOR_RELATIVE_CLASSIFICATION:
-        kick_threshold = float(np.percentile(valid_centroids, _KICK_PERCENTILE))
-        snare_threshold = float(np.percentile(valid_centroids, _SNARE_PERCENTILE))
-    else:
-        kick_threshold = _KICK_MAX_CENTROID_HZ
-        snare_threshold = _SNARE_MAX_CENTROID_HZ
-
-    notes = []
-    for start, velocity, centroid in zip(onset_times, velocities, centroids):
-        pitch = _note_for_centroid(centroid, kick_threshold, snare_threshold)
-        notes.append(pretty_midi.Note(velocity=velocity, pitch=pitch, start=float(start), end=float(start) + _NOTE_DURATION_SEC))
-    return notes
+# Written alongside each song's drum MIDI, and versioned separately from
+# the wav's marker above, because the two go stale for different reasons.
+# The wav is stale when the source mp3 changes; the MIDI is also stale when
+# the transcription itself changes, and a .mid written by an older one has
+# nothing about it to say so.
+#
+# Kept apart so that a transcriber change costs seconds rather than
+# minutes: a stale .mid is rebuilt onto the wav that's already sitting
+# there, instead of invalidating the wav and putting the song through
+# demucs again for audio that would come out identical.
+#
+# Bump this whenever drum_transcriber's output changes. _v2 is the trained
+# model replacing the spectral-centroid guesswork that came before it.
+_MIDI_MARKER_FILENAME = ".drums_midi_v2.json"
 
 
 def _write_drum_midi(wav_path: str, midi_path: str, tempo: float) -> None:
-    """Detect hits in the isolated drum wav and write them all to a single
-    midi_path track, each classified as kick/snare/cymbal (see
-    _detect_note_events). Notes keep their raw onset-detected times (no
-    quantizing/snapping) - tempo comes from the shared song_alignment()
-    (see isolate_drums), not a fresh per-file estimate, so it matches every
-    other instrument exported from the same song."""
-    all_notes = _detect_note_events(wav_path) if os.path.exists(wav_path) else []
+    """Transcribe the isolated drum wav (see drum_transcriber) and write
+    every hit to a single midi_path track.
+
+    Notes keep the exact times they were detected at - nothing is quantized
+    or snapped to a grid, so ghost notes, flams and swing survive. The tempo
+    comes from the shared song_alignment() (see isolate_drums) rather than a
+    fresh per-file estimate, so this file's grid is the same one every other
+    instrument from this song was exported against."""
+    all_notes = drum_transcriber.transcribe(wav_path) if os.path.exists(wav_path) else []
 
     midi = pretty_midi.PrettyMIDI(initial_tempo=tempo)
     drum_track = pretty_midi.Instrument(program=0, is_drum=True, name=f"Drums ({round(tempo)})")
@@ -186,17 +86,22 @@ def isolate_drums(mp3_path: str, write_midi: bool = True, context: instrument_is
     leftover folder from an earlier run or a different file that happened
     to share this title) and reprocessed rather than trusted.
 
-    If the wav is already there (from an earlier run that didn't ask for
-    MIDI) and only the MIDI is now missing, this transcribes onto the
-    existing wav instead of re-running demucs - demucs is by far the
-    slowest part of this, and nothing about the wav changes based on
-    whether MIDI is also requested."""
+    If the wav is already there and the MIDI is missing - or was written by
+    an older transcriber (see _MIDI_MARKER_FILENAME) - this transcribes onto
+    the existing wav instead of re-running demucs. Demucs is by far the
+    slowest part of this, and nothing about the wav changes based on whether
+    MIDI is also requested or on how the MIDI is made."""
     context = context or instrument_isolator.DEFAULT_CONTEXT
     title = os.path.splitext(os.path.basename(mp3_path))[0]
     song_dir = instrument_isolator.song_output_dir(mp3_path)
     marker_matches = instrument_isolator.source_marker_matches(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
+    midi_is_current = instrument_isolator.source_marker_matches(song_dir, mp3_path, _MIDI_MARKER_FILENAME)
 
-    if marker_matches and instrument_isolator.has_existing_outputs(song_dir, _LABEL, write_midi):
+    if (
+        marker_matches
+        and instrument_isolator.has_existing_outputs(song_dir, _LABEL, write_midi)
+        and (midi_is_current or not write_midi)
+    ):
         print(f"{title}: drums already isolated, nothing to do.")
         return False
 
@@ -205,8 +110,10 @@ def isolate_drums(mp3_path: str, write_midi: bool = True, context: instrument_is
         wav_path = os.path.join(song_dir, basename + ".wav")
         midi_path = os.path.join(song_dir, basename + ".mid")
         tempo = instrument_isolator.parse_tempo_from_basename(basename)
+        rebuilt = os.path.exists(midi_path)
         _write_drum_midi(wav_path, midi_path, tempo)
-        print(f"{title}: drums MIDI added ({tempo:.3f} BPM).")
+        instrument_isolator.write_source_marker(song_dir, mp3_path, _MIDI_MARKER_FILENAME)
+        print(f"{title}: drums MIDI {'rebuilt' if rebuilt else 'added'} ({tempo:.3f} BPM).")
         return True
 
     print(f"{title}: isolating drums (this can take a few minutes)...")
@@ -224,6 +131,7 @@ def isolate_drums(mp3_path: str, write_midi: bool = True, context: instrument_is
     if write_midi:
         midi_path = os.path.join(song_dir, basename + ".mid")
         _write_drum_midi(wav_path, midi_path, tempo)
+        instrument_isolator.write_source_marker(song_dir, mp3_path, _MIDI_MARKER_FILENAME)
 
     instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
 
@@ -272,7 +180,7 @@ def main() -> None:
     parser.add_argument(
         "--midi",
         action="store_true",
-        help="(Deprecated, may be removed later - MIDI quality is currently worse than Ableton's own audio-to-MIDI.) Also write a MIDI file, not just the isolated wav. Can also be given as a bare 'midi' argument.",
+        help="Also write a MIDI file, not just the isolated wav: six pieces (kick, snare, toms, closed and open hi-hat, cymbal) with per-hit velocity, laid out for Ableton's default Drum Rack. Can also be given as a bare 'midi' argument.",
     )
 
     raw_args = sys.argv[1:]

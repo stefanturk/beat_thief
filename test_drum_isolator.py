@@ -4,11 +4,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-import numpy as np
+import pretty_midi
 from pydub import AudioSegment
 from pydub.generators import Sine
 
 import drum_isolator
+import drum_transcriber  # noqa: F401 - imported so mock.patch can find it by name
 import instrument_isolator
 
 
@@ -129,8 +130,49 @@ class TestIsolateDrums(unittest.TestCase):
         with open(os.path.join(self.song_dir, basename + ".mid"), "wb") as f:
             f.write(b"x")
         instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, drum_isolator._SOURCE_MARKER_FILENAME)
+        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, drum_isolator._MIDI_MARKER_FILENAME)
 
         result = drum_isolator.isolate_drums(self.mp3_path)
+
+        self.assertFalse(result)
+        mock_run_demucs.assert_not_called()
+
+    @mock.patch("drum_isolator._write_drum_midi")
+    @mock.patch("instrument_isolator.run_demucs")
+    def test_a_midi_from_an_older_transcriber_is_rebuilt_on_the_wav_already_there(
+        self, mock_run_demucs, mock_write_midi
+    ):
+        # A .mid has nothing in it to say which transcriber wrote it, so it
+        # carries a marker of its own. When that marker is missing or from
+        # an older version the MIDI is redone - but the wav is untouched and
+        # demucs doesn't run, because nothing about the audio changed.
+        os.makedirs(self.song_dir)
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        for suffix in (".wav", ".mid"):
+            with open(os.path.join(self.song_dir, basename + suffix), "wb") as f:
+                f.write(b"x")
+        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, drum_isolator._SOURCE_MARKER_FILENAME)
+        mock_write_midi.side_effect = self._fake_write_drum_midi
+
+        result = drum_isolator.isolate_drums(self.mp3_path)
+
+        self.assertTrue(result)
+        mock_run_demucs.assert_not_called()
+        mock_write_midi.assert_called_once()
+        # And it says so, so the next run leaves it alone.
+        self.assertTrue(instrument_isolator.source_marker_matches(
+            self.song_dir, self.mp3_path, drum_isolator._MIDI_MARKER_FILENAME))
+
+    @mock.patch("instrument_isolator.run_demucs")
+    def test_an_older_midi_is_left_alone_when_no_midi_was_asked_for(self, mock_run_demucs):
+        os.makedirs(self.song_dir)
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        for suffix in (".wav", ".mid"):
+            with open(os.path.join(self.song_dir, basename + suffix), "wb") as f:
+                f.write(b"x")
+        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, drum_isolator._SOURCE_MARKER_FILENAME)
+
+        result = drum_isolator.isolate_drums(self.mp3_path, write_midi=False)
 
         self.assertFalse(result)
         mock_run_demucs.assert_not_called()
@@ -218,145 +260,81 @@ class TestIsolateDrums(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.song_dir, stale_basename + ".mid")))
 
 
-class TestDetectNoteEvents(unittest.TestCase):
-    def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp()
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp_dir, ignore_errors=True)
-
-    def test_detects_roughly_one_note_per_hit(self):
-        wav_path = os.path.join(self.tmp_dir, "drums.wav")
-        _hits(4).export(wav_path, format="wav")
-
-        notes = drum_isolator._detect_note_events(wav_path)
-
-        # Onset detection on synthetic tones won't be pixel-perfect, but it
-        # should land in the ballpark of the four hits we actually made.
-        self.assertGreaterEqual(len(notes), 2)
-        self.assertLessEqual(len(notes), 6)
-        for note in notes:
-            self.assertIn(note.pitch, (36, 38, 42))
-            self.assertTrue(1 <= note.velocity <= 127)
-
-    def test_silence_produces_no_notes(self):
-        wav_path = os.path.join(self.tmp_dir, "silence.wav")
-        AudioSegment.silent(duration=2000).export(wav_path, format="wav")
-
-        notes = drum_isolator._detect_note_events(wav_path)
-
-        self.assertEqual(notes, [])
-
-    def test_loudest_hit_reaches_full_velocity(self):
-        wav_path = os.path.join(self.tmp_dir, "drums.wav")
-        _hits(4).export(wav_path, format="wav")
-
-        notes = drum_isolator._detect_note_events(wav_path)
-
-        self.assertTrue(any(note.velocity == 127 for note in notes))
-
-
-class TestHitCentroid(unittest.TestCase):
-    def _window(self, freq, sr=44100, duration_sec=0.03):
-        t = np.linspace(0, duration_sec, int(sr * duration_sec), endpoint=False)
-        return np.sin(2 * np.pi * freq * t).astype(np.float32), sr
-
-    def test_low_frequency_tone_has_low_centroid(self):
-        window, sr = self._window(100)
-        low_centroid = drum_isolator._hit_centroid(window, sr)
-
-        window, sr = self._window(6000)
-        high_centroid = drum_isolator._hit_centroid(window, sr)
-
-        self.assertLess(low_centroid, high_centroid)
-
-    def test_empty_window_returns_none(self):
-        self.assertIsNone(drum_isolator._hit_centroid(np.array([]), 44100))
-
-    def test_silent_window_returns_none(self):
-        self.assertIsNone(drum_isolator._hit_centroid(np.zeros(100), 44100))
-
-
-class TestNoteForCentroid(unittest.TestCase):
-    def test_below_kick_threshold_is_kick(self):
-        self.assertEqual(drum_isolator._note_for_centroid(100.0, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._KICK_NOTE)
-
-    def test_between_thresholds_is_snare(self):
-        self.assertEqual(drum_isolator._note_for_centroid(1000.0, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._SNARE_NOTE)
-
-    def test_above_snare_threshold_is_cymbal(self):
-        self.assertEqual(drum_isolator._note_for_centroid(5000.0, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._CYMBAL_NOTE)
-
-    def test_none_defaults_to_kick(self):
-        self.assertEqual(drum_isolator._note_for_centroid(None, kick_threshold=300.0, snare_threshold=2000.0), drum_isolator._KICK_NOTE)
-
-
 class TestWriteDrumMidi(unittest.TestCase):
+    """The MIDI file itself. The transcription behind it is
+    drum_transcriber's business and is stubbed out here - what's under test
+    is that whatever it returns reaches the file unaltered, at the tempo the
+    song was aligned to."""
+
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
+        self.wav_path = os.path.join(self.tmp_dir, "drums.wav")
+        self.midi_path = os.path.join(self.tmp_dir, "drums.mid")
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def test_writes_notes_for_every_detected_hit(self):
-        wav_path = os.path.join(self.tmp_dir, "drums.wav")
-        midi_path = os.path.join(self.tmp_dir, "drums.mid")
-        _hits(5).export(wav_path, format="wav")
+    def _existing_wav(self):
+        _hits(2).export(self.wav_path, format="wav")
 
-        drum_isolator._write_drum_midi(wav_path, midi_path, tempo=120.0)
+    @mock.patch("drum_transcriber.transcribe")
+    def test_writes_every_transcribed_hit_to_one_drum_track(self, mock_transcribe):
+        self._existing_wav()
+        mock_transcribe.return_value = [
+            pretty_midi.Note(velocity=100, pitch=38, start=0.5, end=0.55),
+            pretty_midi.Note(velocity=90, pitch=36, start=0.0, end=0.05),
+            pretty_midi.Note(velocity=70, pitch=46, start=0.25, end=0.4),
+        ]
 
-        self.assertTrue(os.path.exists(midi_path))
+        drum_isolator._write_drum_midi(self.wav_path, self.midi_path, tempo=120.0)
 
-        import pretty_midi
-        midi = pretty_midi.PrettyMIDI(midi_path)
+        midi = pretty_midi.PrettyMIDI(self.midi_path)
         self.assertEqual(len(midi.instruments), 1)
         self.assertTrue(midi.instruments[0].is_drum)
-        pitches = {note.pitch for note in midi.instruments[0].notes}
-        self.assertTrue(pitches.issubset({36, 38, 42}))
-        self.assertGreater(len(midi.instruments[0].notes), 0)
-        # Notes should be written in start-time order.
-        starts = [note.start for note in midi.instruments[0].notes]
+        notes = midi.instruments[0].notes
+        self.assertEqual([note.pitch for note in notes], [36, 46, 38])
+        self.assertEqual([note.velocity for note in notes], [90, 70, 100])
+        # Written in start-time order, whatever order they arrived in.
+        starts = [note.start for note in notes]
         self.assertEqual(starts, sorted(starts))
 
-    def test_missing_drums_wav_produces_an_empty_midi_file(self):
-        wav_path = os.path.join(self.tmp_dir, "drums.wav")
-        midi_path = os.path.join(self.tmp_dir, "drums.mid")
-        drum_isolator._write_drum_midi(wav_path, midi_path, tempo=120.0)
+    @mock.patch("drum_transcriber.transcribe")
+    def test_missing_drums_wav_produces_an_empty_midi_file(self, mock_transcribe):
+        drum_isolator._write_drum_midi(self.wav_path, self.midi_path, tempo=120.0)
 
-        import pretty_midi
+        mock_transcribe.assert_not_called()
         # An instrument with zero notes isn't written back out by pretty_midi
         # on round-trip, so the file legitimately has no instruments at all.
-        midi = pretty_midi.PrettyMIDI(midi_path)
+        midi = pretty_midi.PrettyMIDI(self.midi_path)
         notes = [note for instrument in midi.instruments for note in instrument.notes]
         self.assertEqual(notes, [])
 
-    def test_embeds_the_given_tempo_without_snapping_notes(self):
-        wav_path = os.path.join(self.tmp_dir, "drums.wav")
-        midi_path = os.path.join(self.tmp_dir, "drums.mid")
-        _hits(6).export(wav_path, format="wav")
+    @mock.patch("drum_transcriber.transcribe")
+    def test_embeds_the_given_tempo_without_snapping_notes(self, mock_transcribe):
+        self._existing_wav()
+        # Deliberately off any grid a 123.4 BPM song could have.
+        raw_times = [0.017, 0.493, 1.031, 1.507]
+        mock_transcribe.return_value = [
+            pretty_midi.Note(velocity=100, pitch=36, start=t, end=t + 0.05) for t in raw_times
+        ]
 
-        drum_isolator._write_drum_midi(wav_path, midi_path, tempo=123.4)
+        drum_isolator._write_drum_midi(self.wav_path, self.midi_path, tempo=123.4)
 
-        import pretty_midi
-        midi = pretty_midi.PrettyMIDI(midi_path)
+        midi = pretty_midi.PrettyMIDI(self.midi_path)
         _, tempi = midi.get_tempo_changes()
-        # write_drum_midi should embed exactly the tempo it's given, not
-        # detect/refine its own - that's now song_alignment()'s job, shared
-        # across every instrument isolated from the same song.
+        # Exactly the tempo it's given, not one detected here - that's
+        # song_alignment()'s job, shared across every instrument isolated
+        # from the same song.
         self.assertAlmostEqual(tempi[0], 123.4, delta=0.1)
 
-        # Notes should keep their raw onset-detected times untouched - not
-        # snapped to any musical grid - matching what _detect_note_events
-        # alone would produce on the same file. A small tolerance accounts
-        # for MIDI's own tick resolution: writing/reading a .mid file always
-        # rounds absolute times to the nearest tick (a couple of ms here),
-        # regardless of any snapping logic - that's the file format, not us.
-        expected_starts = sorted(n.start for n in drum_isolator._detect_note_events(
-            os.path.join(self.tmp_dir, "drums.wav")))
-        actual_starts = sorted(n.start for n in midi.instruments[0].notes)
-        self.assertEqual(len(actual_starts), len(expected_starts))
-        for actual, expected in zip(actual_starts, expected_starts):
-            self.assertAlmostEqual(actual, expected, delta=0.01)
+        # Hits keep the moment they were detected. Nothing is quantized, so
+        # ghost notes, flams and swing survive into the file. The tolerance
+        # is MIDI's own tick resolution - writing and reading a .mid always
+        # rounds to the nearest tick - not slack for snapping.
+        actual = sorted(note.start for note in midi.instruments[0].notes)
+        self.assertEqual(len(actual), len(raw_times))
+        for got, expected in zip(actual, raw_times):
+            self.assertAlmostEqual(got, expected, delta=0.005)
 
 
 class TestIsolateDrumsForFolder(unittest.TestCase):

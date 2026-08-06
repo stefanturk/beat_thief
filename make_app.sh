@@ -60,6 +60,7 @@ SOURCES=(
     song_sanitizer.py
     instrument_isolator.py
     drum_isolator.py
+    drum_transcriber.py
     bass_isolator.py
     harmony_isolator.py
     vocals_isolator.py
@@ -81,6 +82,10 @@ for source in "${SOURCES[@]}"; do
     cp "$REPO/$source" "$APP/Contents/Resources/"
 done
 cp -R "$REPO/ui" "$APP/Contents/Resources/ui"
+# The drum transcription model and its weights. Without these the app starts
+# fine and then can't write MIDI, which is the least helpful way to find out.
+cp -R "$REPO/adtof" "$APP/Contents/Resources/adtof"
+rm -rf "$APP/Contents/Resources/adtof/__pycache__"
 
 # Turn ui/logo.svg into the Dock icon. render_logo.py rasterizes it with
 # its transparency intact - Quick Look's renderer would flatten the disc
