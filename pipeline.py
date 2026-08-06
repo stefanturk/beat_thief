@@ -26,6 +26,7 @@ import harmony_isolator
 import history
 import instrument_isolator
 import song_sanitizer
+import vocals_isolator
 
 # Which module handles each instrument, and the filename marker its outputs
 # carry (see instrument_isolator.find_existing_basename). Keyed by the same
@@ -34,11 +35,23 @@ _INSTRUMENTS = {
     "drums": (drum_isolator, drum_isolator._LABEL),
     "bass": (bass_isolator, bass_isolator._LABEL),
     "harmony": (harmony_isolator, harmony_isolator._LABEL),
+    "vocals": (vocals_isolator, vocals_isolator._LABEL),
 }
+
+# Which of those have a MIDI transcription step. Harmony and vocals are
+# audio only - there's no single line to transcribe out of a wall of pads or
+# a sung phrase.
+_TAKES_MIDI = frozenset({"drums", "bass"})
 
 # The order instruments are worked through, so two runs asking for the same
 # set produce the same sequence regardless of how the set was built.
-INSTRUMENT_ORDER = ("drums", "bass", "harmony")
+#
+# These four are the whole song between them: demucs separates a mix into
+# exactly these sources, so nothing belongs to two of them and nothing to
+# none of them. Playing all four gives the song back - not bit-exactly
+# (separation is a guess; measured residual on a real track is about -20 dB)
+# but with nothing dropped.
+INSTRUMENT_ORDER = ("drums", "bass", "harmony", "vocals")
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
@@ -361,35 +374,43 @@ def run(
 
     context = instrument_isolator.RunContext(interactive=interactive, should_cancel=should_cancel)
 
-    for filename in filenames:
-        mp3_path = os.path.join(output_dir, filename)
-        title = os.path.splitext(filename)[0]
-        for name in wanted:
-            if cancelled():
-                result["cancelled"] = True
-                on_event({"stage": "cancelled"})
-                return result
+    # The demucs pass each isolator needs is cached and shared, so asking for
+    # all four instruments separates the song once rather than four times
+    # (see instrument_isolator.separated_stems). Those passes are hundreds of
+    # megabytes of temp files, so they're disposed of however this ends -
+    # finished, cancelled or blown up.
+    try:
+        for filename in filenames:
+            mp3_path = os.path.join(output_dir, filename)
+            title = os.path.splitext(filename)[0]
+            for name in wanted:
+                if cancelled():
+                    result["cancelled"] = True
+                    on_event({"stage": "cancelled"})
+                    return result
 
-            module, label = _INSTRUMENTS[name]
-            on_event({"stage": "isolating", "instrument": name, "song": title, "percent": None})
+                module, label = _INSTRUMENTS[name]
+                on_event({"stage": "isolating", "instrument": name, "song": title, "percent": None})
 
-            def report(percent, _name=name, _title=title):
-                on_event({"stage": "isolating", "instrument": _name, "song": _title, "percent": percent})
+                def report(percent, _name=name, _title=title):
+                    on_event({"stage": "isolating", "instrument": _name, "song": _title, "percent": percent})
 
-            isolate = getattr(module, f"isolate_{name}_for_single_file")
-            kwargs = {"context": context._replace(on_percent=report)}
-            if name != "harmony":
-                kwargs["write_midi"] = write_midi
-            try:
-                isolate(mp3_path, **kwargs)
-            except instrument_isolator.Cancelled:
-                result["cancelled"] = True
-                on_event({"stage": "cancelled"})
-                return result
+                isolate = getattr(module, f"isolate_{name}_for_single_file")
+                kwargs = {"context": context._replace(on_percent=report)}
+                if name in _TAKES_MIDI:
+                    kwargs["write_midi"] = write_midi
+                try:
+                    isolate(mp3_path, **kwargs)
+                except instrument_isolator.Cancelled:
+                    result["cancelled"] = True
+                    on_event({"stage": "cancelled"})
+                    return result
 
-            produced = _instrument_outputs(mp3_path, label)
-            result["outputs"].extend(produced)
-            on_event({"stage": "isolated", "instrument": name, "song": title, "outputs": produced})
+                produced = _instrument_outputs(mp3_path, label)
+                result["outputs"].extend(produced)
+                on_event({"stage": "isolated", "instrument": name, "song": title, "outputs": produced})
+    finally:
+        instrument_isolator.clear_stem_cache()
 
     on_event({"stage": "done", "outputs": result["outputs"]})
     return result

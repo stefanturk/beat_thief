@@ -114,15 +114,39 @@ Duplicate downloads that get found and removed are moved into a visible
 
 ## Isolating instruments (optional, slow)
 
-Pass `drums`, `bass`, and/or `harmony` (with or without `--`, in either
-order, before or after the URL) to also pull those parts out on their own —
-useful if you want to import them into a DAW (e.g. Ableton) to rebuild a
-digitized version of the performance, or just to understand how a song is
+Pass `drums`, `bass`, `harmony` and/or `vocals` (with or without `--`, in
+either order, before or after the URL) to also pull those parts out on their
+own — useful if you want to import them into a DAW (e.g. Ableton) to rebuild
+a digitized version of the performance, or just to understand how a song is
 built:
 
 ```
 python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass harmony
 ```
+
+Name no instrument at all and you just get the song. Say `all` and you get
+every one of them:
+
+```
+python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" all
+```
+
+**Those four are the whole song.** Drums, bass, harmony and vocals are
+disjoint and complete — nothing in the song belongs to two of them, and
+nothing belongs to none of them. Drop all four onto four tracks at bar 1 at
+unity gain and you're listening to the song. Mute one and you have the song
+without it: the vocal alone, the instrumental, the band without the bass.
+
+It is not a bit-exact rebuild of the master, though. Separation is a guess,
+and measured on a real track the four summed back to within about 10% of the
+original (roughly −20 dB of residual) — that's the model's error, not
+missing content, and it's the same error you're already hearing in any one
+stem on its own. Expect the usual faint separation artifacts, not a null
+test.
+
+Asking for all four costs about what asking for one costs. The separation
+model produces all four parts in a single pass whatever you asked for, so
+the pass is done once and shared.
 
 For each song this produces one `<Song Title> (Isolated)/` folder
 containing whichever instruments you asked for, side by side — no separate
@@ -133,8 +157,8 @@ By default only the isolated `.wav` is written for each instrument. Add
 built by detecting hits/notes directly in the wav. **This is deprecated and
 may be removed later** — the transcription quality is currently worse than
 Ableton's own audio-to-MIDI conversion, so it's mostly useful as a rough
-starting point rather than something to rely on. `harmony` has no MIDI
-step; it's audio only.
+starting point rather than something to rely on. `harmony` and `vocals` have
+no MIDI step; they're audio only.
 
 ```
 python3 beat_thief.py "https://music.youtube.com/playlist?list=YOUR_PLAYLIST_ID" drums bass midi
@@ -184,9 +208,19 @@ spurious notes.
 ### Harmony
 
 `<Song Title> (Isolated Harmony).wav` is everything left in the mix once
-drums and bass are pulled out — vocals, guitars, keys, pads, whatever else
-is there — meant to drop straight into a DAW alongside the drums/bass
-exports from the same song. No MIDI step for this one, just audio.
+drums, bass and vocals are pulled out — guitars, keys, pads, whatever else
+is holding the chords up — meant to drop straight into a DAW alongside the
+other exports from the same song. No MIDI step for this one, just audio.
+
+Harmony used to include the vocals as well, which meant there was no way to
+get an instrumental. If you have a harmony file from before that change it
+still has the vocals in it, so it will be rebuilt (not skipped) the next
+time you ask for harmony on that song.
+
+### Vocals
+
+`<Song Title> (Isolated Vocals).wav` is the singing — lead and backing —
+with the band taken out from under it. Audio only, no MIDI.
 
 ### The shared beat-1 / tempo grid
 
@@ -220,13 +254,16 @@ song on a bare Enter, since that's usually what you want for a loop). This
 only happens interactively — a non-interactive run just uses the beginning
 of the song automatically.
 
-This is off by default because it's slow (each song runs through a
-machine-learning model, once per instrument isolated). Each instrument also
-runs standalone against an existing folder or file — drums/bass with the
-same optional (deprecated) `midi`/`--midi` flag, harmony with no flags:
+This is off by default because it's slow — each song runs through a
+machine-learning model. That happens once per song per run, though, not once
+per instrument: asking for all four parts is roughly the cost of asking for
+one. Each instrument also runs standalone against an existing folder or
+file — drums/bass with the same optional (deprecated) `midi`/`--midi` flag,
+harmony and vocals with no flags:
 
 ```
 python3 drum_isolator.py ["path/to/folder-or-file.mp3"] [midi]
 python3 bass_isolator.py ["path/to/folder-or-file.mp3"] [midi]
 python3 harmony_isolator.py ["path/to/folder-or-file.mp3"]
+python3 vocals_isolator.py ["path/to/folder-or-file.mp3"]
 ```

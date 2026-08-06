@@ -59,6 +59,18 @@ class TestApiStart(unittest.TestCase):
         self.assertEqual(calls["instruments"], ["drums", "harmony"])
         self.assertIs(calls["write_midi"], True)
 
+    def test_every_pad_armed_asks_for_the_whole_song(self):
+        calls = {}
+
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+        api.start(
+            "https://example.com/song",
+            {"drums": True, "bass": True, "harmony": True, "vocals": True},
+        )
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["instruments"], ["drums", "bass", "harmony", "vocals"])
+
     def test_the_gui_always_runs_non_interactively(self):
         calls = {}
 

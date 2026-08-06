@@ -127,17 +127,30 @@ class TestInstrumentRuns(PipelineTestCase):
              mock.patch("bass_isolator.isolate_bass_for_single_file",
                         side_effect=lambda *a, **k: order.append("bass")), \
              mock.patch("harmony_isolator.isolate_harmony_for_single_file",
-                        side_effect=lambda *a, **k: order.append("harmony")):
-            self._run(instruments=["harmony", "bass", "drums"])
+                        side_effect=lambda *a, **k: order.append("harmony")), \
+             mock.patch("vocals_isolator.isolate_vocals_for_single_file",
+                        side_effect=lambda *a, **k: order.append("vocals")):
+            self._run(instruments=["vocals", "harmony", "bass", "drums"])
 
-        self.assertEqual(order, ["drums", "bass", "harmony"])
+        self.assertEqual(order, ["drums", "bass", "harmony", "vocals"])
 
-    def test_harmony_is_never_asked_for_midi(self):
-        # harmony is audio only - passing write_midi to it would be a TypeError.
-        with mock.patch("harmony_isolator.isolate_harmony_for_single_file") as mock_harmony:
-            self._run(instruments=["harmony"], write_midi=True)
+    def test_isolates_vocals_when_asked_for(self):
+        with mock.patch("vocals_isolator.isolate_vocals_for_single_file") as mock_vocals:
+            self._run(instruments=["vocals"])
+
+        self.assertEqual(
+            mock_vocals.call_args.args[0], os.path.join(self.tmp_dir, "Some Song - Artist.mp3")
+        )
+
+    def test_the_audio_only_instruments_are_never_asked_for_midi(self):
+        # harmony and vocals have no MIDI step - passing write_midi to
+        # either would be a TypeError.
+        with mock.patch("harmony_isolator.isolate_harmony_for_single_file") as mock_harmony, \
+             mock.patch("vocals_isolator.isolate_vocals_for_single_file") as mock_vocals:
+            self._run(instruments=["harmony", "vocals"], write_midi=True)
 
         self.assertNotIn("write_midi", mock_harmony.call_args.kwargs)
+        self.assertNotIn("write_midi", mock_vocals.call_args.kwargs)
 
     def test_write_midi_reaches_the_instruments_that_support_it(self):
         with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
@@ -229,6 +242,39 @@ class TestCancelling(PipelineTestCase):
             result = self._run(instruments=["drums"], should_cancel=lambda: False)
 
         self.assertFalse(result["cancelled"])
+
+
+class TestSeparatedAudioIsCleanedUp(PipelineTestCase):
+    """A shared demucs pass is hundreds of megabytes of temp files. However a
+    run ends, they go."""
+
+    def test_after_a_finished_run(self):
+        with mock.patch("drum_isolator.isolate_drums_for_single_file"), \
+             mock.patch("instrument_isolator.clear_stem_cache") as mock_clear:
+            self._run(instruments=["drums"])
+
+        mock_clear.assert_called_once()
+
+    def test_after_a_cancelled_run(self):
+        def cancel_midway(path, write_midi=False, context=None):
+            raise instrument_isolator.Cancelled()
+
+        with mock.patch("drum_isolator.isolate_drums_for_single_file", side_effect=cancel_midway), \
+             mock.patch("instrument_isolator.clear_stem_cache") as mock_clear:
+            self._run(instruments=["drums"])
+
+        mock_clear.assert_called_once()
+
+    def test_after_an_isolator_blows_up(self):
+        def explode(path, write_midi=False, context=None):
+            raise MemoryError("out of room")
+
+        with mock.patch("drum_isolator.isolate_drums_for_single_file", side_effect=explode), \
+             mock.patch("instrument_isolator.clear_stem_cache") as mock_clear:
+            with self.assertRaises(MemoryError):
+                self._run(instruments=["drums"])
+
+        mock_clear.assert_called_once()
 
 
 class TestRemembersWhereSongsCameFrom(PipelineTestCase):

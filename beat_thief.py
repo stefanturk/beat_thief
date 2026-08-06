@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """beat_thief: download all songs from a YouTube/YouTube Music playlist as
-MP3s, sanitize them, and optionally isolate drums/bass/harmony (wav,
-optionally MIDI too).
+MP3s, sanitize them, and optionally isolate drums/bass/harmony/vocals (wav,
+optionally MIDI too). Name no instrument and you just get the song; say
+"all" and you get all four, which together are the song again.
 
 This is the terminal front end. The work itself lives in pipeline.py, shared
 with the GUI (gui.py) - everything here is argument parsing and turning the
@@ -17,7 +18,7 @@ import pipeline
 
 BAR_WIDTH = 30
 
-_BARE_FLAGS = ("drums", "bass", "harmony", "midi")
+_BARE_FLAGS = ("all", "drums", "bass", "harmony", "vocals", "midi")
 
 
 def _exit(code: int) -> None:
@@ -124,6 +125,11 @@ def main() -> None:
         help=f"Output directory (default: {pipeline.DEFAULT_OUTPUT})",
     )
     parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Isolate everything: drums, bass, harmony and vocals. Those four are the whole song between them - nothing belongs to two of them and nothing to none of them, so playing all four gives you the song back. Can also be given as a bare 'all' argument.",
+    )
+    parser.add_argument(
         "--drums",
         action="store_true",
         help="Also isolate each song's drums to a wav (see --midi for a .mid too). Slow, off by default. Can also be given as a bare 'drums' argument, before or after the URL.",
@@ -136,7 +142,12 @@ def main() -> None:
     parser.add_argument(
         "--harmony",
         action="store_true",
-        help="Also isolate each song's non-drums-non-bass content (vocals, guitars, keys, etc.) to a wav. Slow, off by default. Can also be given as a bare 'harmony' argument, before or after the URL.",
+        help="Also isolate each song's harmony (guitars, keys, pads - everything but drums, bass and vocals) to a wav. Slow, off by default. Can also be given as a bare 'harmony' argument, before or after the URL.",
+    )
+    parser.add_argument(
+        "--vocals",
+        action="store_true",
+        help="Also isolate each song's vocals to a wav. Slow, off by default. Can also be given as a bare 'vocals' argument, before or after the URL.",
     )
     parser.add_argument(
         "--midi",
@@ -144,10 +155,10 @@ def main() -> None:
         help="(Deprecated, may be removed later - MIDI quality is currently worse than Ableton's own audio-to-MIDI.) Also write a MIDI file for each isolated instrument, not just the wav. Only matters alongside --drums/--bass. Can also be given as a bare 'midi' argument.",
     )
 
-    # "drums"/"bass"/"harmony"/"midi" are accepted bare (no --) too, in any
-    # position, since that's the more natural way to type them - pull those
-    # out of argv before argparse ever sees them, so they don't collide with
-    # the url positional no matter where they appear.
+    # "all"/"drums"/"bass"/"harmony"/"vocals"/"midi" are accepted bare (no --)
+    # too, in any position, since that's the more natural way to type them -
+    # pull those out of argv before argparse ever sees them, so they don't
+    # collide with the url positional no matter where they appear.
     raw_args = sys.argv[1:]
     bare_modes = {tok.lower() for tok in raw_args if tok.lower() in _BARE_FLAGS}
     remaining_args = [tok for tok in raw_args if tok.lower() not in _BARE_FLAGS]
@@ -155,6 +166,13 @@ def main() -> None:
     args = parser.parse_args(remaining_args)
     for flag in _BARE_FLAGS:
         setattr(args, flag, getattr(args, flag) or flag in bare_modes)
+
+    # Expanded here rather than handled downstream, so "all" is purely a way
+    # of typing the four names and everything after this point sees one kind
+    # of request. Naming no instrument at all still means just the song.
+    if args.all:
+        for name in pipeline.INSTRUMENT_ORDER:
+            setattr(args, name, True)
 
     instruments = [name for name in pipeline.INSTRUMENT_ORDER if getattr(args, name)]
 

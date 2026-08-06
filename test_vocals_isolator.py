@@ -6,11 +6,11 @@ from unittest import mock
 
 from pydub.generators import Sine
 
-import harmony_isolator
 import instrument_isolator
+import vocals_isolator
 
 
-class TestIsolateHarmony(unittest.TestCase):
+class TestIsolateVocals(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.mp3_path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
@@ -27,9 +27,8 @@ class TestIsolateHarmony(unittest.TestCase):
         track_name = os.path.splitext(os.path.basename(input_path))[0]
         stem_dir = os.path.join(out_dir, model_name, track_name)
         os.makedirs(stem_dir, exist_ok=True)
-        Sine(220).to_audio_segment(duration=200).export(os.path.join(stem_dir, "other.wav"), format="wav")
-        Sine(440).to_audio_segment(duration=200).export(os.path.join(stem_dir, "vocals.wav"), format="wav")
-        # drums.wav / bass.wav also exist in a real run but harmony ignores them.
+        for name, freq in (("vocals", 440), ("other", 220), ("drums", 110), ("bass", 55)):
+            Sine(freq).to_audio_segment(duration=200).export(os.path.join(stem_dir, name + ".wav"), format="wav")
         return stem_dir
 
     def _fake_trim_and_export(self, wav_path, trim_ms, out_path):
@@ -38,28 +37,54 @@ class TestIsolateHarmony(unittest.TestCase):
     @mock.patch("instrument_isolator.trim_and_export")
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
-    def test_produces_harmony_wav(self, mock_alignment, mock_run_demucs, mock_trim):
+    def test_produces_a_vocals_wav_in_the_songs_shared_folder(self, mock_alignment, mock_run_demucs, mock_trim):
         mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
         mock_trim.side_effect = self._fake_trim_and_export
 
-        result = harmony_isolator.isolate_harmony(self.mp3_path)
+        result = vocals_isolator.isolate_vocals(self.mp3_path)
 
         self.assertTrue(result)
-        basename = "Song - Artist (Isolated Harmony)"
-        wav_path = os.path.join(self.song_dir, basename + ".wav")
+        wav_path = os.path.join(self.song_dir, "Song - Artist (Isolated Vocals).wav")
         self.assertTrue(os.path.exists(wav_path))
-        self.assertTrue(os.path.exists(os.path.join(self.song_dir, harmony_isolator._SOURCE_MARKER_FILENAME)))
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, vocals_isolator._SOURCE_MARKER_FILENAME)))
+
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_exports_the_vocals_stem_and_not_another_one(self, mock_alignment, mock_run_demucs, mock_trim):
+        mock_alignment.return_value = (0, 120.0)
+        mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
+
+        vocals_isolator.isolate_vocals(self.mp3_path)
+
+        self.assertEqual(os.path.basename(mock_trim.call_args.args[0]), "vocals.wav")
+
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_no_midi_is_written_alongside_it(self, mock_alignment, mock_run_demucs, mock_trim):
+        # There's no single line to transcribe out of a sung phrase, so
+        # unlike drums/bass the filename carries no BPM either.
+        mock_alignment.return_value = (0, 174.0)
+        mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
+
+        vocals_isolator.isolate_vocals(self.mp3_path)
+
+        produced = os.listdir(self.song_dir)
+        self.assertFalse([f for f in produced if f.endswith(".mid")])
+        self.assertIn("Song - Artist (Isolated Vocals).wav", produced)
 
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
         os.makedirs(self.song_dir)
-        basename = "Song - Artist (Isolated Harmony)"
-        with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
+        with open(os.path.join(self.song_dir, "Song - Artist (Isolated Vocals).wav"), "wb") as f:
             f.write(b"x")
-        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, harmony_isolator._SOURCE_MARKER_FILENAME)
+        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, vocals_isolator._SOURCE_MARKER_FILENAME)
 
-        result = harmony_isolator.isolate_harmony(self.mp3_path)
+        result = vocals_isolator.isolate_vocals(self.mp3_path)
 
         self.assertFalse(result)
         mock_run_demucs.assert_not_called()
@@ -69,8 +94,7 @@ class TestIsolateHarmony(unittest.TestCase):
     @mock.patch("instrument_isolator.song_alignment")
     def test_reprocesses_when_the_marker_is_missing(self, mock_alignment, mock_run_demucs, mock_trim):
         os.makedirs(self.song_dir)
-        basename = "Song - Artist (Isolated Harmony)"
-        with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
+        with open(os.path.join(self.song_dir, "Song - Artist (Isolated Vocals).wav"), "wb") as f:
             f.write(b"x")
         # no marker - so this wav can't be trusted as coming from self.mp3_path.
 
@@ -78,7 +102,7 @@ class TestIsolateHarmony(unittest.TestCase):
         mock_run_demucs.side_effect = self._fake_run_demucs
         mock_trim.side_effect = self._fake_trim_and_export
 
-        result = harmony_isolator.isolate_harmony(self.mp3_path)
+        result = vocals_isolator.isolate_vocals(self.mp3_path)
 
         self.assertTrue(result)
         mock_run_demucs.assert_called_once()
@@ -88,121 +112,101 @@ class TestIsolateHarmony(unittest.TestCase):
     @mock.patch("instrument_isolator.song_alignment")
     def test_reprocesses_when_the_marker_does_not_match(self, mock_alignment, mock_run_demucs, mock_trim):
         os.makedirs(self.song_dir)
-        basename = "Song - Artist (Isolated Harmony)"
-        with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
+        with open(os.path.join(self.song_dir, "Song - Artist (Isolated Vocals).wav"), "wb") as f:
             f.write(b"x")
         stale_mp3 = os.path.join(self.tmp_dir, "stale.mp3")
         with open(stale_mp3, "wb") as f:
             f.write(b"different bytes")
-        instrument_isolator.write_source_marker(self.song_dir, stale_mp3, harmony_isolator._SOURCE_MARKER_FILENAME)
+        instrument_isolator.write_source_marker(self.song_dir, stale_mp3, vocals_isolator._SOURCE_MARKER_FILENAME)
 
         mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
         mock_trim.side_effect = self._fake_trim_and_export
 
-        result = harmony_isolator.isolate_harmony(self.mp3_path)
+        result = vocals_isolator.isolate_vocals(self.mp3_path)
 
         self.assertTrue(result)
         mock_run_demucs.assert_called_once()
 
-
     @mock.patch("instrument_isolator.trim_and_export")
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
-    def test_the_harmony_is_the_other_stem_with_no_vocal_in_it(self, mock_alignment, mock_run_demucs, mock_trim):
-        # Harmony used to be "other + vocals" overlaid together, which left no
-        # way to get an instrumental and made the four stems overlap rather
-        # than add up to the song.
+    def test_the_run_context_reaches_demucs_and_the_tempo_step(self, mock_alignment, mock_run_demucs, mock_trim):
         mock_alignment.return_value = (0, 120.0)
         mock_run_demucs.side_effect = self._fake_run_demucs
         mock_trim.side_effect = self._fake_trim_and_export
 
-        harmony_isolator.isolate_harmony(self.mp3_path)
+        seen = []
 
-        exported = mock_trim.call_args.args[0]
-        self.assertEqual(os.path.basename(exported), "other.wav")
+        def note_percent(percent):
+            seen.append(percent)
 
-    @mock.patch("instrument_isolator.trim_and_export")
-    @mock.patch("instrument_isolator.run_demucs")
-    @mock.patch("instrument_isolator.song_alignment")
-    def test_a_harmony_file_from_before_vocals_were_split_out_is_rebuilt(self, mock_alignment, mock_run_demucs, mock_trim):
-        # Those files still have the vocals in them. Their old marker would
-        # otherwise pass them off as current forever.
-        os.makedirs(self.song_dir)
-        basename = "Song - Artist (Isolated Harmony)"
-        with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
-            f.write(b"x")
-        instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, ".harmony_source.json")
+        def never_cancel():
+            return False
 
-        mock_alignment.return_value = (0, 120.0)
-        mock_run_demucs.side_effect = self._fake_run_demucs
-        mock_trim.side_effect = self._fake_trim_and_export
+        context = instrument_isolator.RunContext(
+            on_percent=note_percent, interactive=False, should_cancel=never_cancel
+        )
+        vocals_isolator.isolate_vocals(self.mp3_path, context=context)
 
-        result = harmony_isolator.isolate_harmony(self.mp3_path)
-
-        self.assertTrue(result)
-        mock_run_demucs.assert_called_once()
+        mock_alignment.assert_called_once_with(self.mp3_path, interactive=False)
+        self.assertIs(mock_run_demucs.call_args.kwargs["should_cancel"], never_cancel)
 
 
-class TestIsolateHarmonyForFolder(unittest.TestCase):
+class TestIsolateVocalsForFolder(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    def test_no_mp3s_prints_message_and_does_nothing(self):
-        with mock.patch("harmony_isolator.isolate_harmony") as mock_isolate:
-            harmony_isolator.isolate_harmony_for_folder(self.tmp_dir)
+    def test_no_mp3s_does_nothing(self):
+        with mock.patch("vocals_isolator.isolate_vocals") as mock_isolate:
+            vocals_isolator.isolate_vocals_for_folder(self.tmp_dir)
         mock_isolate.assert_not_called()
 
-    @mock.patch("harmony_isolator.isolate_harmony")
+    @mock.patch("vocals_isolator.isolate_vocals")
     def test_processes_each_mp3_in_folder(self, mock_isolate):
         for name in ("A - Artist.mp3", "B - Artist.mp3"):
             with open(os.path.join(self.tmp_dir, name), "wb") as f:
                 f.write(b"x")
 
-        harmony_isolator.isolate_harmony_for_folder(self.tmp_dir)
+        vocals_isolator.isolate_vocals_for_folder(self.tmp_dir)
 
         self.assertEqual(mock_isolate.call_count, 2)
-        called_paths = {call.args[0] for call in mock_isolate.call_args_list}
-        self.assertEqual(
-            called_paths,
-            {os.path.join(self.tmp_dir, "A - Artist.mp3"), os.path.join(self.tmp_dir, "B - Artist.mp3")},
-        )
 
-    @mock.patch("harmony_isolator.isolate_harmony")
+    @mock.patch("vocals_isolator.isolate_vocals")
     def test_one_failure_does_not_stop_the_rest(self, mock_isolate):
         for name in ("A - Artist.mp3", "B - Artist.mp3"):
             with open(os.path.join(self.tmp_dir, name), "wb") as f:
                 f.write(b"x")
         mock_isolate.side_effect = [RuntimeError("boom"), True]
 
-        harmony_isolator.isolate_harmony_for_folder(self.tmp_dir)
+        vocals_isolator.isolate_vocals_for_folder(self.tmp_dir)
 
         self.assertEqual(mock_isolate.call_count, 2)
 
 
-class TestIsolateHarmonyForPath(unittest.TestCase):
+class TestIsolateVocalsForPath(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
-    @mock.patch("harmony_isolator.isolate_harmony")
+    @mock.patch("vocals_isolator.isolate_vocals")
     def test_single_file_dispatches_directly(self, mock_isolate):
         mp3_path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
         with open(mp3_path, "wb") as f:
             f.write(b"x")
 
-        harmony_isolator.isolate_harmony_for_path(mp3_path)
+        vocals_isolator.isolate_vocals_for_path(mp3_path)
 
         mock_isolate.assert_called_once_with(mp3_path, context=None)
 
-    @mock.patch("harmony_isolator.isolate_harmony_for_folder")
+    @mock.patch("vocals_isolator.isolate_vocals_for_folder")
     def test_folder_dispatches_to_folder_handler(self, mock_folder):
-        harmony_isolator.isolate_harmony_for_path(self.tmp_dir)
+        vocals_isolator.isolate_vocals_for_path(self.tmp_dir)
         mock_folder.assert_called_once_with(self.tmp_dir, context=None)
 
 
