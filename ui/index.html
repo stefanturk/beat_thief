@@ -941,8 +941,10 @@
           const waiting = pendingBeatFor;
           pendingBeatFor = null;
           if (waiting && !state.error && !state.cancelled) {
-            const fresh = (lastLibrary || []).find((s) => s.song === waiting.song);
+            const fresh = songWaitedFor(waiting, state);
             if (fresh && fresh.have && fresh.have.drums) openPicker(fresh);
+            else el("message").textContent =
+              "There's no drum stem to pick a beat out of — arm Drums and take it again.";
           }
         });
       }
@@ -969,7 +971,10 @@
         return;
       }
     }
-    pendingBeatFor = wantsBeat ? selected : null;
+    // Remembered as a path rather than as the song object, because a link
+    // that hasn't been downloaded yet has no song object to remember - and
+    // that's the ordinary case: paste a link, click Beat, take it.
+    pendingBeatFor = wantsBeat ? { song: selected ? selected.song : "" } : null;
 
     window.pywebview.api.start(el("url").value, options).then((state) => {
       render(state);
@@ -991,6 +996,17 @@
 
   // A song whose beat was armed, waiting for its drums to finish.
   let pendingBeatFor = null;
+
+  // Which song that run was about. A song picked out of the stash is known
+  // by its path from the start; a freshly downloaded one isn't known until
+  // it exists, so it's recognised by the run's own outputs - and failing
+  // that, by being the newest thing in the stash, which it is.
+  function songWaitedFor(waiting, state) {
+    const songs = lastLibrary || [];
+    if (waiting.song) return songs.find((s) => s.song === waiting.song);
+    const outputs = state.outputs || [];
+    return songs.find((s) => outputs.includes(s.song)) || songs[0];
+  }
 
   // --- wiring ------------------------------------------------------------
 
