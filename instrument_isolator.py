@@ -55,6 +55,11 @@ class RunContext(NamedTuple):
     song_alignment) without looking at it.
 
     on_percent    - receives demucs' progress (0-100); None draws the terminal bar.
+    on_phase      - receives a line of plain English naming the slow thing
+                    currently happening, for the stretches where no
+                    percentage exists yet. Measured on a real run, demucs
+                    takes 48 seconds to load before it reports 1%, and with
+                    nothing to say during it the window looked hung.
     interactive   - whether a tempo drift may be put to the user; None means
                     decide from whether stdin is a terminal (see song_alignment).
     should_cancel - polled during the slow demucs stage; returning True kills
@@ -63,6 +68,7 @@ class RunContext(NamedTuple):
     """
 
     on_percent: object = None
+    on_phase: object = None
     interactive: bool | None = None
     should_cancel: object = None
 
@@ -188,6 +194,11 @@ def separated_stems(
         return cached
 
     clear_stem_cache()
+    if context.on_phase is not None:
+        # Demucs spends its first ~48 seconds importing torch and reading
+        # the model off disk, before it can report any progress at all.
+        # Saying so is the difference between "slow" and "broken".
+        context.on_phase("Loading the separator...")
     tmp_dir = tempfile.mkdtemp()
     try:
         stem_dir = run_demucs(

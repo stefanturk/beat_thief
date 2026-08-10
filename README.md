@@ -152,22 +152,11 @@ For each song this produces one `<Song Title> (Isolated)/` folder
 containing whichever instruments you asked for, side by side — no separate
 top-level `Drums`/`Bass`/`Harmony` folders to dig through.
 
-By default only the isolated `.wav` is written for each instrument. Add
-`midi` (or `--midi`) to also get a matching `.mid` file, transcribed from
-the wav. `harmony` and `vocals` have no MIDI step; they're audio only.
-
-MIDI is chosen per instrument, because drums and bass are not the same
-proposition: drums are transcribed by a trained model and are good, bass is
-still a rough pitch-tracked guess. `midi` on its own covers everything you
-asked for; `--midi drums` names one.
-
-```
-python3 beat_thief.py "https://.../playlist?list=YOUR_ID" drums bass midi
-python3 beat_thief.py "https://.../playlist?list=YOUR_ID" drums bass --midi drums
-```
+Each instrument is written as a `.wav`. There's no whole-song MIDI any
+more — see [Beats, not songs](#beats-not-songs).
 
 Every instrument you isolate for a song shares the exact same start and
-the exact same tempo, so e.g. the drums and bass MIDI line up
+the exact same tempo, so the stems line up
 exactly when dragged into a DAW together — and if a song's tempo turns out
 to drift (see below) you're only asked about it once per song, even when
 isolating both instruments. Both the trim point and the tempo are computed
@@ -178,25 +167,12 @@ detail.
 
 ### Drums
 
-`<Song Title> (Isolated Drums at N.NNN BPM).wav` is the isolated drum mix;
-with `midi`, the matching `.mid` is a MIDI file transcribed from it. Drag
-the `.mid` straight onto a MIDI track with a Drum Rack loaded — every note
-it uses sits inside the rack's default 16 pads, so nothing needs remapping.
-The exact BPM in the filename is the same one baked into the MIDI file, so
-it's there to read at a glance, not just to look up.
+`<Song Title> (Isolated Drums at N.NNN BPM).wav` is the isolated drum mix.
+The exact BPM is in the filename, there to read at a glance.
 
-**Six pieces**, against Ableton's three:
-
-| Piece | Note | |
-| --- | --- | --- |
-| Kick | 36 | Bass Drum 1 |
-| Snare | 38 | Acoustic Snare |
-| Closed hi-hat | 42 | Closed Hi-Hat |
-| Open hi-hat | 46 | Open Hi-Hat |
-| Toms | 47 | Low-Mid Tom |
-| Cymbal | 49 | Crash Cymbal 1 |
-
-The transcription is [ADTOF](https://github.com/MZehren/ADTOF) — a
+The drum transcriber that reads it — six pieces, per-hit velocity — is
+still here in `drum_transcriber.py`, now aimed at a chosen section rather
+than a whole song. It is [ADTOF](https://github.com/MZehren/ADTOF) — a
 convolutional-recurrent network trained on 114 hours of real annotated
 music — via [ADTOF-pytorch](https://github.com/xavriley/ADTOF-pytorch). The
 model and its weights are vendored in `adtof/`; see `adtof/NOTICE.md` for
@@ -218,28 +194,13 @@ Hi-hats sit around 20dB under the kick in most mixes, so scaling everything
 together would push every hat to the bottom of the range and flatten the
 part.
 
-Nothing is quantized. Hits keep the exact moment they were played, so ghost
-notes, flams and swing survive — correcting that is a keystroke in Ableton
-and is not something this should decide for you.
-
-If you already have a `.mid` from an older version, asking for drums MIDI
-again rebuilds it. That reuses the wav that's already there rather than
-separating the song a second time, so it takes seconds.
-
 ### Bass
 
-`<Song Title> (Isolated Bass at N.NNN BPM).wav` is the isolated bass part;
-with `midi`, the matching `.mid` is a MIDI file built by tracking the
-bass's pitch directly (bass is monophonic, so this tracks one note at a
-time rather than guessing a fixed drum-rack note per hit) and writing the
-detected notes onto one track. Expect it to do well on a clear, single-note
-bassline and to need cleanup on anything with slides, chords, or heavy
-effects.
+`<Song Title> (Isolated Bass at N.NNN BPM).wav` is the isolated bass part.
 
-Before transcription, anything quieter than 5% of the isolated bass track's
-own peak volume is gated out — imperfect stem separation tends to leave a
-low-level noise floor behind that would otherwise get misread as extra,
-spurious notes.
+Anything quieter than 5% of the track's own peak volume is gated out —
+imperfect stem separation tends to leave a low-level noise floor behind,
+and this is what's left when the real bass content stops.
 
 ### Harmony
 
@@ -258,11 +219,56 @@ time you ask for harmony on that song.
 `<Song Title> (Isolated Vocals).wav` is the singing — lead and backing —
 with the band taken out from under it. Audio only, no MIDI.
 
+### Beats, not songs
+
+Transcribing four minutes of a live drummer produced a faithful and
+unusable wall of notes. What's actually wanted is a couple of bars with a
+good beat in them, tight to a grid, that loop. So whole-song MIDI is gone —
+both the drums one and the rough pitch-tracked bass one — and what replaces
+it works on a section you choose.
+
+That reverses this project's old "never quantize" rule, deliberately and
+only here: a stolen loop wants to be tight, and there's no longer a
+faithful full-song transcription for it to contradict.
+
+`beat_writer.py` is the first piece of it — everything that ends up as a
+`.mid` goes through it, so there's one place that knows what Ableton
+accepts. Run it to write two reference files:
+
+```
+python3 beat_writer.py [output-folder]
+```
+
+- **Reference Groove** — a real two-bar beat. The "does it sound right" test.
+- **Reference All Pads** — every piece, one per beat, in note order, at
+  velocities 20/50/80/110. Not music: a diagnostic, where a mapping mistake
+  or a velocity that didn't survive is obvious at a glance.
+
+Fourteen pieces, all inside the sixteen pads of Ableton's default Drum
+Rack, so a clip drops onto a stock rack with nothing to remap:
+
+| | | | |
+| --- | --- | --- | --- |
+| 36 Kick | 37 Side stick | 38 Snare | 41 Low floor tom |
+| 42 Closed hat | 43 High floor tom | 44 Pedal hat | 45 Low tom |
+| 46 Open hat | 47 Low-mid tom | 48 Hi-mid tom | 49 Crash |
+| 50 High tom | 51 Ride | | |
+
+Splash (55) and china (52) are missing on purpose — they're outside the
+rack's range, and a note with no pad is silent *and* invisible, which is the
+worst way for a note to be wrong.
+
+Note times are floats in steps, so swing and triplets don't need a
+different grid. The one hard floor is the format itself: MIDI stores every
+time as a whole number of ticks, so times land on a tick whatever we do.
+`RESOLUTION` is set to 960 per quarter note, which puts that error under a
+millisecond.
+
 ### The shared start / tempo grid
 
 Any dead air or drum-less/bass-less intro is trimmed off the front of the
 whole song first (reusing the same intro-cut detection as the sanitizer),
-so every isolated instrument's wav and MIDI start where the music does
+so every isolated instrument's wav starts where the music does
 instead of however many seconds into the file the original intro happened
 to be.
 
@@ -306,12 +312,11 @@ This is off by default because it's slow — each song runs through a
 machine-learning model. That happens once per song per run, though, not once
 per instrument: asking for all four parts is roughly the cost of asking for
 one. Each instrument also runs standalone against an existing folder or
-file — drums/bass with the same optional `midi`/`--midi` flag, harmony and
-vocals with no flags:
+file, none of them taking any flags:
 
 ```
-python3 drum_isolator.py ["path/to/folder-or-file.mp3"] [midi]
-python3 bass_isolator.py ["path/to/folder-or-file.mp3"] [midi]
+python3 drum_isolator.py ["path/to/folder-or-file.mp3"]
+python3 bass_isolator.py ["path/to/folder-or-file.mp3"]
 python3 harmony_isolator.py ["path/to/folder-or-file.mp3"]
 python3 vocals_isolator.py ["path/to/folder-or-file.mp3"]
 ```

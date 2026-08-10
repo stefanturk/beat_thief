@@ -177,10 +177,6 @@
   .extras label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
   .extras input { accent-color: var(--violet); margin: 0; }
   .extras .aside { color: #5b5d64; }
-  .midi-picks { display: flex; align-items: center; gap: 16px; }
-  /* A stem you haven't asked for can't have MIDI written for it, so its box
-     is unavailable rather than quietly ignored. */
-  .midi-picks label.off { opacity: 0.38; cursor: default; }
 
   /* The readout: progress while working, tempo when finished. */
   .readout {
@@ -244,6 +240,45 @@
   }
   body[data-state="done"] #bar { background: var(--good); }
 
+  /* Two separate stalls, both measured on a real run, both of which used to
+     look identical to a crash:
+
+       - 48s between "isolating" and demucs' first percentage, which is
+         torch loading and the model coming off disk. No percentage exists
+         to show, so the bar was pinned at zero width the whole time.
+       - 28s sitting between 61% and 63% mid-separation. The percentage is
+         honest - demucs just isn't linear in time - so even a correct bar
+         stops dead.
+
+     So the bar carries a travelling sheen whenever a run is going,
+     independent of its width. Movement means "alive", width means
+     "progress", and they're no longer the same claim. */
+  #bar::after {
+    content: "";
+    display: block;
+    height: 100%;
+    width: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.55), transparent);
+    transform: translateX(-100%);
+  }
+  body[data-state="running"] #bar::after { animation: sheen 1.6s ease-in-out infinite; }
+
+  /* With no percentage to show, the track fills itself and lets the sheen
+     do all the talking rather than claiming a width it hasn't earned. */
+  #bar[data-indeterminate="true"] {
+    width: 100%;
+    background: var(--violet-dim);
+    transition: none;
+  }
+  #bar[data-indeterminate="true"]::after {
+    background: linear-gradient(90deg, transparent, var(--violet), transparent);
+    width: 40%;
+  }
+  body[data-state="running"] #bar[data-indeterminate="true"]::after { animation: sweep 1.5s ease-in-out infinite; }
+
+  @keyframes sheen { to { transform: translateX(100%); } }
+  @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(350%); } }
+
   #go {
     width: 100%;
     padding: 14px;
@@ -282,22 +317,54 @@
 
   ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 
-  #outputs { gap: 14px; }
-
-  .song-head {
+  /* One row per song, not per file. A song's stems all live in the same
+     folder and all get dragged out of it together, so the folder is the
+     thing worth reaching - a list of every wav inside it was four rows of
+     noise for one answer. */
+  .song {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 10px;
-    margin-bottom: 6px;
+    padding: 10px 12px;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
   }
+  .song:hover { border-color: #3d414b; }
+
+  .song-open {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 9px;
+    background: none;
+    border: none;
+    padding: 0;
+    color: var(--ink);
+    font-family: var(--display);
+    font-size: 11.5px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .song-open:hover .song-title { color: var(--violet); }
+  .song-open:focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
 
   .song-title {
-    font-size: 12.5px;
-    color: var(--ink);
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .song-meta {
+    flex: none;
+    color: var(--dim);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-variant-numeric: tabular-nums;
   }
 
   .again {
@@ -315,30 +382,6 @@
   }
   .again:hover { background: var(--violet-dim); }
   .again:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
-
-  .song-files { gap: 4px; }
-
-  li button {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 10px 12px;
-    background: var(--raised);
-    border: 1px solid var(--edge);
-    border-radius: var(--radius);
-    color: var(--ink);
-    font-family: var(--display);
-    font-size: 11.5px;
-    text-align: left;
-    cursor: pointer;
-  }
-  li button:hover { border-color: var(--violet); }
-  li button:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
-  li .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  li .reveal { color: var(--dim); flex: none; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; }
-  li button:hover .reveal { color: var(--violet); }
 
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
@@ -375,10 +418,6 @@
         find no mp3, and quietly isolate nothing.
       -->
       <div class="extras">
-        <div class="midi-picks">
-          <label data-midi="drums"><input type="checkbox" id="midi-drums"> Drums MIDI</label>
-          <label data-midi="bass"><input type="checkbox" id="midi-bass"> Bass MIDI <span class="aside">(rough)</span></label>
-        </div>
         <span class="aside">All four rebuild the song.</span>
       </div>
     </section>
@@ -422,10 +461,6 @@
     return null;
   }
 
-  function basename(path) {
-    return path.split("/").pop();
-  }
-
   // --- painting ---------------------------------------------------------
 
   function setFigure(text, unit, copyable) {
@@ -449,10 +484,13 @@
     el("message").textContent = state.error || state.message || "Paste a link to get started.";
 
     const percent = state.percent;
-    el("bar").style.width = (percent === null || percent === undefined ? 0 : percent) + "%";
+    const known = percent !== null && percent !== undefined;
+    el("bar").dataset.indeterminate = state.running && !known ? "true" : "false";
+    if (known) el("bar").style.width = percent + "%";
+    else if (!state.running) el("bar").style.width = "0";
 
     if (state.running) {
-      setFigure(percent === null || percent === undefined ? "···" : Math.round(percent) + "%", state.stage.replace("-", " "), false);
+      setFigure(known ? Math.round(percent) + "%" : "···", state.stage.replace(/-/g, " "), false);
     } else if (body.dataset.state === "done") {
       const tempo = tempoOf(state.outputs || []);
       if (tempo) setFigure(tempo, "BPM — click to copy", true);
@@ -477,17 +515,38 @@
     list.replaceChildren(...songs.map(renderSong));
   }
 
+  // Stems are counted rather than listed: the mp3 is always there and is
+  // not a stem, so what's worth knowing is how many of the four have been
+  // taken so far.
+  function stemCount(song) {
+    return (song.files || []).filter((path) => /\(Isolated /.test(path)).length;
+  }
+
   function renderSong(song) {
     const item = document.createElement("li");
+    item.className = "song";
 
-    const head = document.createElement("div");
-    head.className = "song-head";
+    const open = document.createElement("button");
+    open.className = "song-open";
+    open.title = song.dir ? "Show this song's folder in Finder" : song.song;
 
     const title = document.createElement("span");
     title.className = "song-title";
     title.textContent = song.title;
-    title.title = song.song;
-    head.append(title);
+    open.append(title);
+
+    const meta = document.createElement("span");
+    meta.className = "song-meta";
+    const tempo = tempoOf(song.files || []);
+    const stems = stemCount(song);
+    meta.textContent = [
+      tempo ? tempo + " BPM" : null,
+      stems ? stems + (stems === 1 ? " stem" : " stems") : "song only",
+    ].filter(Boolean).join("  ·  ");
+    open.append(meta);
+
+    open.addEventListener("click", () => window.pywebview.api.reveal(song.dir || song.song));
+    item.append(open);
 
     if (song.url) {
       const again = document.createElement("button");
@@ -500,24 +559,8 @@
         el("message").textContent = "Link ready — arm what you want and take it.";
         window.scrollTo({ top: 0, behavior: "smooth" });
       });
-      head.append(again);
+      item.append(again);
     }
-
-    item.append(head);
-
-    const files = document.createElement("ul");
-    files.className = "song-files";
-    files.append(...song.files.map((path) => {
-      const row = document.createElement("li");
-      const button = document.createElement("button");
-      button.innerHTML = '<span class="name"></span><span class="reveal">Reveal</span>';
-      button.querySelector(".name").textContent = basename(path);
-      button.title = path;
-      button.addEventListener("click", () => window.pywebview.api.reveal(path));
-      row.append(button);
-      return row;
-    }));
-    item.append(files);
 
     return item;
   }
@@ -539,23 +582,10 @@
     });
   }
 
-  // A MIDI box only means something while its stem is switched on.
-  function syncMidiPicks() {
-    document.querySelectorAll(".midi-picks label").forEach((label) => {
-      const pad = el("pad-" + label.dataset.midi);
-      const on = pad.getAttribute("aria-pressed") === "true";
-      label.classList.toggle("off", !on);
-      label.querySelector("input").disabled = !on;
-    });
-  }
-
   function start() {
-    const options = { midi: [] };
+    const options = {};
     document.querySelectorAll(".pad").forEach((pad) => {
       options[pad.dataset.stem] = pad.getAttribute("aria-pressed") === "true";
-    });
-    document.querySelectorAll(".midi-picks input").forEach((box) => {
-      if (box.checked && !box.disabled) options.midi.push(box.closest("label").dataset.midi);
     });
 
     window.pywebview.api.start(el("url").value, options).then((state) => {
@@ -569,10 +599,8 @@
   document.querySelectorAll(".pad").forEach((pad) => {
     pad.addEventListener("click", () => {
       pad.setAttribute("aria-pressed", pad.getAttribute("aria-pressed") === "true" ? "false" : "true");
-      syncMidiPicks();
     });
   });
-  syncMidiPicks();
 
   el("go").addEventListener("click", () => {
     if (running) window.pywebview.api.cancel().then(render);

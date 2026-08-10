@@ -38,12 +38,6 @@ _INSTRUMENTS = {
     "vocals": (vocals_isolator, vocals_isolator._LABEL),
 }
 
-# Which of those have a MIDI transcription step. Harmony and vocals are
-# audio only - there's no single line to transcribe out of a wall of pads or
-# a sung phrase. Public, because the front ends have to be able to say which
-# instruments it's meaningful to ask for MIDI from.
-TAKES_MIDI = frozenset({"drums", "bass"})
-
 # The order instruments are worked through, so two runs asking for the same
 # set produce the same sequence regardless of how the set was built.
 #
@@ -255,6 +249,11 @@ def library(limit: int = 20) -> list[dict]:
                 "title": os.path.splitext(os.path.basename(song_path))[0],
                 "url": entry.get("url", ""),
                 "song": song_path,
+                # Where everything this song produced lives. What a front end
+                # actually wants to open - the stems get dragged out of the
+                # folder together, so the folder is the thing, not any one
+                # wav in it. Empty until the song has been isolated at all.
+                "dir": song_dir if os.path.isdir(song_dir) else "",
                 "files": files,
             }
         )
@@ -265,7 +264,6 @@ def run(
     url: str,
     output_dir: str = DEFAULT_OUTPUT,
     instruments=(),
-    midi_for=(),
     on_event=None,
     should_cancel=None,
     interactive: bool | None = None,
@@ -274,13 +272,11 @@ def run(
     instruments. Returns a result dict describing what happened.
 
     instruments is any iterable of "drums"/"bass"/"harmony"/"vocals"; empty
-    means the song only. midi_for is which of those also get a MIDI file -
-    a separate choice per instrument, because drums MIDI is transcribed by a
-    trained model while bass MIDI is still a rough pitch-tracked guess, and
-    wanting one is no reason to be handed the other. interactive=False suppresses every question the sanitizer and
-    tempo detection would otherwise ask (see song_sanitizer.auto_resolve_flags
-    and instrument_isolator.song_alignment) - what the GUI passes, since it
-    has no way to answer them.
+    means the song only. interactive=False suppresses every question the
+    sanitizer and tempo detection would otherwise ask (see
+    song_sanitizer.auto_resolve_flags and
+    instrument_isolator.song_alignment) - what the GUI passes, since it has
+    no way to answer them.
 
     Cancelling: should_cancel is polled between stages and during the slow
     demucs work. On cancel the run stops where it is and reports what it had
@@ -291,7 +287,6 @@ def run(
             pass
 
     wanted = [name for name in INSTRUMENT_ORDER if name in set(instruments)]
-    midi_set = set(midi_for)
     result = {
         "download_status": 0,
         "downloaded": 0,
@@ -395,17 +390,21 @@ def run(
                     return result
 
                 module, label = _INSTRUMENTS[name]
-                on_event({"stage": "isolating", "instrument": name, "song": title, "percent": None})
+                index, total = wanted.index(name) + 1, len(wanted)
+                on_event({"stage": "isolating", "instrument": name, "song": title,
+                          "index": index, "total": total, "percent": None, "phase": None})
 
-                def report(percent, _name=name, _title=title):
-                    on_event({"stage": "isolating", "instrument": _name, "song": _title, "percent": percent})
+                def report(percent, _name=name, _title=title, _i=index, _n=total):
+                    on_event({"stage": "isolating", "instrument": _name, "song": _title,
+                              "index": _i, "total": _n, "percent": percent, "phase": None})
+
+                def phase(message, _name=name, _title=title, _i=index, _n=total):
+                    on_event({"stage": "isolating", "instrument": _name, "song": _title,
+                              "index": _i, "total": _n, "percent": None, "phase": message})
 
                 isolate = getattr(module, f"isolate_{name}_for_single_file")
-                kwargs = {"context": context._replace(on_percent=report)}
-                if name in TAKES_MIDI:
-                    kwargs["write_midi"] = name in midi_set
                 try:
-                    isolate(mp3_path, **kwargs)
+                    isolate(mp3_path, context=context._replace(on_percent=report, on_phase=phase))
                 except instrument_isolator.Cancelled:
                     result["cancelled"] = True
                     on_event({"stage": "cancelled"})

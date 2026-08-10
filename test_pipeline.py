@@ -142,37 +142,6 @@ class TestInstrumentRuns(PipelineTestCase):
             mock_vocals.call_args.args[0], os.path.join(self.tmp_dir, "Some Song - Artist.mp3")
         )
 
-    def test_the_audio_only_instruments_are_never_asked_for_midi(self):
-        # harmony and vocals have no MIDI step - passing write_midi to
-        # either would be a TypeError.
-        with mock.patch("harmony_isolator.isolate_harmony_for_single_file") as mock_harmony, \
-             mock.patch("vocals_isolator.isolate_vocals_for_single_file") as mock_vocals:
-            self._run(instruments=["harmony", "vocals"], midi_for={"harmony", "vocals"})
-
-        self.assertNotIn("write_midi", mock_harmony.call_args.kwargs)
-        self.assertNotIn("write_midi", mock_vocals.call_args.kwargs)
-
-    def test_midi_reaches_the_instrument_it_was_asked_for(self):
-        with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
-            self._run(instruments=["drums"], midi_for={"drums"})
-
-        self.assertIs(mock_drums.call_args.kwargs["write_midi"], True)
-
-    def test_midi_is_chosen_per_instrument_not_for_all_of_them(self):
-        # Asking for drums MIDI must not also produce the rough bass MIDI.
-        with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums, \
-             mock.patch("bass_isolator.isolate_bass_for_single_file") as mock_bass:
-            self._run(instruments=["drums", "bass"], midi_for={"drums"})
-
-        self.assertIs(mock_drums.call_args.kwargs["write_midi"], True)
-        self.assertIs(mock_bass.call_args.kwargs["write_midi"], False)
-
-    def test_no_midi_asked_for_means_none_written(self):
-        with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
-            self._run(instruments=["drums"])
-
-        self.assertIs(mock_drums.call_args.kwargs["write_midi"], False)
-
     def test_non_interactive_choice_reaches_both_the_sanitizer_and_the_isolators(self):
         with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
             self._run(instruments=["drums"], interactive=False)
@@ -181,7 +150,7 @@ class TestInstrumentRuns(PipelineTestCase):
         self.assertIs(mock_drums.call_args.kwargs["context"].interactive, False)
 
     def test_isolation_progress_is_reported_per_instrument(self):
-        def fake_isolate(path, write_midi=False, context=None):
+        def fake_isolate(path, context=None):
             context.on_percent(40)
             context.on_percent(100)
 
@@ -198,7 +167,7 @@ class TestInstrumentRuns(PipelineTestCase):
         song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
         wav = os.path.join(song_dir, "Some Song - Artist (Isolated Drums at 120.000 BPM).wav")
 
-        def fake_isolate(path, write_midi=False, context=None):
+        def fake_isolate(path, context=None):
             os.makedirs(song_dir, exist_ok=True)
             with open(wav, "wb") as f:
                 f.write(b"x")
@@ -243,7 +212,7 @@ class TestCancelling(PipelineTestCase):
         self.assertNotIn("done", self._stages())
 
     def test_cancel_raised_from_inside_demucs_is_reported_not_swallowed(self):
-        def cancel_midway(path, write_midi=False, context=None):
+        def cancel_midway(path, context=None):
             raise instrument_isolator.Cancelled()
 
         with mock.patch("drum_isolator.isolate_drums_for_single_file", side_effect=cancel_midway):
@@ -271,7 +240,7 @@ class TestSeparatedAudioIsCleanedUp(PipelineTestCase):
         mock_clear.assert_called_once()
 
     def test_after_a_cancelled_run(self):
-        def cancel_midway(path, write_midi=False, context=None):
+        def cancel_midway(path, context=None):
             raise instrument_isolator.Cancelled()
 
         with mock.patch("drum_isolator.isolate_drums_for_single_file", side_effect=cancel_midway), \
@@ -281,7 +250,7 @@ class TestSeparatedAudioIsCleanedUp(PipelineTestCase):
         mock_clear.assert_called_once()
 
     def test_after_an_isolator_blows_up(self):
-        def explode(path, write_midi=False, context=None):
+        def explode(path, context=None):
             raise MemoryError("out of room")
 
         with mock.patch("drum_isolator.isolate_drums_for_single_file", side_effect=explode), \
@@ -310,7 +279,7 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
         song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
         wav = os.path.join(song_dir, "Some Song - Artist (Isolated Drums at 120.000 BPM).wav")
 
-        def fake_isolate(path, write_midi=False, context=None):
+        def fake_isolate(path, context=None):
             os.makedirs(song_dir, exist_ok=True)
             with open(wav, "wb") as f:
                 f.write(b"x")
@@ -325,11 +294,14 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
         self.assertEqual(library[0]["url"], "https://example.com/song")
         self.assertIn(wav, library[0]["files"])
         self.assertIn(os.path.join(self.tmp_dir, "Some Song - Artist.mp3"), library[0]["files"])
+        # The folder, so a front end can offer the whole song at once
+        # rather than a row per wav inside it.
+        self.assertEqual(library[0]["dir"], song_dir)
 
     def test_the_isolators_own_marker_files_are_not_listed_as_output(self):
         song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
 
-        def fake_isolate(path, write_midi=False, context=None):
+        def fake_isolate(path, context=None):
             os.makedirs(song_dir, exist_ok=True)
             for name in ("stem.wav", ".drums_source.json"):
                 with open(os.path.join(song_dir, name), "wb") as f:
