@@ -179,6 +179,28 @@ class TestInstrumentRuns(PipelineTestCase):
         isolated = [e for e in self.events if e["stage"] == "isolated"][0]
         self.assertEqual(isolated["outputs"], [wav])
 
+    def test_a_leftover_mid_from_an_older_version_is_not_offered_as_output(self):
+        # Isolators write nothing but a wav now. A .mid sitting next to one
+        # is a stale file from a version that wrote whole-song MIDI, and
+        # handing it back as something just produced would be a lie.
+        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
+        basename = "Some Song - Artist (Isolated Drums at 120.000 BPM)"
+        wav = os.path.join(song_dir, basename + ".wav")
+        stale_mid = os.path.join(song_dir, basename + ".mid")
+
+        def fake_isolate(path, context=None):
+            os.makedirs(song_dir, exist_ok=True)
+            for target in (wav, stale_mid):
+                with open(target, "wb") as f:
+                    f.write(b"x")
+
+        with mock.patch("drum_isolator.isolate_drums_for_single_file", side_effect=fake_isolate):
+            result = self._run(instruments=["drums"])
+
+        isolated = [e for e in self.events if e["stage"] == "isolated"][0]
+        self.assertEqual(isolated["outputs"], [wav])
+        self.assertNotIn(stale_mid, result["outputs"])
+
 
 class TestAlreadyDownloadedSongs(PipelineTestCase):
     def test_a_song_skipped_by_the_archive_is_still_isolated(self):
