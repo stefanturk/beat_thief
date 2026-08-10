@@ -270,6 +270,6 @@ def write(loop: Loop, out_dir: str, title: str) -> str:
     without opening it (see beat_writer.write - Ableton won't read the
     tempo out of the file)."""
     os.makedirs(out_dir, exist_ok=True)
-    label = f"{title} (Stolen Beat, {loop.bars} bar{'s' if loop.bars != 1 else ''})"
+    label = f"{title} ({beat_writer.STOLEN_BEAT_LABEL}, {loop.bars} bar{'s' if loop.bars != 1 else ''})"
     path = os.path.join(out_dir, beat_writer.filename_for(loop.beat, label))
     return beat_writer.write(loop.beat, path)

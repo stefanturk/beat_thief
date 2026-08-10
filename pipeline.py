@@ -21,6 +21,7 @@ import shutil
 import yt_dlp
 
 import bass_isolator
+import beat_writer
 import drum_isolator
 import harmony_isolator
 import history
@@ -212,6 +213,57 @@ class _Download:
             return ydl.download([self.url])
 
 
+def song_folder(output_dir: str, title: str) -> str:
+    """Where everything for one song lives - the mp3 itself, its stems and
+    its MIDI, all together. One folder per song rather than a flat pile of
+    mp3s next to a parallel pile of "(Isolated)" folders."""
+    return os.path.join(output_dir, title)
+
+
+def existing_song(output_dir: str, filename: str) -> str:
+    """Where this song's mp3 actually is, or "" if it isn't there.
+
+    Checks its own folder first and then the top level, because a download
+    lands flat and is filed afterwards (see file_into_own_folder) - so
+    between those two moments both are correct answers."""
+    title = os.path.splitext(filename)[0]
+    for candidate in (os.path.join(song_folder(output_dir, title), filename),
+                      os.path.join(output_dir, filename)):
+        if os.path.exists(candidate):
+            return candidate
+    return ""
+
+
+def file_into_own_folder(mp3_path: str) -> str:
+    """Move a freshly downloaded mp3 into a folder of its own, and return
+    where it ended up.
+
+    Downloading and sanitizing both work on a flat directory - the
+    sanitizer renames, dedupes and compares across the whole set of mp3s at
+    once - so filing happens afterwards rather than by downloading straight
+    into place. Everything downstream then reads the folder off the mp3's
+    own path (see instrument_isolator.song_output_dir).
+
+    Already-filed and can't-be-filed both return the path unchanged: a song
+    is worth isolating either way, and losing one to a tidying step would
+    be a poor trade."""
+    output_dir = os.path.dirname(os.path.abspath(mp3_path))
+    filename = os.path.basename(mp3_path)
+    title = os.path.splitext(filename)[0]
+    if os.path.basename(output_dir) == title:
+        return mp3_path
+
+    destination = os.path.join(song_folder(output_dir, title), filename)
+    if os.path.exists(destination):
+        return destination
+    try:
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        shutil.move(mp3_path, destination)
+    except OSError:
+        return mp3_path
+    return destination
+
+
 def _instrument_outputs(mp3_path: str, label: str) -> list[str]:
     """The files an isolator just produced for this song and instrument, so
     a caller can offer them directly instead of making someone go looking."""
@@ -226,12 +278,38 @@ def _instrument_outputs(mp3_path: str, label: str) -> list[str]:
     return [wav_path] if os.path.exists(wav_path) else []
 
 
+# The things a song can have, in the order they're shown. "song" is the
+# download itself and "beat" is a stolen loop; the middle four are the
+# stems. This order is the app's, top to bottom and left to right.
+STASH_ORDER = ("song", "drums", "beat", "bass", "harmony", "vocals")
+
+
+def _what_a_song_has(song_path: str, files: list[str]) -> dict:
+    """Which of STASH_ORDER this song already has, and the file for each.
+
+    A path rather than a flag, because a front end wants both: which
+    squares to fill in, and what to reveal when one is clicked."""
+    have = {"song": song_path}
+    for name, (_module, label) in _INSTRUMENTS.items():
+        match = next((p for p in files if label in os.path.basename(p) and p.endswith(".wav")), None)
+        if match:
+            have[name] = match
+    beat = next(
+        (p for p in files if beat_writer.STOLEN_BEAT_LABEL in os.path.basename(p) and p.endswith(".mid")),
+        None,
+    )
+    if beat:
+        have["beat"] = beat
+    return have
+
+
 def library(limit: int = 20) -> list[dict]:
     """Recently downloaded songs, newest first, each with the link it came
     from and whatever files exist for it right now.
 
     Files are read from disk rather than remembered, so a stem deleted in
-    Finder simply stops being listed."""
+    Finder simply stops being listed - and a front end showing what's in
+    the stash can't drift from what's actually there."""
     songs = []
     for entry in history.entries():
         if len(songs) >= limit:
@@ -243,36 +321,29 @@ def library(limit: int = 20) -> list[dict]:
         # crowd out the songs behind them.
         if not os.path.exists(song_path):
             continue
-        files = [song_path]
 
         song_dir = instrument_isolator.song_output_dir(song_path)
-        if os.path.isdir(song_dir):
-            for name in sorted(os.listdir(song_dir)):
-                # Skip the .source.json markers the isolators keep for their
-                # own "is this still up to date" checks - not output anyone
-                # asked for.
-                if name.startswith("."):
-                    continue
-                files.append(os.path.join(song_dir, name))
+        files = [song_path]
+        for name in sorted(os.listdir(song_dir)) if os.path.isdir(song_dir) else []:
+            # Skip the .source.json markers the isolators keep for their
+            # own "is this still up to date" checks - not output anyone
+            # asked for. The mp3 lives in here too now, so it would
+            # otherwise be listed twice.
+            path = os.path.join(song_dir, name)
+            if name.startswith(".") or path == song_path:
+                continue
+            files.append(path)
 
         songs.append(
             {
                 "title": os.path.splitext(os.path.basename(song_path))[0],
                 "url": entry.get("url", ""),
                 "song": song_path,
-                # Where everything this song produced lives. What a front end
-                # actually wants to open - the stems get dragged out of the
-                # folder together, so the folder is the thing, not any one
-                # wav in it. Empty until the song has been isolated at all.
+                # Where everything for this song lives - the mp3, the stems
+                # and the MIDI. What a front end wants to open, since the
+                # stems get dragged out of it together.
                 "dir": song_dir if os.path.isdir(song_dir) else "",
-                # The drum stem, if this song has one - what a beat gets
-                # stolen out of. Empty means the song hasn't been separated
-                # yet, and the front end can say so rather than offering a
-                # button that can't work.
-                "drums": next(
-                    (path for path in files if drum_isolator._LABEL in path and path.endswith(".wav")),
-                    "",
-                ),
+                "have": _what_a_song_has(song_path, files),
                 "files": files,
             }
         )
@@ -381,15 +452,33 @@ def run(
     if wanted:
         seen = set(filenames)
         for filename in requested_mp3_filenames(url, output_dir):
-            if filename not in seen and os.path.exists(os.path.join(output_dir, filename)):
+            if filename not in seen and existing_song(output_dir, filename):
                 filenames.append(filename)
                 seen.add(filename)
-    result["songs"] = [os.path.join(output_dir, f) for f in filenames]
+    result["songs"] = [file_into_own_folder(os.path.join(output_dir, f)) for f in filenames]
     result["outputs"] = list(result["songs"])
 
     # Remember where these came from, so coming back later for another stem
     # doesn't mean going and finding the link again (see history.py).
     history.remember(url, result["songs"])
+
+    _isolate_songs(result["songs"], wanted, on_event, cancelled, should_cancel, interactive, result)
+
+    if result["cancelled"]:
+        return result
+
+    on_event({"stage": "done", "outputs": result["outputs"]})
+    return result
+
+
+def _isolate_songs(song_paths, wanted, on_event, cancelled, should_cancel, interactive, result) -> None:
+    """Run each wanted instrument over each song, filling result as it goes.
+
+    Shared by run() and isolate() so there's one copy of the progress
+    events, the cancel checks and the output collection - the two differ
+    only in whether anything was downloaded first."""
+    if not wanted:
+        return
 
     context = instrument_isolator.RunContext(interactive=interactive, should_cancel=should_cancel)
 
@@ -399,14 +488,13 @@ def run(
     # megabytes of temp files, so they're disposed of however this ends -
     # finished, cancelled or blown up.
     try:
-        for filename in filenames:
-            mp3_path = os.path.join(output_dir, filename)
-            title = os.path.splitext(filename)[0]
+        for mp3_path in song_paths:
+            title = os.path.splitext(os.path.basename(mp3_path))[0]
             for name in wanted:
                 if cancelled():
                     result["cancelled"] = True
                     on_event({"stage": "cancelled"})
-                    return result
+                    return
 
                 module, label = _INSTRUMENTS[name]
                 index, total = wanted.index(name) + 1, len(wanted)
@@ -421,19 +509,53 @@ def run(
                     on_event({"stage": "isolating", "instrument": _name, "song": _title,
                               "index": _i, "total": _n, "percent": None, "phase": message})
 
-                isolate = getattr(module, f"isolate_{name}_for_single_file")
+                run_one = getattr(module, f"isolate_{name}_for_single_file")
                 try:
-                    isolate(mp3_path, context=context._replace(on_percent=report, on_phase=phase))
+                    run_one(mp3_path, context=context._replace(on_percent=report, on_phase=phase))
                 except instrument_isolator.Cancelled:
                     result["cancelled"] = True
                     on_event({"stage": "cancelled"})
-                    return result
+                    return
 
                 produced = _instrument_outputs(mp3_path, label)
                 result["outputs"].extend(produced)
                 on_event({"stage": "isolated", "instrument": name, "song": title, "outputs": produced})
     finally:
         instrument_isolator.clear_stem_cache()
+
+
+def isolate(song_paths, instruments=(), on_event=None, should_cancel=None, interactive: bool | None = None) -> dict:
+    """Isolate instruments from songs already on disk, with no download and
+    no link.
+
+    Re-taking a stem from a song you already have shouldn't need the
+    internet, and for a song whose link was never recorded there's no link
+    to go back to. Same result dict as run(), with the download counters
+    left at zero."""
+    if on_event is None:
+        def on_event(_event):
+            pass
+
+    song_paths = [path for path in song_paths if os.path.exists(path)]
+    wanted = [name for name in INSTRUMENT_ORDER if name in set(instruments)]
+    result = {
+        "download_status": 0,
+        "downloaded": 0,
+        "skipped": 0,
+        "failed": 0,
+        "songs": list(song_paths),
+        "outputs": list(song_paths),
+        "cancelled": False,
+        "output_dir": os.path.dirname(os.path.dirname(song_paths[0])) if song_paths else DEFAULT_OUTPUT,
+    }
+
+    def cancelled() -> bool:
+        return bool(should_cancel and should_cancel())
+
+    _isolate_songs(song_paths, wanted, on_event, cancelled, should_cancel, interactive, result)
+
+    if result["cancelled"]:
+        return result
 
     on_event({"stage": "done", "outputs": result["outputs"]})
     return result

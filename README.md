@@ -148,9 +148,22 @@ Asking for all four costs about what asking for one costs. The separation
 model produces all four parts in a single pass whatever you asked for, so
 the pass is done once and shared.
 
-For each song this produces one `<Song Title> (Isolated)/` folder
-containing whichever instruments you asked for, side by side — no separate
-top-level `Drums`/`Bass`/`Harmony` folders to dig through.
+Everything for a song lives in one folder named after it — the download,
+the stems and any stolen beat, together:
+
+```
+~/Music/Beat Thief/
+  Song Title/
+    Song Title.mp3
+    Song Title (Isolated Drums at 120.000 BPM).wav
+    Song Title (Isolated Bass at 120.000 BPM).wav
+    Song Title (Stolen Beat, 2 bars) (120 BPM).mid
+```
+
+Downloading and sanitizing still work on a flat directory — the sanitizer
+renames, dedupes and compares across the whole set of new mp3s at once — so
+each song is filed into its folder after that, not downloaded straight into
+one.
 
 Each instrument is written as a `.wav`. There's no whole-song MIDI any
 more — see [Beats, not songs](#beats-not-songs).

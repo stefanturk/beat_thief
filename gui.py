@@ -45,11 +45,12 @@ class Api:
     """What the page can call. Every method returns immediately - the slow
     work happens on a worker thread and the page polls status() for it.
 
-    run_pipeline is injectable so this is testable against a fake without
-    downloading anything or importing pywebview."""
+    run_pipeline and isolate_pipeline are injectable so this is testable
+    against fakes without downloading anything or importing pywebview."""
 
-    def __init__(self, run_pipeline=pipeline.run):
+    def __init__(self, run_pipeline=pipeline.run, isolate_pipeline=pipeline.isolate):
         self._run_pipeline = run_pipeline
+        self._isolate_pipeline = isolate_pipeline
         self._lock = threading.Lock()
         self._thread = None
         self._cancel = threading.Event()
@@ -72,11 +73,21 @@ class Api:
 
     def start(self, url: str, options: dict | None = None) -> dict:
         """Begin a run. Returns the state the page should show right away,
-        so a click feels immediate rather than waiting on a network probe."""
+        so a click feels immediate rather than waiting on a network probe.
+
+        options may carry a "song": the path of something already in the
+        stash. Given one, this takes more from that song and never goes
+        near the network - no download to do, and for a song whose link was
+        never recorded there'd be no link to use anyway."""
         options = options or {}
+        song = (options.get("song") or "").strip()
         url = (url or "").strip()
-        if not url:
+        if not song and not url:
             return self._fail("Paste a link first.")
+
+        instruments = [name for name in pipeline.INSTRUMENT_ORDER if options.get(name)]
+        if song and not instruments:
+            return self._fail("Nothing armed - pick what to take.")
 
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
@@ -86,12 +97,11 @@ class Api:
             self._state.update({"running": True, "stage": "starting", "message": "Getting ready..."})
             state_snapshot = dict(self._state)
 
-        instruments = [name for name in pipeline.INSTRUMENT_ORDER if options.get(name)]
         output_dir = options.get("output_dir") or DEFAULT_OUTPUT
 
         self._thread = threading.Thread(
             target=self._work,
-            args=(url, output_dir, instruments),
+            args=(url, output_dir, instruments, song),
             daemon=True,
         )
         self._thread.start()
@@ -201,16 +211,25 @@ class Api:
             self._state["error"] = message
             return dict(self._state)
 
-    def _work(self, url, output_dir, instruments):
+    def _work(self, url, output_dir, instruments, song=""):
         try:
-            result = self._run_pipeline(
-                url,
-                output_dir=output_dir,
-                instruments=instruments,
-                on_event=self._on_event,
-                should_cancel=self._cancel.is_set,
-                interactive=False,
-            )
+            if song:
+                result = self._isolate_pipeline(
+                    [song],
+                    instruments=instruments,
+                    on_event=self._on_event,
+                    should_cancel=self._cancel.is_set,
+                    interactive=False,
+                )
+            else:
+                result = self._run_pipeline(
+                    url,
+                    output_dir=output_dir,
+                    instruments=instruments,
+                    on_event=self._on_event,
+                    should_cancel=self._cancel.is_set,
+                    interactive=False,
+                )
         except BaseException as e:
             # Includes Cancelled and anything a dependency throws: a worker
             # thread dying silently would leave the page spinning forever.

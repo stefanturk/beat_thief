@@ -50,6 +50,12 @@ PIECES = {
 # The pads a Drum Rack shows. Anything outside is silent in a stock rack.
 RACK_LOW, RACK_HIGH = 36, 51
 
+# What a stolen loop's filename carries, the way each isolator's outputs
+# carry its label (see instrument_isolator.find_existing_basename). Lives
+# here rather than in beat_loop so that reading a song's folder to see
+# what's in it doesn't mean importing the transcriber and all of torch.
+STOLEN_BEAT_LABEL = "Stolen Beat"
+
 # How long each note is written as. A drum rack plays one-shots, so this is
 # cosmetic - but a part whose notes are all hairlines is unreadable in the
 # MIDI editor, and one whose notes overlap the next hit looks like a mistake.

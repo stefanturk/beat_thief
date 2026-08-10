@@ -59,6 +59,37 @@ class TestApiStart(unittest.TestCase):
         self.assertEqual(calls["url"], "https://example.com/song")
         self.assertEqual(calls["instruments"], ["drums", "harmony"])
 
+    def test_a_song_from_the_stash_is_isolated_without_downloading(self):
+        # Re-taking a stem from a song you already have shouldn't need the
+        # internet, and a song whose link was never recorded has no link to
+        # go back to.
+        calls = {}
+        api = gui.Api(
+            run_pipeline=lambda *a, **k: self.fail("should not have downloaded"),
+            isolate_pipeline=lambda songs, **kwargs: calls.update(kwargs, songs=songs) or {"outputs": []},
+        )
+
+        api.start("", {"song": "/songs/Track/Track.mp3", "bass": True})
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["songs"], ["/songs/Track/Track.mp3"])
+        self.assertEqual(calls["instruments"], ["bass"])
+
+    def test_a_stash_song_with_nothing_armed_says_so(self):
+        api = gui.Api(isolate_pipeline=lambda *a, **k: self.fail("nothing to do"))
+
+        state = api.start("", {"song": "/songs/Track/Track.mp3"})
+
+        self.assertFalse(state["running"])
+        self.assertIn("armed", state["error"].lower())
+
+    def test_no_link_and_no_song_is_still_refused(self):
+        api = gui.Api(run_pipeline=lambda *a, **k: self.fail("nothing to run"))
+
+        state = api.start("   ", {"drums": True})
+
+        self.assertIn("link", state["error"].lower())
+
     def test_every_pad_armed_asks_for_the_whole_song(self):
         calls = {}
 

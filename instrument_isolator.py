@@ -228,17 +228,16 @@ def clear_stem_cache() -> None:
     _stem_cache.clear()
 
 
-ISOLATED_SUFFIX = " (Isolated)"
-
-
 def song_output_dir(mp3_path: str) -> str:
-    """The shared folder a song's isolated instruments (drums, bass, ...)
-    are all written into, next to the source mp3 - one folder per song
-    rather than a separate one per instrument, so everything for a song
-    lives together."""
-    title = os.path.splitext(os.path.basename(mp3_path))[0]
-    parent = os.path.dirname(os.path.abspath(mp3_path))
-    return os.path.join(parent, title + ISOLATED_SUFFIX)
+    """The folder everything for a song goes in: its stems, its MIDI, and
+    the mp3 itself.
+
+    That's simply the mp3's own directory, because pipeline.run files each
+    song into a folder of its own before any of this runs. It used to be a
+    sibling "<title> (Isolated)" folder next to a flat pile of mp3s, which
+    meant a song's own download and everything made from it lived in two
+    different places."""
+    return os.path.dirname(os.path.abspath(mp3_path))
 
 
 def has_existing_outputs(song_dir: str, label: str, require_midi: bool) -> bool:

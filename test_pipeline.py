@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+import beat_writer
 import history
 import instrument_isolator
 import pipeline
@@ -124,7 +125,7 @@ class TestInstrumentRuns(PipelineTestCase):
              mock.patch("harmony_isolator.isolate_harmony_for_single_file") as mock_harmony:
             self._run(instruments=["harmony", "drums"])
 
-        expected = os.path.join(self.tmp_dir, "Some Song - Artist.mp3")
+        expected = os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3")
         self.assertEqual(mock_drums.call_args.args[0], expected)
         self.assertEqual(mock_harmony.call_args.args[0], expected)
 
@@ -147,7 +148,7 @@ class TestInstrumentRuns(PipelineTestCase):
             self._run(instruments=["vocals"])
 
         self.assertEqual(
-            mock_vocals.call_args.args[0], os.path.join(self.tmp_dir, "Some Song - Artist.mp3")
+            mock_vocals.call_args.args[0], os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3")
         )
 
     def test_non_interactive_choice_reaches_both_the_sanitizer_and_the_isolators(self):
@@ -172,7 +173,7 @@ class TestInstrumentRuns(PipelineTestCase):
         self.assertEqual(isolating[0]["song"], "Some Song - Artist")
 
     def test_produced_files_are_collected_as_outputs(self):
-        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
+        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist")
         wav = os.path.join(song_dir, "Some Song - Artist (Isolated Drums at 120.000 BPM).wav")
 
         def fake_isolate(path, context=None):
@@ -191,7 +192,7 @@ class TestInstrumentRuns(PipelineTestCase):
         # Isolators write nothing but a wav now. A .mid sitting next to one
         # is a stale file from a version that wrote whole-song MIDI, and
         # handing it back as something just produced would be a lie.
-        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
+        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist")
         basename = "Some Song - Artist (Isolated Drums at 120.000 BPM)"
         wav = os.path.join(song_dir, basename + ".wav")
         stale_mid = os.path.join(song_dir, basename + ".mid")
@@ -218,7 +219,8 @@ class TestAlreadyDownloadedSongs(PipelineTestCase):
             def download(self, urls):
                 return 0
 
-        existing = os.path.join(self.tmp_dir, "Some Song - Artist.mp3")
+        existing = os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3")
+        os.makedirs(os.path.dirname(existing))
         with open(existing, "wb") as f:
             f.write(b"already here")
 
@@ -302,7 +304,7 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
     def test_a_downloaded_song_records_the_link_it_came_from(self):
         self._run()
 
-        song = os.path.join(self.tmp_dir, "Some Song - Artist.mp3")
+        song = os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3")
         self.assertEqual(history.url_for(song, self.history_path), "https://example.com/song")
 
     def test_a_song_no_longer_on_disk_does_not_take_up_a_slot(self):
@@ -323,7 +325,7 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
         self.assertEqual([song["song"] for song in listed], [real])
 
     def test_the_library_lists_the_song_with_its_link_and_its_files(self):
-        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
+        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist")
         wav = os.path.join(song_dir, "Some Song - Artist (Isolated Drums at 120.000 BPM).wav")
 
         def fake_isolate(path, context=None):
@@ -340,13 +342,13 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
         self.assertEqual(library[0]["title"], "Some Song - Artist")
         self.assertEqual(library[0]["url"], "https://example.com/song")
         self.assertIn(wav, library[0]["files"])
-        self.assertIn(os.path.join(self.tmp_dir, "Some Song - Artist.mp3"), library[0]["files"])
+        self.assertIn(os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3"), library[0]["files"])
         # The folder, so a front end can offer the whole song at once
         # rather than a row per wav inside it.
         self.assertEqual(library[0]["dir"], song_dir)
 
     def test_the_isolators_own_marker_files_are_not_listed_as_output(self):
-        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
+        song_dir = os.path.join(self.tmp_dir, "Some Song - Artist")
 
         def fake_isolate(path, context=None):
             os.makedirs(song_dir, exist_ok=True)
@@ -362,13 +364,178 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
         self.assertIn("stem.wav", listed)
         self.assertNotIn(".drums_source.json", listed)
 
-    def test_a_song_with_no_isolated_folder_still_lists_its_mp3(self):
+    def test_a_song_with_nothing_isolated_yet_still_lists_its_mp3(self):
         self._run()
 
         self.assertEqual(
             pipeline.library()[0]["files"],
-            [os.path.join(self.tmp_dir, "Some Song - Artist.mp3")],
+            [os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3")],
         )
+
+
+class TestOneFolderPerSong(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _mp3(self, name="Song - Artist.mp3", where=None):
+        path = os.path.join(where or self.tmp_dir, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"mp3")
+        return path
+
+    def test_a_downloaded_song_is_moved_into_a_folder_of_its_own(self):
+        flat = self._mp3()
+
+        filed = pipeline.file_into_own_folder(flat)
+
+        self.assertEqual(filed, os.path.join(self.tmp_dir, "Song - Artist", "Song - Artist.mp3"))
+        self.assertTrue(os.path.exists(filed))
+        self.assertFalse(os.path.exists(flat))
+
+    def test_a_song_already_in_its_folder_is_left_where_it_is(self):
+        already = self._mp3(where=os.path.join(self.tmp_dir, "Song - Artist"))
+
+        self.assertEqual(pipeline.file_into_own_folder(already), already)
+        self.assertTrue(os.path.exists(already))
+
+    def test_a_song_that_cannot_be_moved_is_still_returned(self):
+        # Losing a song to a tidying step would be a much worse trade than
+        # leaving it where it is.
+        flat = self._mp3()
+
+        with mock.patch("shutil.move", side_effect=OSError("read-only")):
+            self.assertEqual(pipeline.file_into_own_folder(flat), flat)
+
+        self.assertTrue(os.path.exists(flat))
+
+    def test_the_stems_land_in_the_same_folder_as_the_song(self):
+        filed = pipeline.file_into_own_folder(self._mp3())
+
+        self.assertEqual(
+            instrument_isolator.song_output_dir(filed),
+            os.path.join(self.tmp_dir, "Song - Artist"),
+        )
+
+    def test_a_song_is_found_whether_it_has_been_filed_yet_or_not(self):
+        # A download lands flat and is filed afterwards, so between those
+        # two moments both places are correct answers.
+        flat = self._mp3()
+        self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), flat)
+
+        filed = pipeline.file_into_own_folder(flat)
+        self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), filed)
+
+    def test_a_song_that_is_not_there_is_reported_as_missing(self):
+        self.assertEqual(pipeline.existing_song(self.tmp_dir, "Nothing.mp3"), "")
+
+
+class TestWhatASongHas(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.song = os.path.join(self.tmp_dir, "Song - Artist.mp3")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _have(self, *names):
+        files = [self.song] + [os.path.join(self.tmp_dir, n) for n in names]
+        return pipeline._what_a_song_has(self.song, files)
+
+    def test_the_song_itself_always_counts(self):
+        self.assertEqual(self._have(), {"song": self.song})
+
+    def test_each_stem_is_found_by_its_own_label(self):
+        have = self._have(
+            "Song - Artist (Isolated Drums at 120.000 BPM).wav",
+            "Song - Artist (Isolated Vocals).wav",
+        )
+
+        self.assertEqual(set(have), {"song", "drums", "vocals"})
+        self.assertTrue(have["drums"].endswith("Drums at 120.000 BPM).wav"))
+
+    def test_a_stolen_loop_counts_as_a_beat(self):
+        have = self._have("Song - Artist (Stolen Beat, 2 bars) (120 BPM).mid")
+
+        self.assertIn("beat", have)
+
+    def test_the_beat_label_is_the_one_beat_loop_actually_writes(self):
+        # pipeline names the file by a constant it doesn't build itself, so
+        # this is what stops the two drifting apart.
+        import beat_loop
+        loop = beat_loop.Loop(
+            beat=beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0),)),
+            bars=2, origin_sec=0.0, hits_used=1, hits_dropped=0,
+        )
+        written = beat_loop.write(loop, self.tmp_dir, "Song - Artist")
+
+        self.assertIn("beat", pipeline._what_a_song_has(self.song, [self.song, written]))
+
+    def test_everything_it_can_report_is_a_name_the_app_shows(self):
+        have = self._have(
+            "Song - Artist (Isolated Drums at 120.000 BPM).wav",
+            "Song - Artist (Isolated Bass at 120.000 BPM).wav",
+            "Song - Artist (Isolated Harmony).wav",
+            "Song - Artist (Isolated Vocals).wav",
+            "Song - Artist (Stolen Beat, 2 bars) (120 BPM).mid",
+        )
+
+        self.assertEqual(set(have), set(pipeline.STASH_ORDER))
+
+
+class TestIsolateWithoutDownloading(unittest.TestCase):
+    """Re-taking a stem from a song already on disk must not need the
+    internet - and for a song whose link was never recorded, there's no
+    link to go back to."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.song = os.path.join(self.tmp_dir, "Song - Artist", "Song - Artist.mp3")
+        os.makedirs(os.path.dirname(self.song))
+        with open(self.song, "wb") as f:
+            f.write(b"mp3")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_it_isolates_without_touching_yt_dlp(self):
+        with mock.patch("yt_dlp.YoutubeDL", side_effect=AssertionError("no network here")), \
+             mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
+            result = pipeline.isolate([self.song], instruments=["drums"])
+
+        mock_drums.assert_called_once()
+        self.assertEqual(mock_drums.call_args.args[0], self.song)
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(result["downloaded"], 0)
+
+    def test_it_reports_progress_the_same_way_a_download_run_does(self):
+        events = []
+        with mock.patch("drum_isolator.isolate_drums_for_single_file"):
+            pipeline.isolate([self.song], instruments=["drums"], on_event=events.append)
+
+        stages = [e["stage"] for e in events]
+        self.assertEqual(stages, ["isolating", "isolated", "done"])
+
+    def test_a_song_that_is_not_there_is_skipped(self):
+        with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
+            result = pipeline.isolate(
+                [os.path.join(self.tmp_dir, "gone.mp3")], instruments=["drums"]
+            )
+
+        mock_drums.assert_not_called()
+        self.assertEqual(result["songs"], [])
+
+    def test_cancelling_stops_it(self):
+        with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
+            result = pipeline.isolate(
+                [self.song], instruments=["drums"], should_cancel=lambda: True
+            )
+
+        mock_drums.assert_not_called()
+        self.assertTrue(result["cancelled"])
 
 
 class TestMissingFfmpeg(PipelineTestCase):
