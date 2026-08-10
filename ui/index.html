@@ -870,6 +870,13 @@
   function openPicker(song) {
     closePicker();
     el("picker").hidden = false;
+    // The link box has focus at this point - it's autofocused on load, and
+    // it's where a link was just typed or a song's name was just put. Space
+    // typed into a text box is a space, so the keydown handler below has to
+    // ignore it there, which left the whole interaction dead: the picker
+    // open, the hint saying "hit space", and space doing nothing. Letting it
+    // go is the fix; from here the page's only job is listening.
+    el("url").blur();
     el("picker-title").textContent = song.title;
     el("picker-hint").textContent = "Getting the audio...";
 
@@ -1068,7 +1075,10 @@
   // the picker is open, and never while a link is being typed into the box.
   document.addEventListener("keydown", (event) => {
     if (event.code !== "Space" || el("picker").hidden) return;
-    if (document.activeElement === el("url")) return;
+    // Somewhere you can type is the one place a space is a space.
+    const typing = document.activeElement;
+    if (typing && (typing.tagName === "INPUT" || typing.tagName === "TEXTAREA")) return;
+    // Stops a space from also pressing whatever button was last clicked.
     event.preventDefault();
     markEnd();
   });
