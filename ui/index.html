@@ -163,6 +163,15 @@
     border-color: var(--violet);
     color: var(--violet);
   }
+  /* Already in the stash. Not a state you can click into or out of - the
+     only way to clear it is to delete the file - so it doesn't respond to
+     hover and doesn't take the armed colour. */
+  .pad[data-have="true"] {
+    background: rgba(95, 211, 154, 0.12);
+    border-color: var(--good);
+    color: var(--good);
+    cursor: default;
+  }
   .pad:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
 
   .extras {
@@ -396,6 +405,27 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* The same six things as the Take section, in the same order, so a
+     glance down the list and a glance up at the pads mean the same thing.
+     Green is in the stash; clicking one reveals that exact file. */
+  .marks { display: flex; gap: 3px; flex: none; }
+  .mark {
+    width: 13px;
+    height: 13px;
+    padding: 0;
+    border-radius: 3px;
+    background: transparent;
+    border: 1px solid var(--edge);
+    cursor: default;
+  }
+  .mark[data-have="true"] {
+    background: var(--good);
+    border-color: var(--good);
+    cursor: pointer;
+  }
+  .mark[data-have="true"]:hover { background: #8ce7bd; }
+  .mark:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+
   .again {
     flex: none;
     padding: 5px 10px;
@@ -500,20 +530,22 @@
 
     <section>
       <p class="label">Take</p>
+      <!--
+        Six things, in the order they're shown everywhere: Song, Drums,
+        Beat, Bass, Harmony, Vocals. Grey means not armed, purple means
+        armed for this run, green means it's already in the stash - and
+        green can only be cleared by deleting the file, never by clicking.
+      -->
       <div class="pads">
-        <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="true">Drums</button>
+        <button class="pad" id="pad-song" data-stem="song" aria-pressed="true">Song</button>
+        <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="false">Drums</button>
+        <button class="pad" id="pad-beat" data-stem="beat" aria-pressed="false">Beat</button>
         <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
         <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
         <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
       </div>
-      <!--
-        No "keep the song too" toggle: the song is always downloaded and
-        always kept. Deleting it afterwards would leave its entry in
-        yt-dlp's download archive, so the next run would skip the download,
-        find no mp3, and quietly isolate nothing.
-      -->
       <div class="extras">
-        <span class="aside">All four rebuild the song.</span>
+        <span class="aside" id="take-note">All four stems rebuild the song.</span>
       </div>
     </section>
 
@@ -626,67 +658,141 @@
     list.replaceChildren(...songs.map(renderSong));
   }
 
-  // Stems are counted rather than listed: the mp3 is always there and is
-  // not a stem, so what's worth knowing is how many of the four have been
-  // taken so far.
-  function stemCount(song) {
-    return (song.files || []).filter((path) => /\(Isolated /.test(path)).length;
-  }
-
   function renderSong(song) {
     const item = document.createElement("li");
     item.className = "song";
 
     const open = document.createElement("button");
     open.className = "song-open";
-    open.title = song.dir ? "Show this song's folder in Finder" : song.song;
+    open.title = "Show this song's folder in Finder";
 
     const title = document.createElement("span");
     title.className = "song-title";
     title.textContent = song.title;
     open.append(title);
 
-    const meta = document.createElement("span");
-    meta.className = "song-meta";
     const tempo = tempoOf(song.files || []);
-    const stems = stemCount(song);
-    meta.textContent = [
-      tempo ? tempo + " BPM" : null,
-      stems ? stems + (stems === 1 ? " stem" : " stems") : "song only",
-    ].filter(Boolean).join("  ·  ");
-    open.append(meta);
+    if (tempo) {
+      const meta = document.createElement("span");
+      meta.className = "song-meta";
+      meta.textContent = tempo + " BPM";
+      open.append(meta);
+    }
 
     open.addEventListener("click", () => window.pywebview.api.reveal(song.dir || song.song));
     item.append(open);
 
-    if (song.drums) {
-      const steal = document.createElement("button");
-      steal.className = "again";
-      steal.textContent = "Steal a beat";
-      steal.title = "Pick a phrase out of this song's drums";
-      steal.addEventListener("click", () => openPicker(song));
-      item.append(steal);
+    // The same six squares as the Take section, in the same order.
+    const marks = document.createElement("div");
+    marks.className = "marks";
+    for (const thing of STASH_ORDER) {
+      const path = (song.have || {})[thing];
+      const mark = document.createElement("button");
+      mark.className = "mark";
+      mark.dataset.have = path ? "true" : "false";
+      mark.title = path ? LABELS[thing] + " — click to show it in Finder" : "No " + LABELS[thing].toLowerCase() + " yet";
+      if (path) mark.addEventListener("click", () => window.pywebview.api.reveal(path));
+      marks.append(mark);
     }
+    item.append(marks);
 
-    if (song.url) {
-      const again = document.createElement("button");
-      again.className = "again";
-      again.textContent = "Get more";
-      again.title = "Put this song's link back in the box";
-      again.addEventListener("click", () => {
-        el("url").value = song.url;
-        el("url").focus();
-        el("message").textContent = "Link ready — arm what you want and take it.";
-        window.scrollTo({ top: 0, behavior: "smooth" });
-      });
-      item.append(again);
-    }
+    const take = document.createElement("button");
+    take.className = "again";
+    take.textContent = "Take more";
+    take.title = "Point the Take section at this song";
+    take.addEventListener("click", () => selectSong(song));
+    item.append(take);
 
     return item;
   }
 
+  // --- what's armed, and what's already in the stash ---------------------
+
+  const STASH_ORDER = ["song", "drums", "beat", "bass", "harmony", "vocals"];
+  const LABELS = {
+    song: "Song", drums: "Drums", beat: "Beat",
+    bass: "Bass", harmony: "Harmony", vocals: "Vocals",
+  };
+
+  // What each thing needs before it can exist. A beat is cut out of the
+  // drum stem, and every stem is separated out of the song, so arming one
+  // arms what it's made from.
+  const NEEDS = {
+    song: [],
+    drums: ["song"], bass: ["song"], harmony: ["song"], vocals: ["song"],
+    beat: ["song", "drums"],
+  };
+
+  let selected = null;   // the song the Take section is pointed at, if any
+
+  function padFor(thing) { return el("pad-" + thing); }
+  function isArmed(thing) { return padFor(thing).getAttribute("aria-pressed") === "true"; }
+  function have(thing) { return padFor(thing).dataset.have === "true"; }
+
+  function setArmed(thing, on) {
+    // Something already in the stash is never armed - it isn't re-taken.
+    padFor(thing).setAttribute("aria-pressed", on && !have(thing) ? "true" : "false");
+  }
+
+  function togglePad(thing) {
+    if (have(thing)) return;               // green isn't a state you click out of
+    if (isArmed(thing)) {
+      setArmed(thing, false);
+    } else {
+      setArmed(thing, true);
+      for (const needed of NEEDS[thing]) setArmed(needed, true);
+    }
+    describeTake();
+  }
+
+  function selectSong(song) {
+    selected = song;
+    el("url").value = song.title;
+    for (const thing of STASH_ORDER) {
+      padFor(thing).dataset.have = (song.have || {})[thing] ? "true" : "false";
+      setArmed(thing, false);
+    }
+    describeTake();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function clearSelection() {
+    selected = null;
+    for (const thing of STASH_ORDER) {
+      padFor(thing).dataset.have = "false";
+      setArmed(thing, thing === "song");
+    }
+    describeTake();
+  }
+
+  function describeTake() {
+    const armed = STASH_ORDER.filter(isArmed);
+    el("take-note").textContent = selected
+      ? (armed.length ? "Taking " + armed.map((t) => LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
+                      : "Nothing armed — everything for this song is already in the stash.")
+      : "All four stems rebuild the song.";
+  }
+
+  let lastLibrary = null;
+
   function refreshLibrary() {
-    window.pywebview.api.library().then(renderLibrary);
+    return window.pywebview.api.library().then((songs) => {
+      lastLibrary = songs;
+      renderLibrary(songs);
+      // Keep the pads honest about a song that just gained something.
+      if (selected) {
+        const fresh = songs.find((s) => s.song === selected.song);
+        if (fresh) {
+          selected = fresh;
+          for (const thing of STASH_ORDER) {
+            padFor(thing).dataset.have = (fresh.have || {})[thing] ? "true" : "false";
+            if (have(thing)) setArmed(thing, false);
+          }
+          describeTake();
+        }
+      }
+      return songs;
+    });
   }
 
   // The path reads right-to-left (see the CSS) so that a long path gets
@@ -767,7 +873,7 @@
     el("picker-title").textContent = song.title;
     el("picker-hint").textContent = "Getting the audio...";
 
-    window.pywebview.api.audition(song.drums).then((prepared) => {
+    window.pywebview.api.audition(song.have.drums).then((prepared) => {
       if (prepared.error) { el("picker-hint").textContent = prepared.error; return; }
       picker = { song, peaks: prepared.peaks, duration: prepared.duration, start: null, end: null };
       el("picker-hint").textContent = "Click where the phrase starts, press play, then hit space at its end.";
@@ -812,7 +918,7 @@
     el("mark").disabled = true;
     drawWave();
 
-    window.pywebview.api.steal_beat(picker.song.drums, picker.start, end).then((loop) => {
+    window.pywebview.api.steal_beat(picker.song.have.drums, picker.start, end).then((loop) => {
       el("mark").disabled = false;
       if (loop.error) { el("picker-hint").textContent = loop.error; return; }
       el("picker-hint").textContent =
@@ -830,16 +936,38 @@
       if (!state.running && polling) {
         clearInterval(polling);
         polling = null;
-        refreshLibrary();
+        refreshLibrary().then(() => {
+          // The drums are there now, so the phrase can be picked.
+          const waiting = pendingBeatFor;
+          pendingBeatFor = null;
+          if (waiting && !state.error && !state.cancelled) {
+            const fresh = (lastLibrary || []).find((s) => s.song === waiting.song);
+            if (fresh && fresh.have && fresh.have.drums) openPicker(fresh);
+          }
+        });
       }
     });
   }
 
   function start() {
     const options = {};
-    document.querySelectorAll(".pad").forEach((pad) => {
-      options[pad.dataset.stem] = pad.getAttribute("aria-pressed") === "true";
-    });
+    for (const thing of STASH_ORDER) options[thing] = isArmed(thing);
+
+    // "Beat" isn't something a run can produce - it needs you to hear the
+    // phrase - so it's dropped from what's asked for and remembered as
+    // what to do once the drums exist.
+    const wantsBeat = options.beat;
+    delete options.beat;
+
+    if (selected) {
+      options.song = selected.song;
+      // Nothing left to separate: go straight to the picker.
+      if (wantsBeat && !options.drums && selected.have && selected.have.drums) {
+        openPicker(selected);
+        return;
+      }
+    }
+    pendingBeatFor = wantsBeat ? selected : null;
 
     window.pywebview.api.start(el("url").value, options).then((state) => {
       render(state);
@@ -847,13 +975,18 @@
     });
   }
 
+  // A song whose beat was armed, waiting for its drums to finish.
+  let pendingBeatFor = null;
+
   // --- wiring ------------------------------------------------------------
 
   document.querySelectorAll(".pad").forEach((pad) => {
-    pad.addEventListener("click", () => {
-      pad.setAttribute("aria-pressed", pad.getAttribute("aria-pressed") === "true" ? "false" : "true");
-    });
+    pad.addEventListener("click", () => togglePad(pad.dataset.stem));
   });
+
+  // Typing a link is starting over on a new song, so the stash colours from
+  // whatever was selected before don't apply any more.
+  el("url").addEventListener("input", () => { if (selected) clearSelection(); });
 
   el("go").addEventListener("click", () => {
     if (running) window.pywebview.api.cancel().then(render);
@@ -912,6 +1045,9 @@
 
   window.addEventListener("pywebviewready", () => {
     poll();
+    // Song armed, nothing green, nothing selected - the state a pasted
+    // link starts from.
+    clearSelection();
     refreshLibrary();
     // Before any run there's no state to take it from, so ask directly -
     // the folder is worth offering on an empty first launch too.

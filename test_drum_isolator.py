@@ -30,7 +30,8 @@ class TestIsolateDrums(unittest.TestCase):
         self.mp3_path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
         with open(self.mp3_path, "wb") as f:
             f.write(b"fake mp3 bytes")
-        self.song_dir = os.path.join(self.tmp_dir, "Song - Artist (Isolated)")
+        # Everything for a song lives in the mp3's own folder now.
+        self.song_dir = self.tmp_dir
 
     def tearDown(self):
         instrument_isolator.clear_stem_cache()
@@ -87,7 +88,6 @@ class TestIsolateDrums(unittest.TestCase):
 
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
-        os.makedirs(self.song_dir)
         basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
@@ -102,7 +102,6 @@ class TestIsolateDrums(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reruns_when_a_wav_is_there_but_no_marker_confirms_it(self, mock_alignment, mock_run_demucs, mock_trim):
-        os.makedirs(self.song_dir)
         basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
@@ -125,7 +124,6 @@ class TestIsolateDrums(unittest.TestCase):
     def test_reruns_and_replaces_stale_outputs_when_the_source_mp3_marker_does_not_match(
         self, mock_alignment, mock_run_demucs, mock_trim
     ):
-        os.makedirs(self.song_dir)
         stale = "Song - Artist (Isolated Drums at 90.000 BPM)"
         with open(os.path.join(self.song_dir, stale + ".wav"), "wb") as f:
             f.write(b"x")

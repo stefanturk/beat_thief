@@ -16,7 +16,8 @@ class TestIsolateHarmony(unittest.TestCase):
         self.mp3_path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
         with open(self.mp3_path, "wb") as f:
             f.write(b"fake mp3 bytes")
-        self.song_dir = os.path.join(self.tmp_dir, "Song - Artist (Isolated)")
+        # Everything for a song lives in the mp3's own folder now.
+        self.song_dir = self.tmp_dir
 
     def tearDown(self):
         instrument_isolator.clear_stem_cache()
@@ -53,7 +54,6 @@ class TestIsolateHarmony(unittest.TestCase):
 
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
-        os.makedirs(self.song_dir)
         basename = "Song - Artist (Isolated Harmony)"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
@@ -68,7 +68,6 @@ class TestIsolateHarmony(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reprocesses_when_the_marker_is_missing(self, mock_alignment, mock_run_demucs, mock_trim):
-        os.makedirs(self.song_dir)
         basename = "Song - Artist (Isolated Harmony)"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
@@ -87,7 +86,6 @@ class TestIsolateHarmony(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reprocesses_when_the_marker_does_not_match(self, mock_alignment, mock_run_demucs, mock_trim):
-        os.makedirs(self.song_dir)
         basename = "Song - Artist (Isolated Harmony)"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
@@ -128,7 +126,6 @@ class TestIsolateHarmony(unittest.TestCase):
     def test_a_harmony_file_from_before_vocals_were_split_out_is_rebuilt(self, mock_alignment, mock_run_demucs, mock_trim):
         # Those files still have the vocals in them. Their old marker would
         # otherwise pass them off as current forever.
-        os.makedirs(self.song_dir)
         basename = "Song - Artist (Isolated Harmony)"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
