@@ -23,6 +23,9 @@ import os
 import subprocess
 import threading
 
+import audition
+import beat_loop
+import instrument_isolator
 import pipeline
 
 UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
@@ -149,6 +152,46 @@ class Api:
 
     def default_output_dir(self) -> str:
         return DEFAULT_OUTPUT
+
+    # --- stealing a beat out of a stem ----------------------------------
+
+    def audition(self, wav_path: str) -> dict:
+        """The drum stem, ready to play and draw in the page.
+
+        Slow the first time (a transcode and a decode, about three
+        seconds), instant afterwards - see audition.preview. pywebview runs
+        these calls off the UI thread, so the window stays alive through
+        it, and the page shows its own "getting the audio" state."""
+        try:
+            return audition.preview(wav_path)
+        except Exception as e:
+            return {"error": str(e) or e.__class__.__name__}
+
+    def steal_beat(self, wav_path: str, start_sec: float, end_sec: float) -> dict:
+        """Turn the marked section into a looping .mid next to the stem.
+
+        The tempo is read back out of the stem's own filename rather than
+        estimated here, so a stolen loop and the stem it came from can't
+        disagree about what tempo the song is."""
+        try:
+            song_dir = os.path.dirname(wav_path)
+            basename = os.path.splitext(os.path.basename(wav_path))[0]
+            tempo = instrument_isolator.parse_tempo_from_basename(basename)
+            title = basename.split(" (Isolated")[0]
+
+            loop = beat_loop.build(wav_path, tempo, float(start_sec), float(end_sec))
+            path = beat_loop.write(loop, song_dir, title)
+        except Exception as e:
+            return {"error": str(e) or e.__class__.__name__}
+
+        return {
+            "path": path,
+            "name": os.path.basename(path),
+            "bars": loop.bars,
+            "tempo": tempo,
+            "hits": loop.hits_used,
+            "pieces": sorted({hit.piece for hit in loop.beat.hits}),
+        }
 
     # --- internals -----------------------------------------------------
 

@@ -68,6 +68,14 @@ class PipelineTestCase(unittest.TestCase):
         )
         self.mock_sanitize = sanitize.start()
         self.addCleanup(sanitize.stop)
+        # Every run through the pipeline records what it downloaded, and
+        # without this that lands in the real history file in Application
+        # Support. It caps at 200 entries, so a few test runs were enough
+        # to push every song the user actually owns out of it and empty
+        # the app's Files panel.
+        recorded = mock.patch("history.HISTORY_PATH", os.path.join(self.tmp_dir, "history.json"))
+        recorded.start()
+        self.addCleanup(recorded.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -296,6 +304,23 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
 
         song = os.path.join(self.tmp_dir, "Some Song - Artist.mp3")
         self.assertEqual(history.url_for(song, self.history_path), "https://example.com/song")
+
+    def test_a_song_no_longer_on_disk_does_not_take_up_a_slot(self):
+        # History caps at 200 and library() shows 20. A run of entries for
+        # songs that have been deleted used to fill that window and leave
+        # the panel empty even though real songs were sitting behind them.
+        real = os.path.join(self.tmp_dir, "Real Song - Artist.mp3")
+        with open(real, "wb") as f:
+            f.write(b"x")
+        history.remember("https://example.com/real", [real])
+        history.remember(
+            "https://example.com/gone",
+            [os.path.join(self.tmp_dir, f"gone-{i}.mp3") for i in range(30)],
+        )
+
+        listed = pipeline.library(limit=5)
+
+        self.assertEqual([song["song"] for song in listed], [real])
 
     def test_the_library_lists_the_song_with_its_link_and_its_files(self):
         song_dir = os.path.join(self.tmp_dir, "Some Song - Artist (Isolated)")
