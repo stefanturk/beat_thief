@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -247,6 +248,38 @@ class TestApiReveal(unittest.TestCase):
         mock_run.assert_called_once_with(["open", song_dir], check=False)
 
     @mock.patch("subprocess.run")
+    def test_the_output_folder_is_created_before_it_is_opened(self, mock_run):
+        # It's offered on a first launch, before anything has been
+        # downloaded, so the folder genuinely may not exist yet. A button
+        # that silently does nothing is worse than no button.
+        path = os.path.join(self.tmp_dir, "not made yet")
+
+        api = gui.Api(run_pipeline=lambda *a, **k: {})
+
+        self.assertTrue(api.open_output_dir(path))
+        self.assertTrue(os.path.isdir(path))
+        mock_run.assert_called_once_with(["open", path], check=False)
+
+    @mock.patch("subprocess.run")
+    def test_opening_with_no_path_falls_back_to_the_default(self, mock_run):
+        api = gui.Api(run_pipeline=lambda *a, **k: {})
+
+        with mock.patch("os.makedirs") as mock_makedirs:
+            api.open_output_dir("")
+
+        mock_makedirs.assert_called_once_with(gui.DEFAULT_OUTPUT, exist_ok=True)
+        mock_run.assert_called_once_with(["open", gui.DEFAULT_OUTPUT], check=False)
+
+    @mock.patch("subprocess.run")
+    def test_a_folder_that_cannot_be_made_is_reported_rather_than_raising(self, mock_run):
+        api = gui.Api(run_pipeline=lambda *a, **k: {})
+
+        with mock.patch("os.makedirs", side_effect=OSError("read-only")):
+            self.assertFalse(api.open_output_dir("/nope"))
+
+        mock_run.assert_not_called()
+
+    @mock.patch("subprocess.run")
     def test_a_missing_file_is_not_handed_to_finder(self, mock_run):
         api = gui.Api(run_pipeline=lambda *a, **k: {})
 
@@ -299,6 +332,18 @@ class TestLibrary(unittest.TestCase):
 class TestUiFile(unittest.TestCase):
     def test_the_page_the_window_loads_actually_exists(self):
         self.assertTrue(os.path.exists(gui.UI_FILE), gui.UI_FILE)
+
+    def test_every_api_method_the_page_calls_is_one_the_api_has(self):
+        # The page reaches Python by name through pywebview, so a renamed or
+        # missing method fails silently in a JS promise nobody is watching -
+        # the button just does nothing. Nothing else catches that.
+        with open(gui.UI_FILE) as page:
+            called = set(re.findall(r"pywebview\.api\.(\w+)", page.read()))
+
+        self.assertTrue(called)
+        for name in sorted(called):
+            with self.subTest(method=name):
+                self.assertTrue(callable(getattr(gui.Api, name, None)))
 
 
 if __name__ == "__main__":
