@@ -1,5 +1,8 @@
 downloads/
 .downloaded_archive.txt
+# Symlink to ~/Music/Beat Thief, for getting at the output from in here.
+# Points at one machine's home directory, so it's local-only.
+Beat Thief
 Duplicates/
 Drums/
 Bass/

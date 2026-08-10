@@ -120,6 +120,23 @@ class Api:
         subprocess.run(["open", path] if os.path.isdir(path) else ["open", "-R", path], check=False)
         return True
 
+    def open_output_dir(self, path: str = "") -> bool:
+        """Open the folder everything is saved to, creating it first if it
+        isn't there yet.
+
+        Separate from reveal() because this one is offered before anything
+        has been downloaded - on a first launch the folder genuinely doesn't
+        exist, and a button that silently does nothing is worse than no
+        button. reveal() must keep refusing a path that isn't there, since
+        for a file that means it was deleted or moved."""
+        path = path or DEFAULT_OUTPUT
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError:
+            return False
+        subprocess.run(["open", path], check=False)
+        return True
+
     def library(self) -> list:
         """Recently downloaded songs with their files and their original
         links, so the page can offer to go back for another stem."""

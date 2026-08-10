@@ -305,15 +305,44 @@
 
   .files { border-top: 1px solid var(--edge); padding: 18px 22px 22px; }
 
-  #empty { color: #5b5d64; font-size: 12.5px; margin: 0; }
+  #empty { color: #5b5d64; font-size: 12.5px; margin: 0 0 12px; }
 
+  /* Always here, whether or not this session downloaded anything. The
+     folder is the one thing you always want to reach - it's where every
+     previous session's work is too, and an empty list used to be a dead
+     end that told you where your files were without offering to show you. */
   #destination {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    width: 100%;
+    margin: 14px 0 0;
+    padding: 0;
+    background: none;
+    border: none;
+    color: #4a4d55;
     font-family: var(--display);
     font-size: 10px;
-    color: #4a4d55;
-    margin: 12px 0 0;
-    word-break: break-all;
+    text-align: left;
+    cursor: pointer;
   }
+  #destination:hover { color: var(--violet); }
+  #destination:focus-visible { outline: 2px solid var(--violet); outline-offset: 3px; }
+  #destination .where {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;  /* keep the folder name visible when the path is long */
+    text-align: left;
+  }
+  #destination .open {
+    flex: none;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  #destination:hover .open { color: var(--violet); }
 
   ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 
@@ -434,9 +463,11 @@
 
   <section class="files">
     <p class="label">Files</p>
-    <p id="empty">Nothing yet. Songs you take land here, ready to drag into Ableton.</p>
+    <p id="empty">Nothing yet this session.</p>
     <ul id="outputs"></ul>
-    <p id="destination"></p>
+    <button id="destination" type="button" title="Open this folder in Finder">
+      <span class="where"></span><span class="open">Open</span>
+    </button>
   </section>
 
 <script>
@@ -503,7 +534,7 @@
 
     el("go").textContent = state.running ? "Stop" : "Steal it";
     el("go").dataset.mode = state.running ? "cancel" : "go";
-    if (state.output_dir) el("destination").textContent = "Saving to " + state.output_dir;
+    if (state.output_dir) setDestination(state.output_dir);
   }
 
   // Songs are listed rather than loose files so "go back for another stem"
@@ -569,6 +600,14 @@
     window.pywebview.api.library().then(renderLibrary);
   }
 
+  // The path reads right-to-left (see the CSS) so that a long path gets
+  // clipped at its front rather than losing the folder name at the end.
+  // That flips a leading "/" to the wrong side, so the bidi marker pins it.
+  function setDestination(dir) {
+    el("destination").querySelector(".where").textContent = "\u202A" + dir;
+    el("destination").dataset.dir = dir;
+  }
+
   // --- talking to Python -------------------------------------------------
 
   function poll() {
@@ -625,9 +664,16 @@
     el("unit").textContent = "BPM — copied";
   });
 
+  el("destination").addEventListener("click", () => {
+    window.pywebview.api.open_output_dir(el("destination").dataset.dir || "");
+  });
+
   window.addEventListener("pywebviewready", () => {
     poll();
     refreshLibrary();
+    // Before any run there's no state to take it from, so ask directly -
+    // the folder is worth offering on an empty first launch too.
+    window.pywebview.api.default_output_dir().then(setDestination);
   });
 </script>
 </body>
