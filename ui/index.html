@@ -960,7 +960,9 @@
     delete options.beat;
 
     if (selected) {
-      options.song = selected.song;
+      // "source", not "song": every other key here is an armed/not flag,
+      // and one of the squares is called Song.
+      options.source = selected.song;
       // Nothing left to separate: go straight to the picker.
       if (wantsBeat && !options.drums && selected.have && selected.have.drums) {
         openPicker(selected);
@@ -972,8 +974,20 @@
     window.pywebview.api.start(el("url").value, options).then((state) => {
       render(state);
       if (state.running && !polling) polling = setInterval(poll, 250);
-    });
+    }).catch(complain);
   }
+
+  // A call into Python that raises rejects the promise, and a rejection
+  // nobody catches is silent - the button looks broken and the page says
+  // "Ready". Anything that goes wrong across the bridge gets said out loud.
+  function complain(problem) {
+    body.dataset.state = "error";
+    el("state-text").textContent = "Stopped";
+    el("message").textContent = String(problem && problem.message || problem);
+    setFigure("···", "Stopped", false);
+  }
+
+  window.addEventListener("unhandledrejection", (event) => complain(event.reason));
 
   // A song whose beat was armed, waiting for its drums to finish.
   let pendingBeatFor = null;

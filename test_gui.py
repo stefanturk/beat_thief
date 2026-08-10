@@ -69,7 +69,7 @@ class TestApiStart(unittest.TestCase):
             isolate_pipeline=lambda songs, **kwargs: calls.update(kwargs, songs=songs) or {"outputs": []},
         )
 
-        api.start("", {"song": "/songs/Track/Track.mp3", "bass": True})
+        api.start("", {"source": "/songs/Track/Track.mp3", "bass": True})
         _wait_until(lambda: not api.status()["running"])
 
         self.assertEqual(calls["songs"], ["/songs/Track/Track.mp3"])
@@ -78,7 +78,7 @@ class TestApiStart(unittest.TestCase):
     def test_a_stash_song_with_nothing_armed_says_so(self):
         api = gui.Api(isolate_pipeline=lambda *a, **k: self.fail("nothing to do"))
 
-        state = api.start("", {"song": "/songs/Track/Track.mp3"})
+        state = api.start("", {"source": "/songs/Track/Track.mp3"})
 
         self.assertFalse(state["running"])
         self.assertIn("armed", state["error"].lower())
@@ -101,6 +101,58 @@ class TestApiStart(unittest.TestCase):
         _wait_until(lambda: not api.status()["running"])
 
         self.assertEqual(calls["instruments"], ["drums", "bass", "harmony", "vocals"])
+
+    def test_the_options_the_page_actually_sends_are_understood(self):
+        # The page sends one boolean per square, and Song is a square. A
+        # "song" key that was sometimes a flag and sometimes a path meant
+        # every click of Steal it raised inside start(), which rejects the
+        # promise the page is waiting on - so the button did nothing at all
+        # and the window went on saying "Ready". This is that exact shape.
+        calls = {}
+
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs, url=url) or {"outputs": []})
+        state = api.start(
+            "https://example.com/song",
+            {"song": True, "drums": True, "bass": False, "harmony": False, "vocals": False},
+        )
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertTrue(state["running"])
+        self.assertEqual(state["error"], "")
+        self.assertEqual(calls["url"], "https://example.com/song")
+        self.assertEqual(calls["instruments"], ["drums"])
+
+    def test_a_song_flag_is_not_mistaken_for_a_song_path(self):
+        # Same shape, but pointed at something already in the stash: the
+        # path comes from "source", and the Song square's flag alongside it
+        # doesn't change where it looks.
+        calls = {}
+        api = gui.Api(
+            run_pipeline=lambda *a, **k: self.fail("should not have downloaded"),
+            isolate_pipeline=lambda songs, **kwargs: calls.update(kwargs, songs=songs) or {"outputs": []},
+        )
+
+        api.start("Track", {"source": "/songs/Track/Track.mp3", "song": True, "bass": True})
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["songs"], ["/songs/Track/Track.mp3"])
+        self.assertEqual(calls["instruments"], ["bass"])
+
+    def test_taking_more_from_the_stash_does_not_claim_it_was_downloaded(self):
+        # isolate() reports the song it worked on and nothing downloaded,
+        # which through run()'s wording came out as "you already had this
+        # one downloaded" - true of the mp3, misleading about the stem that
+        # was just made.
+        api = gui.Api(
+            isolate_pipeline=lambda songs, **k: {
+                "songs": list(songs), "downloaded": 0,
+                "outputs": ["/songs/Track/Track (Isolated Bass at 96.000 BPM).wav"],
+            },
+        )
+        api.start("", {"source": "/songs/Track/Track.mp3", "bass": True})
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(api.status()["message"], "Done.")
 
     def test_the_gui_always_runs_non_interactively(self):
         calls = {}
