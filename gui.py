@@ -75,12 +75,17 @@ class Api:
         """Begin a run. Returns the state the page should show right away,
         so a click feels immediate rather than waiting on a network probe.
 
-        options may carry a "song": the path of something already in the
+        options may carry a "source": the path of something already in the
         stash. Given one, this takes more from that song and never goes
         near the network - no download to do, and for a song whose link was
-        never recorded there'd be no link to use anyway."""
+        never recorded there'd be no link to use anyway.
+
+        It's "source" rather than "song" because the rest of options is one
+        armed/not flag per square, and one of the squares is called Song -
+        a single key can't be both a boolean and a path."""
         options = options or {}
-        song = (options.get("song") or "").strip()
+        source = options.get("source")
+        song = source.strip() if isinstance(source, str) else ""
         url = (url or "").strip()
         if not song and not url:
             return self._fail("Paste a link first.")
@@ -252,10 +257,14 @@ class Api:
             else:
                 self._state["stage"] = "done"
                 self._state["percent"] = 100
-                self._state["message"] = self._done_message(result)
+                self._state["message"] = self._done_message(result, bool(song))
 
     @staticmethod
-    def _done_message(result: dict) -> str:
+    def _done_message(result: dict, from_stash: bool = False) -> str:
+        if from_stash:
+            # Nothing was downloaded because there was nothing to download,
+            # so neither counter means here what it means after a run.
+            return "Done." if result.get("outputs") else "Nothing came back for that song."
         if result.get("downloaded"):
             return "Done."
         if result.get("songs"):
