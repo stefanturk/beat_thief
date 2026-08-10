@@ -219,8 +219,11 @@ def _instrument_outputs(mp3_path: str, label: str) -> list[str]:
     basename = instrument_isolator.find_existing_basename(song_dir, label)
     if basename is None:
         return []
-    candidates = [os.path.join(song_dir, basename + ext) for ext in (".wav", ".mid")]
-    return [path for path in candidates if os.path.exists(path)]
+    # Just the wav. An isolator produces nothing else now that whole-song
+    # MIDI is gone - and a leftover .mid from an older version alongside it
+    # is exactly the stale file that shouldn't be offered as fresh output.
+    wav_path = os.path.join(song_dir, basename + ".wav")
+    return [wav_path] if os.path.exists(wav_path) else []
 
 
 def library(limit: int = 20) -> list[dict]:
