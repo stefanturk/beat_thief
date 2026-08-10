@@ -233,8 +233,16 @@ def library(limit: int = 20) -> list[dict]:
     Files are read from disk rather than remembered, so a stem deleted in
     Finder simply stops being listed."""
     songs = []
-    for entry in history.entries()[:limit]:
+    for entry in history.entries():
+        if len(songs) >= limit:
+            break
         song_path = entry["song"]
+        # A song that isn't on disk any more has nothing to offer, and
+        # listing it would cost one of the slots a real song wants. Filtered
+        # here rather than trimmed first, so a run of dead entries can't
+        # crowd out the songs behind them.
+        if not os.path.exists(song_path):
+            continue
         files = [song_path]
 
         song_dir = instrument_isolator.song_output_dir(song_path)
@@ -257,6 +265,14 @@ def library(limit: int = 20) -> list[dict]:
                 # folder together, so the folder is the thing, not any one
                 # wav in it. Empty until the song has been isolated at all.
                 "dir": song_dir if os.path.isdir(song_dir) else "",
+                # The drum stem, if this song has one - what a beat gets
+                # stolen out of. Empty means the song hasn't been separated
+                # yet, and the front end can say so rather than offering a
+                # button that can't work.
+                "drums": next(
+                    (path for path in files if drum_isolator._LABEL in path and path.endswith(".wav")),
+                    "",
+                ),
                 "files": files,
             }
         )

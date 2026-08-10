@@ -412,6 +412,72 @@
   .again:hover { background: var(--violet-dim); }
   .again:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
 
+  /* The picker. A beat is found by ear, so this is built to be listened
+     to: the waveform is there to get you near the phrase, not to be read
+     precisely. Everything precise happens in the transcription after. */
+  .picker {
+    margin-top: 10px;
+    padding: 12px;
+    background: #0d0e11;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+  }
+  .picker[hidden] { display: none; }
+
+  .picker-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-family: var(--display);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  #picker-hint { color: #5b5d64; letter-spacing: 0.04em; text-transform: none; font-size: 11px; }
+
+  #wave {
+    display: block;
+    width: 100%;
+    height: 78px;
+    background: #0a0b0d;
+    border-radius: 4px;
+    cursor: crosshair;
+  }
+
+  .picker-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 10px;
+  }
+  .picker-controls button {
+    padding: 8px 14px;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    color: var(--ink);
+    font-family: var(--display);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    cursor: pointer;
+  }
+  .picker-controls button:hover { border-color: var(--violet); color: var(--violet); }
+  .picker-controls button:disabled { opacity: 0.4; cursor: default; border-color: var(--edge); color: var(--dim); }
+  #mark { border-color: var(--violet); color: var(--violet); }
+  #mark:hover { background: var(--violet-dim); }
+
+  #clock {
+    margin-left: auto;
+    font-family: var(--display);
+    font-size: 11px;
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+
   @media (prefers-reduced-motion: reduce) {
     * { animation: none !important; transition: none !important; }
   }
@@ -465,6 +531,20 @@
     <p class="label">Files</p>
     <p id="empty">Nothing yet this session.</p>
     <ul id="outputs"></ul>
+
+    <section class="picker" id="picker" hidden>
+      <div class="picker-head">
+        <span id="picker-title">Steal a beat</span>
+        <span id="picker-hint">Click where the phrase starts, press play, then hit space at its end.</span>
+      </div>
+      <canvas id="wave" width="1000" height="156"></canvas>
+      <div class="picker-controls">
+        <button id="play" type="button">Play</button>
+        <button id="mark" type="button" disabled>Mark the end</button>
+        <button id="picker-close" type="button">Close</button>
+        <span id="clock">0:00</span>
+      </div>
+    </section>
     <button id="destination" type="button" title="Open this folder in Finder">
       <span class="where"></span><span class="open">Open</span>
     </button>
@@ -579,6 +659,15 @@
     open.addEventListener("click", () => window.pywebview.api.reveal(song.dir || song.song));
     item.append(open);
 
+    if (song.drums) {
+      const steal = document.createElement("button");
+      steal.className = "again";
+      steal.textContent = "Steal a beat";
+      steal.title = "Pick a phrase out of this song's drums";
+      steal.addEventListener("click", () => openPicker(song));
+      item.append(steal);
+    }
+
     if (song.url) {
       const again = document.createElement("button");
       again.className = "again";
@@ -606,6 +695,131 @@
   function setDestination(dir) {
     el("destination").querySelector(".where").textContent = "\u202A" + dir;
     el("destination").dataset.dir = dir;
+  }
+
+  // --- the picker --------------------------------------------------------
+  //
+  // A beat is found by ear. The waveform gets you near the phrase; you
+  // start it playing and hit space where it ends. Nothing here decides
+  // anything musical - it only collects two times and hands them over.
+
+  const wave = el("wave");
+  const audio = new Audio();
+  let picker = null;     // { song, peaks, duration, start, end }
+  let raf = null;
+
+  function clock(seconds) {
+    if (!isFinite(seconds)) return "0:00";
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return m + ":" + String(s).padStart(2, "0");
+  }
+
+  function drawWave() {
+    const ctx = wave.getContext("2d");
+    const w = wave.width, h = wave.height;
+    ctx.clearRect(0, 0, w, h);
+    if (!picker) return;
+
+    const peaks = picker.peaks;
+    const mid = h / 2;
+    const barW = w / peaks.length;
+
+    // The marked region, painted behind the waveform so it reads as
+    // highlight rather than as another wave.
+    if (picker.start !== null) {
+      const from = (picker.start / picker.duration) * w;
+      const to = ((picker.end === null ? audio.currentTime : picker.end) / picker.duration) * w;
+      ctx.fillStyle = "rgba(167, 139, 250, 0.16)";
+      ctx.fillRect(Math.min(from, to), 0, Math.abs(to - from), h);
+    }
+
+    ctx.fillStyle = "#3d414b";
+    for (let i = 0; i < peaks.length; i++) {
+      const bar = Math.max(1, peaks[i] * (h * 0.86));
+      ctx.fillRect(i * barW, mid - bar / 2, Math.max(1, barW - 0.5), bar);
+    }
+
+    for (const [time, colour] of [[picker.start, "#a78bfa"], [picker.end, "#5fd39a"]]) {
+      if (time === null) continue;
+      const x = (time / picker.duration) * w;
+      ctx.fillStyle = colour;
+      ctx.fillRect(x - 1, 0, 2, h);
+    }
+
+    if (!audio.paused) {
+      const x = (audio.currentTime / picker.duration) * w;
+      ctx.fillStyle = "#e9e7e2";
+      ctx.fillRect(x - 0.5, 0, 1, h);
+    }
+  }
+
+  function tick() {
+    if (!picker) return;
+    el("clock").textContent = clock(audio.currentTime) + " / " + clock(picker.duration);
+    drawWave();
+    raf = requestAnimationFrame(tick);
+  }
+
+  function openPicker(song) {
+    closePicker();
+    el("picker").hidden = false;
+    el("picker-title").textContent = song.title;
+    el("picker-hint").textContent = "Getting the audio...";
+
+    window.pywebview.api.audition(song.drums).then((prepared) => {
+      if (prepared.error) { el("picker-hint").textContent = prepared.error; return; }
+      picker = { song, peaks: prepared.peaks, duration: prepared.duration, start: null, end: null };
+      el("picker-hint").textContent = "Click where the phrase starts, press play, then hit space at its end.";
+      audio.src = prepared.audio;
+      // An mp3 can't be seeked until it's playable, so a click before this
+      // fires would silently land at zero.
+      audio.addEventListener("canplay", () => { el("play").disabled = false; }, { once: true });
+      el("play").disabled = true;
+      drawWave();
+    });
+  }
+
+  function closePicker() {
+    audio.pause();
+    audio.removeAttribute("src");
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    picker = null;
+    el("picker").hidden = true;
+    el("play").textContent = "Play";
+    el("mark").disabled = true;
+  }
+
+  function seekFromClick(event) {
+    if (!picker) return;
+    const box = wave.getBoundingClientRect();
+    const at = ((event.clientX - box.left) / box.width) * picker.duration;
+    picker.start = Math.max(0, Math.min(at, picker.duration));
+    picker.end = null;
+    audio.currentTime = picker.start;
+    el("mark").disabled = false;
+    drawWave();
+  }
+
+  function markEnd() {
+    if (!picker || picker.start === null) return;
+    const end = audio.currentTime;
+    if (end <= picker.start) { el("picker-hint").textContent = "That is before the start - click again and play on."; return; }
+    picker.end = end;
+    audio.pause();
+    el("play").textContent = "Play";
+    el("picker-hint").textContent = "Stealing it...";
+    el("mark").disabled = true;
+    drawWave();
+
+    window.pywebview.api.steal_beat(picker.song.drums, picker.start, end).then((loop) => {
+      el("mark").disabled = false;
+      if (loop.error) { el("picker-hint").textContent = loop.error; return; }
+      el("picker-hint").textContent =
+        loop.bars + " bar" + (loop.bars === 1 ? "" : "s") + ", " + loop.hits + " hits, " +
+        loop.pieces.join(" / ") + " — set Ableton to " + loop.tempo + " BPM";
+      refreshLibrary();
+    });
   }
 
   // --- talking to Python -------------------------------------------------
@@ -666,6 +880,34 @@
 
   el("destination").addEventListener("click", () => {
     window.pywebview.api.open_output_dir(el("destination").dataset.dir || "");
+  });
+
+  wave.addEventListener("click", seekFromClick);
+  el("picker-close").addEventListener("click", closePicker);
+
+  el("play").addEventListener("click", () => {
+    if (!picker) return;
+    if (audio.paused) {
+      audio.play();
+      el("play").textContent = "Pause";
+      if (!raf) tick();
+    } else {
+      audio.pause();
+      el("play").textContent = "Play";
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+      drawWave();
+    }
+  });
+
+  el("mark").addEventListener("click", markEnd);
+
+  // Space marks the end, which is the whole interaction - but only while
+  // the picker is open, and never while a link is being typed into the box.
+  document.addEventListener("keydown", (event) => {
+    if (event.code !== "Space" || el("picker").hidden) return;
+    if (document.activeElement === el("url")) return;
+    event.preventDefault();
+    markEnd();
   });
 
   window.addEventListener("pywebviewready", () => {
