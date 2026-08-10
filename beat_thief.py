@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """beat_thief: download all songs from a YouTube/YouTube Music playlist as
-MP3s, sanitize them, and optionally isolate drums/bass/harmony/vocals (wav,
-optionally MIDI too). Name no instrument and you just get the song; say
-"all" and you get all four, which together are the song again.
+MP3s, sanitize them, and optionally isolate drums/bass/harmony/vocals to
+wavs. Name no instrument and you just get the song; say "all" and you get
+all four, which together are the song again.
 
 This is the terminal front end. The work itself lives in pipeline.py, shared
 with the GUI (gui.py) - everything here is argument parsing and turning the
@@ -18,12 +18,7 @@ import pipeline
 
 BAR_WIDTH = 30
 
-_BARE_INSTRUMENT_FLAGS = ("all", "drums", "bass", "harmony", "vocals")
-
-# "midi" is bare-typeable like the rest, but it isn't a plain on/off the way
-# they are - it can also name which instruments it applies to - so it's
-# handled on its own below rather than in the loop over these.
-_BARE_FLAGS = _BARE_INSTRUMENT_FLAGS + ("midi",)
+_BARE_FLAGS = ("all", "drums", "bass", "harmony", "vocals")
 
 # Options whose next argument is a value rather than a flag of its own, so
 # that "-o drums" means a folder called drums and not a request for them.
@@ -130,19 +125,10 @@ def _split_bare_flags(raw_args: list[str]) -> tuple[set[str], list[str]]:
     can appear anywhere, including before the url, and argparse has no way
     to tell "drums" from a url in that position.
 
-    The subtlety is "--midi drums": that "drums" is a value belonging to
-    --midi, not a request to isolate the drums, so it isn't taken as a bare
-    flag. Anything else after --midi (the url, most likely) isn't claimed,
-    which is what keeps "--midi <url>" meaning "MIDI for everything".
-
-    --midi and its names are then moved to the end of what argparse sees.
-    An option that takes any number of values is greedy, so leaving it in
-    the middle would let it swallow the url standing next to it; at the end
-    there's nothing left for it to take by mistake."""
+    The subtlety is an option that takes a value: the "drums" in "-o drums"
+    is a folder name, not a request for the drums, so it's left alone."""
     bare: set[str] = set()
     remaining: list[str] = []
-    midi_names: list[str] | None = None
-    collecting_midi = False
     skip_next = False
 
     for token in raw_args:
@@ -156,45 +142,13 @@ def _split_bare_flags(raw_args: list[str]) -> tuple[set[str], list[str]]:
 
         if token.startswith("-"):
             skip_next = token in _VALUE_TAKING_OPTIONS
-            collecting_midi = token == "--midi"
-            if collecting_midi:
-                midi_names = []
-            else:
-                remaining.append(token)
-        elif collecting_midi and lowered in pipeline.INSTRUMENT_ORDER:
-            midi_names.append(lowered)
+            remaining.append(token)
+        elif lowered in _BARE_FLAGS:
+            bare.add(lowered)
         else:
-            collecting_midi = False
-            if lowered in _BARE_FLAGS:
-                bare.add(lowered)
-            else:
-                remaining.append(token)
+            remaining.append(token)
 
-    if midi_names is not None:
-        remaining += ["--midi"] + midi_names
     return bare, remaining
-
-
-def _midi_selection(named: list[str] | None, instruments: list[str]) -> frozenset[str]:
-    """Which instruments get a MIDI file, from what --midi was given.
-
-    Not asked for at all is nothing; asked for with no names is everything
-    that was requested and has a MIDI step; asked for with names is those
-    names. Naming an instrument that has no MIDI step is an error rather
-    than a silent no-op - someone typing "--midi vocals" has a wrong idea
-    about what this does and should be told."""
-    if named is None:
-        return frozenset()
-    if not named:
-        return frozenset(instruments) & pipeline.TAKES_MIDI
-
-    chosen = frozenset(name.lower() for name in named)
-    impossible = sorted(chosen - pipeline.TAKES_MIDI)
-    if impossible:
-        raise ValueError(
-            f"there's no MIDI for {', '.join(impossible)} - only {', '.join(sorted(pipeline.TAKES_MIDI))}"
-        )
-    return chosen
 
 
 def main() -> None:
@@ -216,12 +170,12 @@ def main() -> None:
     parser.add_argument(
         "--drums",
         action="store_true",
-        help="Also isolate each song's drums to a wav (see --midi for a .mid too). Slow, off by default. Can also be given as a bare 'drums' argument, before or after the URL.",
+        help="Also isolate each song's drums to a wav. Slow, off by default. Can also be given as a bare 'drums' argument, before or after the URL.",
     )
     parser.add_argument(
         "--bass",
         action="store_true",
-        help="Also isolate each song's bass to a wav (see --midi for a .mid too). Slow, off by default. Can also be given as a bare 'bass' argument, before or after the URL.",
+        help="Also isolate each song's bass to a wav. Slow, off by default. Can also be given as a bare 'bass' argument, before or after the URL.",
     )
     parser.add_argument(
         "--harmony",
@@ -233,28 +187,14 @@ def main() -> None:
         action="store_true",
         help="Also isolate each song's vocals to a wav. Slow, off by default. Can also be given as a bare 'vocals' argument, before or after the URL.",
     )
-    parser.add_argument(
-        "--midi",
-        nargs="*",
-        metavar="INSTRUMENT",
-        default=None,
-        help=(
-            "Also write MIDI, not just the wav. On its own it covers every instrument you asked for that has a "
-            f"MIDI step ({', '.join(sorted(pipeline.TAKES_MIDI))}); name instruments after it to be specific, e.g. "
-            "--midi drums. Can also be given as a bare 'midi' argument. Drums MIDI is transcribed by a trained "
-            "model into six pieces with per-hit velocity; bass MIDI is still a rough pitch-tracked guess."
-        ),
-    )
 
-    # "all"/"drums"/"bass"/"harmony"/"vocals"/"midi" are accepted bare (no --)
-    # too, in any position, since that's the more natural way to type them.
+    # "all"/"drums"/"bass"/"harmony"/"vocals" are accepted bare (no --) too,
+    # in any position, since that's the more natural way to type them.
     bare_modes, remaining_args = _split_bare_flags(sys.argv[1:])
 
     args = parser.parse_args(remaining_args)
-    for flag in _BARE_INSTRUMENT_FLAGS:
+    for flag in _BARE_FLAGS:
         setattr(args, flag, getattr(args, flag) or flag in bare_modes)
-    if args.midi is None and "midi" in bare_modes:
-        args.midi = []
 
     # Expanded here rather than handled downstream, so "all" is purely a way
     # of typing the four names and everything after this point sees one kind
@@ -266,16 +206,10 @@ def main() -> None:
     instruments = [name for name in pipeline.INSTRUMENT_ORDER if getattr(args, name)]
 
     try:
-        midi_for = _midi_selection(args.midi, instruments)
-    except ValueError as e:
-        parser.error(str(e))
-
-    try:
         result = pipeline.run(
             args.url,
             output_dir=args.output,
             instruments=instruments,
-            midi_for=midi_for,
             on_event=_Printer(),
         )
     except KeyboardInterrupt:

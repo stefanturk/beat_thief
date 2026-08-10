@@ -84,16 +84,11 @@ class Api:
             state_snapshot = dict(self._state)
 
         instruments = [name for name in pipeline.INSTRUMENT_ORDER if options.get(name)]
-        # MIDI is asked for per instrument, so a page that only wants drum
-        # MIDI doesn't also get the rough bass one. Intersected with what was
-        # actually requested, since the page leaves a tick behind when a pad
-        # is switched back off.
-        midi_for = frozenset(options.get("midi") or ()) & pipeline.TAKES_MIDI & set(instruments)
         output_dir = options.get("output_dir") or DEFAULT_OUTPUT
 
         self._thread = threading.Thread(
             target=self._work,
-            args=(url, output_dir, instruments, midi_for),
+            args=(url, output_dir, instruments),
             daemon=True,
         )
         self._thread.start()
@@ -115,11 +110,14 @@ class Api:
             return dict(self._state)
 
     def reveal(self, path: str) -> bool:
-        """Show a produced file in Finder, selected and ready to drag into a
-        DAW - a page can't hand a file to another app itself."""
+        """Show what a song produced in Finder, ready to drag into a DAW - a
+        page can't hand a file to another app itself.
+
+        A folder is opened so its stems are there to drag; a file is
+        revealed in its parent, selected."""
         if not path or not os.path.exists(path):
             return False
-        subprocess.run(["open", "-R", path], check=False)
+        subprocess.run(["open", path] if os.path.isdir(path) else ["open", "-R", path], check=False)
         return True
 
     def library(self) -> list:
@@ -143,13 +141,12 @@ class Api:
             self._state["error"] = message
             return dict(self._state)
 
-    def _work(self, url, output_dir, instruments, midi_for):
+    def _work(self, url, output_dir, instruments):
         try:
             result = self._run_pipeline(
                 url,
                 output_dir=output_dir,
                 instruments=instruments,
-                midi_for=midi_for,
                 on_event=self._on_event,
                 should_cancel=self._cancel.is_set,
                 interactive=False,
@@ -219,7 +216,14 @@ class Api:
         if stage == "sanitizing":
             return "Cleaning it up...", None
         if stage == "isolating":
-            return f"Isolating {event['instrument']} — {event['song']}", event.get("percent")
+            # "2 of 4" because the slow parts have no percentage of their
+            # own for minutes at a time, and knowing which step you're on is
+            # the only progress there is to report during them.
+            total = event.get("total") or 0
+            step = f" ({event['index']} of {total})" if total > 1 else ""
+            phase = event.get("phase")
+            what = phase or f"Isolating {event['instrument']}"
+            return f"{what}{step} — {event['song']}", event.get("percent")
         if stage == "isolated":
             return f"Finished {event['instrument']}", 100
         if stage == "warning":

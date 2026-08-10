@@ -52,23 +52,11 @@ class TestApiStart(unittest.TestCase):
             return {"outputs": []}
 
         api = gui.Api(run_pipeline=capture)
-        api.start("https://example.com/song", {"drums": True, "harmony": True, "midi": ["drums"]})
+        api.start("https://example.com/song", {"drums": True, "harmony": True})
         _wait_until(lambda: not api.status()["running"])
 
         self.assertEqual(calls["url"], "https://example.com/song")
         self.assertEqual(calls["instruments"], ["drums", "harmony"])
-        self.assertEqual(calls["midi_for"], frozenset({"drums"}))
-
-    def test_a_midi_box_left_ticked_for_a_stem_that_is_off_is_ignored(self):
-        # The page leaves the tick behind when a pad is switched back off,
-        # and a MIDI file for a stem nobody asked for can't be written.
-        calls = {}
-
-        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
-        api.start("https://example.com/song", {"drums": True, "midi": ["drums", "bass"]})
-        _wait_until(lambda: not api.status()["running"])
-
-        self.assertEqual(calls["midi_for"], frozenset({"drums"}))
 
     def test_every_pad_armed_asks_for_the_whole_song(self):
         calls = {}
@@ -132,6 +120,30 @@ class TestApiStatus(unittest.TestCase):
 
         message, _ = gui.Api._describe({"stage": "looking-up"})
         self.assertIn("Looking up", message)
+
+    def test_a_named_phase_replaces_the_generic_isolating_line(self):
+        # Demucs is silent for the best part of a minute before it can
+        # report 1%. Naming what it's doing is all there is to show.
+        message, percent = gui.Api._describe(
+            {"stage": "isolating", "instrument": "drums", "song": "Redbone",
+             "phase": "Loading the separator...", "percent": None}
+        )
+        self.assertEqual(message, "Loading the separator... — Redbone")
+        self.assertIsNone(percent)
+
+    def test_which_step_of_how_many_is_shown_when_there_is_more_than_one(self):
+        message, _ = gui.Api._describe(
+            {"stage": "isolating", "instrument": "bass", "song": "Redbone",
+             "index": 2, "total": 4, "percent": None}
+        )
+        self.assertEqual(message, "Isolating bass (2 of 4) — Redbone")
+
+    def test_a_lone_instrument_is_not_labelled_one_of_one(self):
+        message, _ = gui.Api._describe(
+            {"stage": "isolating", "instrument": "bass", "song": "Redbone",
+             "index": 1, "total": 1, "percent": None}
+        )
+        self.assertEqual(message, "Isolating bass — Redbone")
 
     def test_a_stage_with_nothing_to_say_leaves_the_message_alone(self):
         api = gui.Api(run_pipeline=lambda *a, **k: {"outputs": []})
@@ -221,6 +233,18 @@ class TestApiReveal(unittest.TestCase):
 
         self.assertTrue(api.reveal(path))
         mock_run.assert_called_once_with(["open", "-R", path], check=False)
+
+    @mock.patch("subprocess.run")
+    def test_a_song_folder_is_opened_rather_than_revealed(self, mock_run):
+        # A folder revealed in its parent is one more click from the stems
+        # you came to drag; opened, they're right there.
+        song_dir = os.path.join(self.tmp_dir, "Song (Isolated)")
+        os.makedirs(song_dir)
+
+        api = gui.Api(run_pipeline=lambda *a, **k: {})
+
+        self.assertTrue(api.reveal(song_dir))
+        mock_run.assert_called_once_with(["open", song_dir], check=False)
 
     @mock.patch("subprocess.run")
     def test_a_missing_file_is_not_handed_to_finder(self, mock_run):

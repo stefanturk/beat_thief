@@ -315,6 +315,30 @@ class TestSeparatedStems(unittest.TestCase):
         self.assertEqual(first, second)
         mock_demucs.assert_called_once()
 
+    def test_the_slow_silent_load_is_named_before_demucs_starts(self):
+        # Demucs reports nothing for its first ~48 seconds while torch and
+        # the model come off disk. Without a phase to show, that stretch is
+        # indistinguishable from a hang.
+        said = []
+        context = instrument_isolator.RunContext(on_phase=said.append)
+
+        with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs):
+            instrument_isolator.separated_stems(self.mp3_path, "htdemucs", context)
+
+        self.assertEqual(len(said), 1)
+        self.assertIn("separator", said[0].lower())
+
+    def test_a_cached_separation_says_nothing_about_loading(self):
+        said = []
+        context = instrument_isolator.RunContext(on_phase=said.append)
+
+        with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs):
+            instrument_isolator.separated_stems(self.mp3_path, "htdemucs", context)
+            said.clear()
+            instrument_isolator.separated_stems(self.mp3_path, "htdemucs", context)
+
+        self.assertEqual(said, [])
+
     def test_it_asks_for_every_stem_not_just_two(self):
         with mock.patch("instrument_isolator.run_demucs", side_effect=self._fake_run_demucs) as mock_demucs:
             instrument_isolator.separated_stems(self.mp3_path, "htdemucs")

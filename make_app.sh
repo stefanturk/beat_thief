@@ -61,6 +61,7 @@ SOURCES=(
     instrument_isolator.py
     drum_isolator.py
     drum_transcriber.py
+    beat_writer.py
     bass_isolator.py
     harmony_isolator.py
     vocals_isolator.py
