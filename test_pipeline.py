@@ -42,7 +42,12 @@ class _FakeYoutubeDL:
             path = os.path.join(output_dir, filename)
             with open(path, "wb") as f:
                 f.write(b"fake mp3")
-            info = {"title": entry["title"], "filepath": path}
+            # The mp3 is what ends up on disk, but ExtractAudio's hook
+            # reports the file it converted *from* - the .webm or .mp4 that
+            # came down the wire, which no longer exists by the time the
+            # hook fires. Faking the mp3 here hid a real bug for months:
+            # the sanitizer was being handed a filename that wasn't there.
+            info = {"title": entry["title"], "filepath": os.path.splitext(path)[0] + ".webm"}
             for hook in self.opts.get("progress_hooks", []):
                 hook({"status": "downloading", "info_dict": info,
                       "total_bytes": 100, "downloaded_bytes": 50})
@@ -231,6 +236,102 @@ class TestAlreadyDownloadedSongs(PipelineTestCase):
         self.assertEqual(result["downloaded"], 0)
         mock_drums.assert_called_once()
         self.assertEqual(mock_drums.call_args.args[0], existing)
+
+    def test_a_song_already_on_disk_is_reported_even_with_nothing_armed(self):
+        # Pasting the link of a song you already have has to put it back in
+        # front of you. This used to be scoped to runs that asked for an
+        # instrument, so a link pasted with only Song armed came back with
+        # nothing at all - which is exactly what somebody does when the
+        # stash has lost track of a song.
+        class SkippingYoutubeDL(_FakeYoutubeDL):
+            def download(self, urls):
+                return 0
+
+        existing = os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3")
+        os.makedirs(os.path.dirname(existing))
+        with open(existing, "wb") as f:
+            f.write(b"already here")
+
+        with mock.patch("yt_dlp.YoutubeDL", SkippingYoutubeDL):
+            result = self._run()
+
+        self.assertEqual(result["songs"], [existing])
+
+    def test_an_archive_entry_for_a_song_that_is_gone_is_not_taken_at_its_word(self):
+        # The archive lists video ids, not files, so it goes on claiming a
+        # song that has since been deleted or was never filed. yt-dlp then
+        # skips it and the link produces nothing, forever. The file on disk
+        # is the authority: nothing there means go and get it.
+        passes = []
+
+        class ArchiveSkippingYoutubeDL(_FakeYoutubeDL):
+            def download(self, urls):
+                archived = "download_archive" in self.opts
+                passes.append(archived)
+                if archived:
+                    return 0            # "you already have this one"
+                return super().download(urls)
+
+        with mock.patch("yt_dlp.YoutubeDL", ArchiveSkippingYoutubeDL):
+            result = self._run()
+
+        self.assertEqual(passes, [True, False])
+        self.assertEqual(result["downloaded"], 1)
+        self.assertEqual(
+            result["songs"],
+            [os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3")],
+        )
+
+    def test_a_song_that_is_there_is_not_downloaded_a_second_time(self):
+        # The other half of it: a skip with the file present is the archive
+        # doing its job, and re-downloading would undo the point of it.
+        passes = []
+
+        class SkippingYoutubeDL(_FakeYoutubeDL):
+            def download(self, urls):
+                passes.append("download_archive" in self.opts)
+                return 0
+
+        existing = os.path.join(self.tmp_dir, "Some Song - Artist", "Some Song - Artist.mp3")
+        os.makedirs(os.path.dirname(existing))
+        with open(existing, "wb") as f:
+            f.write(b"already here")
+
+        with mock.patch("yt_dlp.YoutubeDL", SkippingYoutubeDL):
+            self._run()
+
+        self.assertEqual(passes, [True])
+
+    def test_a_link_that_resolves_to_nothing_is_not_retried(self):
+        # Unknowable isn't the same as missing. A link that can't be
+        # resolved at all - offline, or dead - must not turn into a second
+        # download attempt.
+        passes = []
+
+        class UnresolvableYoutubeDL(_FakeYoutubeDL):
+            entries = []
+
+            def download(self, urls):
+                passes.append("download_archive" in self.opts)
+                return 0
+
+        with mock.patch("yt_dlp.YoutubeDL", UnresolvableYoutubeDL):
+            self._run()
+
+        self.assertEqual(passes, [True])
+
+
+class TestTheNameHandedToTheSanitizer(PipelineTestCase):
+    def test_it_is_the_mp3_that_exists_not_the_download_it_came_from(self):
+        # ExtractAudio's hook reports the .webm or .mp4 it converted, which
+        # is gone by the time anyone could look for it. Handing that name on
+        # meant the sanitizer found nothing, returned nothing, and the song
+        # was never filed, never remembered, and never showed up in the app.
+        self._run()
+
+        self.assertEqual(
+            self.mock_sanitize.call_args.args[0], ["Some Song - Artist.mp3"]
+        )
 
 
 class TestCancelling(PipelineTestCase):

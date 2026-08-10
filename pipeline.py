@@ -51,6 +51,11 @@ INSTRUMENT_ORDER = ("drums", "bass", "harmony", "vocals")
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
+# yt-dlp's record of what's already been taken, so pasting the same link
+# twice doesn't download it twice. It lists video ids, not files - so it can
+# and does go stale (see run), and the file on disk is the authority.
+ARCHIVE_FILENAME = ".downloaded_archive.txt"
+
 
 class _SilentLogger:
     """Swallow yt-dlp's own chatter - progress is reported through on_event."""
@@ -133,10 +138,11 @@ class _Download:
     can start a second run in the same process after the first finishes, and
     leftover counters from the previous one would make its summary wrong."""
 
-    def __init__(self, url: str, output_dir: str, on_event):
+    def __init__(self, url: str, output_dir: str, on_event, use_archive: bool = True):
         self.url = url
         self.output_dir = output_dir
         self.on_event = on_event
+        self.use_archive = use_archive
         self.total = None
         self.active_title = None
         self.song_number = 0
@@ -181,7 +187,13 @@ class _Download:
         self.downloaded += 1
         filepath = info.get("filepath")
         if filepath:
-            self.filenames.append(os.path.basename(filepath))
+            # ExtractAudio reports the file it converted *from* - the .mp4 or
+            # .webm that came down the wire, which by now has been replaced by
+            # the mp3 beside it. Passing that name on meant the sanitizer was
+            # handed a file that doesn't exist, quietly returned nothing, and
+            # the song was never filed, never remembered and never appeared in
+            # the stash. The extension is ours to know: we asked for mp3.
+            self.filenames.append(os.path.splitext(os.path.basename(filepath))[0] + ".mp3")
         self.on_event({"stage": "downloaded", "song": info.get("title", "Unknown")})
         self.active_title = None
 
@@ -193,9 +205,10 @@ class _Download:
         self.on_event({"stage": "found", "total": self.total})
 
         opts = _base_ydl_opts(self.output_dir)
+        if self.use_archive:
+            opts["download_archive"] = os.path.join(self.output_dir, ARCHIVE_FILENAME)
         opts.update(
             {
-                "download_archive": os.path.join(self.output_dir, ".downloaded_archive.txt"),
                 "ignoreerrors": True,
                 "noprogress": True,
                 "progress_hooks": [self._progress_hook],
@@ -211,6 +224,19 @@ class _Download:
         )
         with yt_dlp.YoutubeDL(opts) as ydl:
             return ydl.download([self.url])
+
+
+def _nothing_on_disk_for(url: str, output_dir: str) -> bool:
+    """True when this url resolves to songs and none of them are here.
+
+    The question behind the stale-archive retry in run(). Unknowable is not
+    the same as missing: if the url can't be resolved to any filename at all
+    (offline, a dead link) this says False, so a network problem can't turn
+    into a second download attempt."""
+    filenames = requested_mp3_filenames(url, output_dir)
+    if not filenames:
+        return False
+    return not any(existing_song(output_dir, filename) for filename in filenames)
 
 
 def song_folder(output_dir: str, title: str) -> str:
@@ -416,6 +442,21 @@ def run(
         result["error"] = str(e)
         return result
 
+    # The archive lists video ids, so it says "you already have this" about a
+    # song whose file has since been deleted, moved, or - as happened here -
+    # never got filed at all. yt-dlp then skips it and there is nothing to
+    # show for the link, forever. The file on disk is the authority: when it
+    # isn't there, the archive entry is simply wrong, and the honest thing is
+    # to go and get the song.
+    if download.downloaded == 0 and download.failed == 0 and _nothing_on_disk_for(url, output_dir):
+        download = _Download(url, output_dir, on_event, use_archive=False)
+        try:
+            result["download_status"] = download.run()
+        except yt_dlp.utils.DownloadError as e:
+            on_event({"stage": "error", "message": str(e)})
+            result["error"] = str(e)
+            return result
+
     result["downloaded"] = download.downloaded
     result["failed"] = download.failed
     result["skipped"] = max((download.total or 0) - download.downloaded - download.failed, 0)
@@ -448,13 +489,16 @@ def run(
     # no hook fires for it - but asking to isolate it is still a perfectly
     # ordinary request. Widen the scope to cover anything this url resolves
     # to that's already on disk, not just this run's fresh saves.
+    #
+    # Done whatever was armed, not only when an instrument was: pasting the
+    # link of a song you already have has to put it back in front of you,
+    # and "the stash forgot it" is exactly when somebody re-pastes a link.
     filenames = list(sanitized)
-    if wanted:
-        seen = set(filenames)
-        for filename in requested_mp3_filenames(url, output_dir):
-            if filename not in seen and existing_song(output_dir, filename):
-                filenames.append(filename)
-                seen.add(filename)
+    seen = set(filenames)
+    for filename in requested_mp3_filenames(url, output_dir):
+        if filename not in seen and existing_song(output_dir, filename):
+            filenames.append(filename)
+            seen.add(filename)
     result["songs"] = [file_into_own_folder(os.path.join(output_dir, f)) for f in filenames]
     result["outputs"] = list(result["songs"])
 
