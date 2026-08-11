@@ -40,6 +40,25 @@ def _sixteenths(tempo, bars=2):
     return notes
 
 
+def _straight(tempo, bars=4, offset=0.0):
+    """A plain backbeat starting `offset` seconds into the section and
+    running for `bars` bars: kick on one and three, snare on two and four,
+    hats on the eighths.
+
+    Longer than what gets marked, on purpose. A loop moved on to start at a
+    kick has to take its last stretch from after the mark, so a fixture that
+    stops at the mark can't tell whether it did."""
+    beat = 60.0 / tempo
+    notes = []
+    for bar in range(bars):
+        at = offset + bar * 4 * beat
+        for eighth in range(8):
+            notes.append(_note(42, at + eighth * beat / 2, 70))
+        notes += [_note(36, at, 110), _note(38, at + beat, 100),
+                  _note(36, at + 2 * beat, 110), _note(38, at + 3 * beat, 100)]
+    return notes
+
+
 class TestGridOrigin(unittest.TestCase):
     def test_hits_already_on_the_grid_need_no_offset(self):
         step = 0.1
@@ -266,6 +285,33 @@ class TestBuild(unittest.TestCase):
                 loop = self._build(_sixteenths(self.TEMPO, bars=4), span=span)
                 bar_sec = beat_writer.BEATS_PER_BAR * 60.0 / loop.tempo
                 self.assertLess(abs(loop.bars * bar_sec - span), bar_sec / 2 + 1e-6)
+
+    def test_the_loop_plays_all_the_way_to_its_end(self):
+        # Marked two beats early, which is the ordinary way to click. The
+        # loop moves on to the kick, and the bars it gains at the end have
+        # to come out of the drumming that follows the mark.
+        #
+        # This is the one that matters. Moving on used to wrap instead, so
+        # the silence at the front - the two beats you clicked early - came
+        # round to the back, and the loop's last beats were empty while the
+        # notes that belonged there had been transcribed and thrown away.
+        loop = self._build(_straight(self.TEMPO, bars=4, offset=1.0), span=4.0)
+
+        last = max(hit.step for hit in loop.beat.hits)
+        self.assertEqual(last, loop.bars * beat_loop.STEPS_PER_BAR - 2)   # the last eighth
+
+    def test_where_you_clicked_within_the_bar_does_not_change_the_loop(self):
+        # The same drumming marked from three different places in the bar.
+        # Once each is moved on to its kick they are the same two bars, so
+        # they have to come out as the same loop - only origin_sec differs.
+        loops = [self._build(_straight(self.TEMPO, bars=4, offset=off), span=4.0)
+                 for off in (0.0, 0.5, 1.0)]
+        placed = [{(h.step, h.piece, h.velocity) for h in loop.beat.hits} for loop in loops]
+
+        self.assertEqual(placed[1], placed[0])
+        self.assertEqual(placed[2], placed[0])
+        self.assertAlmostEqual(loops[1].origin_sec - loops[0].origin_sec, 0.5, delta=0.02)
+        self.assertAlmostEqual(loops[2].origin_sec - loops[0].origin_sec, 1.0, delta=0.02)
 
     def test_the_reported_origin_points_back_into_the_stem(self):
         notes = [_note(36, 0.0), _note(38, 0.5), _note(36, 1.0), _note(38, 1.5)]
