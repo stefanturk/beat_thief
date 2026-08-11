@@ -157,7 +157,7 @@ the stems and any stolen beat, together:
     Song Title.mp3
     Song Title (Isolated Drums at 120.000 BPM).wav
     Song Title (Isolated Bass at 120.000 BPM).wav
-    Song Title (Stolen Beat, 2 bars) (120 BPM).mid
+    Song Title (Beat at 120 BPM).mid
 ```
 
 Downloading and sanitizing still work on a flat directory — the sanitizer

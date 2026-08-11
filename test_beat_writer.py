@@ -246,6 +246,33 @@ class TestFilename(unittest.TestCase):
         self.assertIn("157.6", beat_writer.filename_for(beat, "Stolen"))
 
 
+class TestStolenBeatFilename(unittest.TestCase):
+    def test_it_is_the_song_and_the_tempo(self):
+        beat = beat_writer.Beat(tempo=104.862, hits=(), bars=4)
+        self.assertEqual(
+            beat_writer.stolen_beat_filename(beat, "Officially Missing You - Brasstracks"),
+            "Officially Missing You - Brasstracks (Beat at 104.862 BPM).mid",
+        )
+
+    def test_the_bar_count_is_not_in_it(self):
+        # Two brackets deep the tempo was the half that got clipped first,
+        # and the bar count is the one number in the name nothing acts on.
+        beat = beat_writer.Beat(tempo=120.0, hits=(), bars=4)
+        self.assertNotIn("bar", beat_writer.stolen_beat_filename(beat, "Song"))
+
+    def test_a_beat_is_recognised_by_its_filename(self):
+        beat = beat_writer.Beat(tempo=120.0, hits=())
+        self.assertTrue(beat_writer.is_stolen_beat(beat_writer.stolen_beat_filename(beat, "Song")))
+
+    def test_a_beat_stolen_under_the_old_name_is_still_a_beat(self):
+        # Otherwise a folder full of beats taken before the rename reads as
+        # a song nobody has ever taken a loop out of.
+        self.assertTrue(beat_writer.is_stolen_beat("Song (Stolen Beat, 4 bars) (120 BPM).mid"))
+
+    def test_a_stem_is_not_a_beat(self):
+        self.assertFalse(beat_writer.is_stolen_beat("Song (Isolated Drums at 120 BPM).wav"))
+
+
 class TestWriteReferences(WrittenFileTestCase):
     def test_it_writes_both_files_and_makes_the_folder(self):
         out_dir = os.path.join(self.tmp_dir, "new", "folder")

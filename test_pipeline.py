@@ -559,6 +559,13 @@ class TestWhatASongHas(unittest.TestCase):
         self.assertTrue(have["drums"].endswith("Drums at 120.000 BPM).wav"))
 
     def test_a_stolen_loop_counts_as_a_beat(self):
+        have = self._have("Song - Artist (Beat at 120 BPM).mid")
+
+        self.assertIn("beat", have)
+
+    def test_a_loop_stolen_under_the_old_name_still_counts(self):
+        # Beats written before the rename are sitting in people's folders,
+        # and a green Beat square going out is the same as losing the file.
         have = self._have("Song - Artist (Stolen Beat, 2 bars) (120 BPM).mid")
 
         self.assertIn("beat", have)

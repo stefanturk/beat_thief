@@ -63,7 +63,12 @@ RACK_LOW, RACK_HIGH = 36, 51
 # carry its label (see instrument_isolator.find_existing_basename). Lives
 # here rather than in beat_loop so that reading a song's folder to see
 # what's in it doesn't mean importing the transcriber and all of torch.
-STOLEN_BEAT_LABEL = "Stolen Beat"
+STOLEN_BEAT_LABEL = "Beat at"
+
+# What that label used to be. Only ever read, never written: a folder of
+# beats stolen before the rename should still show a green Beat square
+# rather than looking like a song nobody has taken a loop out of.
+_FORMER_STOLEN_BEAT_LABEL = "Stolen Beat"
 
 # How long each note is written as. A drum rack plays one-shots, so this is
 # cosmetic - but a part whose notes are all hairlines is unreadable in the
@@ -181,6 +186,24 @@ def filename_for(beat: Beat, label: str) -> str:
     """The BPM belongs in the filename, because Ableton won't read it out of
     the file (see write) and it's the number you have to type into Live."""
     return f"{label} ({beat.tempo:g} BPM).mid"
+
+
+def stolen_beat_filename(beat: Beat, title: str) -> str:
+    """What a stolen loop is called: the song it came out of, and the tempo
+    to set Ableton to.
+
+    The bar count used to be in here as well - "(Stolen Beat, 4 bars)
+    (104.862 BPM)" - and it's gone. It's the one number in the name that
+    can't be acted on: the clip is however many bars it is whether or not
+    the filename agrees, while the tempo is a number you have to type into
+    Live. Two brackets deep, the tempo was also the half that got clipped
+    first in any list narrow enough to truncate."""
+    return f"{title} ({STOLEN_BEAT_LABEL} {beat.tempo:g} BPM).mid"
+
+
+def is_stolen_beat(name: str) -> bool:
+    """Whether a filename is a stolen loop, under either name it has had."""
+    return STOLEN_BEAT_LABEL in name or _FORMER_STOLEN_BEAT_LABEL in name
 
 
 # --- the two reference beats -------------------------------------------

@@ -393,18 +393,27 @@ class TestWrite(unittest.TestCase):
             tempo=120.0, song_tempo=120.0,
         )
 
-    def test_the_filename_carries_the_tempo_and_the_length(self):
+    def test_the_filename_is_the_song_and_the_tempo_to_set_ableton_to(self):
         path = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
 
-        name = os.path.basename(path)
-        self.assertIn("120 BPM", name)
-        self.assertIn("2 bars", name)
+        self.assertEqual(os.path.basename(path), "Some Song (Beat at 120 BPM).mid")
         self.assertTrue(os.path.exists(path))
 
-    def test_one_bar_is_not_called_1_bars(self):
-        path = beat_loop.write(self._loop(bars=1), self.tmp_dir, "Some Song")
+    def test_the_track_inside_is_named_after_the_file(self):
+        # Ableton names the clip you drag in after the track, so a constant
+        # here means every beat from every song lands in Live called the
+        # same thing.
+        path = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
 
-        self.assertIn("1 bar)", os.path.basename(path))
+        midi = pretty_midi.PrettyMIDI(path)
+        self.assertEqual(midi.instruments[0].name, "Some Song (Beat at 120 BPM)")
+
+    def test_a_second_beats_track_carries_its_own_name(self):
+        beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
+        second = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
+
+        midi = pretty_midi.PrettyMIDI(second)
+        self.assertEqual(midi.instruments[0].name, "Some Song (Beat at 120 BPM) (2)")
 
     def test_it_makes_the_folder_if_it_is_not_there(self):
         out_dir = os.path.join(self.tmp_dir, "new")
