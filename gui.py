@@ -176,11 +176,23 @@ class Api:
         Slow the first time (a transcode and a decode, about three
         seconds), instant afterwards - see audition.preview. pywebview runs
         these calls off the UI thread, so the window stays alive through
-        it, and the page shows its own "getting the audio" state."""
+        it, and the page shows its own "getting the audio" state.
+
+        The song's tempo rides along, read out of the stem's filename. The
+        picker draws no grid with it - what it's for is sizing one keystroke,
+        so sliding a section by a beat is exact rather than a guess at how
+        many tenths of a second a beat is."""
         try:
-            return audition.preview(wav_path)
+            prepared = dict(audition.preview(wav_path))   # preview() caches its dict
         except Exception as e:
             return {"error": str(e) or e.__class__.__name__}
+
+        basename = os.path.splitext(os.path.basename(wav_path))[0]
+        try:
+            prepared["tempo"] = instrument_isolator.parse_tempo_from_basename(basename)
+        except ValueError:
+            prepared["tempo"] = 0.0
+        return prepared
 
     def steal_beat(self, wav_path: str, start_sec: float, end_sec: float) -> dict:
         """Turn the marked section into a looping .mid next to the stem.

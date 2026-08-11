@@ -412,6 +412,49 @@ class TestLibrary(unittest.TestCase):
             self.assertEqual(api.library(), [])
 
 
+class TestAudition(unittest.TestCase):
+    """What the picker gets handed when it opens."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _audition(self, filename):
+        path = os.path.join(self.tmp_dir, filename)
+        with open(path, "wb") as f:
+            f.write(b"not really a wav")
+        prepared = {"audio": "data:x", "peaks": [0.1], "duration": 9.0, "path": path}
+        with mock.patch("audition.preview", return_value=prepared):
+            return gui.Api().audition(path)
+
+    def test_the_songs_tempo_comes_along(self):
+        # It sizes the slide keystroke. Without it a beat is a guess.
+        prepared = self._audition("Song - Artist (Isolated Drums at 105.373 BPM).wav")
+
+        self.assertAlmostEqual(prepared["tempo"], 105.373, places=3)
+
+    def test_a_stem_with_no_tempo_in_its_name_is_not_an_error(self):
+        # The page falls back to a round second rather than breaking.
+        prepared = self._audition("Some Loose File.wav")
+
+        self.assertEqual(prepared["tempo"], 0.0)
+        self.assertNotIn("error", prepared)
+
+    def test_the_cached_preview_is_not_written_into(self):
+        # audition.preview hands back the same dict every time it's asked
+        # for a file, so adding a key to it would accumulate across calls.
+        cached = {"audio": "data:x", "peaks": [0.1], "duration": 9.0, "path": "p"}
+        path = os.path.join(self.tmp_dir, "Song (Isolated Drums at 99.000 BPM).wav")
+        with open(path, "wb") as f:
+            f.write(b"x")
+        with mock.patch("audition.preview", return_value=cached):
+            gui.Api().audition(path)
+
+        self.assertNotIn("tempo", cached)
+
+
 class TestStealBeat(unittest.TestCase):
     """What comes back from stealing a loop - specifically which of the two
     tempos in play reaches the page."""

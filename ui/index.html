@@ -960,7 +960,14 @@
 
     window.pywebview.api.audition(song.have.drums).then((prepared) => {
       if (prepared.error) { el("picker-hint").textContent = prepared.error; return; }
-      picker = { song, peaks: prepared.peaks, duration: prepared.duration, start: null, end: null };
+      picker = {
+        song, peaks: prepared.peaks, duration: prepared.duration,
+        start: null, end: null,
+        // Only ever used as the size of a keystroke - nothing is drawn or
+        // quantized with it. A stem with no tempo in its name falls back to
+        // a round second.
+        beat: prepared.tempo > 0 ? 60 / prepared.tempo : BIG_NUDGE_SEC,
+      };
       el("picker-hint").textContent = "Click at the 1 of the phrase — ← → to nudge — space at the next 1.";
       audio.src = prepared.audio;
       // An mp3 can't be seeked until it's playable, so a click before this
@@ -1019,10 +1026,31 @@
   function nudgeStart(seconds) {
     if (!picker || picker.start === null) return;
     setStart(picker.start + seconds, true);
-    if (picker.end !== null) {
-      el("picker-hint").textContent = (picker.end - picker.start).toFixed(1) +
-        "s marked — build the beat, space to re-mark the end, or Close to start again.";
-    }
+    sayWhatIsMarked();
+  }
+
+  // Sliding takes the end with it, so the section keeps its length and only
+  // moves. That's the shape of the mistake this is for: a loop that's right
+  // in every respect but starts - and therefore ends - a beat or two out.
+  // Rotating it by whole beats is the exact fix, and it's a fix you can hear
+  // rather than one guessed at from the drumming.
+  function slideSection(beats) {
+    if (!picker || picker.start === null) return;
+    const by = beats * picker.beat;
+    const span = picker.end === null ? 0 : picker.end - picker.start;
+    const start = Math.max(0, Math.min(picker.start + by, picker.duration - span));
+
+    picker.start = start;
+    if (picker.end !== null) picker.end = start + span;
+    playFrom(picker.start);
+    drawWave();
+    sayWhatIsMarked();
+  }
+
+  function sayWhatIsMarked() {
+    if (picker.end === null) return;
+    el("picker-hint").textContent = (picker.end - picker.start).toFixed(1) +
+      "s marked — build the beat, ⇧← ⇧→ to slide it a beat, or space to re-mark the end.";
   }
 
   // Space only says where the phrase ends. Building the .mid is a separate
@@ -1036,8 +1064,7 @@
     picker.end = end;
     pausePlay();
     el("build").disabled = false;
-    el("picker-hint").textContent = (end - picker.start).toFixed(1) +
-      "s marked — build the beat, ← → to move the start, or Close to start again.";
+    sayWhatIsMarked();
     drawWave();
   }
 
@@ -1086,6 +1113,7 @@
     start: picker.start,
     end: picker.end,
     duration: picker.duration,
+    beat: picker.beat,
     playing: !audio.paused,
     at: audio.currentTime,
   };
@@ -1238,8 +1266,9 @@
     event.preventDefault();
 
     if (event.code === "Space") { markEnd(); return; }
-    const step = event.shiftKey ? BIG_NUDGE_SEC : NUDGE_SEC;
-    nudgeStart(event.code === "ArrowLeft" ? -step : step);
+    const direction = event.code === "ArrowLeft" ? -1 : 1;
+    if (event.shiftKey) slideSection(direction);
+    else nudgeStart(direction * NUDGE_SEC);
   });
 
   window.addEventListener("pywebviewready", () => {
