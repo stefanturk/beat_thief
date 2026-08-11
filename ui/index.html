@@ -927,8 +927,6 @@
     wantPlaying = true;
     el("play").textContent = "Pause";
     if (!raf) tick();
-    if (seconds === null) { audio.play(); return; }
-
     audio.pause();
     audio.currentTime = seconds;
     if (!audio.seeking) audio.play();
@@ -998,10 +996,16 @@
     setStart(at);
   }
 
-  function setStart(seconds) {
+  // keepEnd is what separates the two ways of moving the start. A click is
+  // "start over here", so it throws the end away. An arrow is a correction
+  // to a section you've already marked out, so the end stays put - otherwise
+  // nudging onto the one would cost you the end you just caught.
+  function setStart(seconds, keepEnd) {
     picker.start = Math.max(0, Math.min(seconds, picker.duration));
-    picker.end = null;
-    el("build").disabled = true;
+    if (!keepEnd || picker.end <= picker.start) {
+      picker.end = null;
+      el("build").disabled = true;
+    }
     playFrom(picker.start);
     drawWave();
   }
@@ -1014,7 +1018,11 @@
 
   function nudgeStart(seconds) {
     if (!picker || picker.start === null) return;
-    setStart(picker.start + seconds);
+    setStart(picker.start + seconds, true);
+    if (picker.end !== null) {
+      el("picker-hint").textContent = (picker.end - picker.start).toFixed(1) +
+        "s marked — build the beat, space to re-mark the end, or Close to start again.";
+    }
   }
 
   // Space only says where the phrase ends. Building the .mid is a separate
@@ -1028,8 +1036,8 @@
     picker.end = end;
     pausePlay();
     el("build").disabled = false;
-    el("picker-hint").textContent =
-      (end - picker.start).toFixed(1) + "s marked — build the beat, or click again to start over.";
+    el("picker-hint").textContent = (end - picker.start).toFixed(1) +
+      "s marked — build the beat, ← → to move the start, or Close to start again.";
     drawWave();
   }
 
@@ -1202,9 +1210,13 @@
   wave.addEventListener("click", seekFromClick);
   el("picker-close").addEventListener("click", closePicker);
 
+  // Play is for hearing the section you've marked, not for resuming where
+  // you happened to stop - so it always goes back to the start you set, or
+  // to the top of the stem if you haven't set one yet.
   el("play").addEventListener("click", () => {
     if (!picker) return;
-    if (audio.paused) playFrom(null); else pausePlay();
+    if (audio.paused) playFrom(picker.start === null ? 0 : picker.start);
+    else pausePlay();
   });
 
   el("build").addEventListener("click", buildBeat);

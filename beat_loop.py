@@ -20,9 +20,17 @@ Steps 3 and 4 are the ones that matter, and they're the same idea twice: the
 beat determines the grid, not the other way around. A whole-song tempo is an
 average of something that drifts, so it's trusted only to count bars - after
 that the marked phrase is measured against itself, which is also what makes
-the loop close seamlessly. And somebody picking a section by ear starts it
-wherever they clicked, which is nowhere in particular, so the downbeat is
-recovered from the drumming rather than assumed to be where the mouse was."""
+the loop close seamlessly.
+
+What isn't done here is second-guessing where the downbeat is. There used to
+be a step that scored every rotation of the loop for how much it looked like
+4/4 and turned the beat round to suit. It was wrong often enough to matter -
+a kick on the and-of-four would win over the one, and the whole loop came out
+a beat late - and it was wrong in a way nobody could correct, since it
+silently overrode where you clicked. The picker lets you play from the start
+you've marked and walk it with the arrow keys, so the one is something you
+hear and place. That's a better instrument than a heuristic, and this file's
+job is to take it at its word."""
 
 from __future__ import annotations
 
@@ -63,32 +71,11 @@ _PIECE_FOR_NOTE = {
 }
 
 
-# How much each sixteenth of a bar counts as a strong position. The
-# downbeat most, the half-bar next, then the other two beats, then the
-# eighths, then everything else - the ordinary metrical hierarchy of 4/4.
-_METRICAL_WEIGHT = (
-    6.0, 0.5, 1.5, 0.5,
-    3.0, 0.5, 1.5, 0.5,
-    4.0, 0.5, 1.5, 0.5,
-    3.0, 0.5, 1.5, 0.5,
-)
-
-# What each piece says about where the downbeat is. A kick is the strongest
-# evidence and a crash is close behind, since a crash almost always lands
-# on one. A snare is scored separately (see _rotation_score) because its
-# information is the opposite: it says "not here" about the downbeat and
-# "here" about the backbeat. Hats say nothing - they're on everything.
-_DOWNBEAT_WEIGHT = {"kick": 1.0, "crash": 1.4, "low-mid tom": 0.2}
-
-# Where a backbeat snare belongs, in sixteenths from the top of the bar.
-_BACKBEAT_STEPS = (4, 12)
-_BACKBEAT_BONUS = 2.5
-
-
 class Loop(NamedTuple):
     beat: beat_writer.Beat
     bars: int
-    origin_sec: float   # where in the stem the loop's downbeat was found
+    origin_sec: float   # where the loop's first step sits in the stem: the
+                        # marked start, nudged onto the drumming's own grid
     hits_used: int
     hits_dropped: int
     tempo: float        # the loop's own tempo, measured off the marked section
@@ -143,44 +130,6 @@ def _grid_origin(times: list[float], step_sec: float) -> float:
 
     # atan2 gives (-pi, pi], so this lands in (-step/2, step/2].
     return math.atan2(y, x) / (2 * math.pi) * step_sec
-
-
-def _rotation_score(placed: dict, rotation: int, total_steps: int) -> float:
-    """How much a beat looks like 4/4 when step `rotation` is called one.
-
-    Kicks and crashes score by where they'd land in the bar; snares score
-    for landing on the backbeat. Both are needed - kicks alone can't tell a
-    bar from its own half, and plenty of beats put a kick on three."""
-    score = 0.0
-    for (step, piece), velocity in placed.items():
-        within_bar = (step - rotation) % total_steps % STEPS_PER_BAR
-        loudness = velocity / 127.0
-        if piece == "snare":
-            if within_bar in _BACKBEAT_STEPS:
-                score += _BACKBEAT_BONUS * loudness
-        else:
-            weight = _DOWNBEAT_WEIGHT.get(piece)
-            if weight is not None:
-                score += weight * _METRICAL_WEIGHT[within_bar] * loudness
-    return score
-
-
-def _downbeat_rotation(placed: dict, total_steps: int) -> int:
-    """Which step of the loop is really beat one.
-
-    Somebody marking a section by ear starts it where they clicked, so the
-    quantized pattern is a rotation of the beat rather than the beat - the
-    snare comes out on one and three instead of two and four, and dropping
-    it at bar 1 in Ableton sounds wrong even though every hit is correct.
-
-    A loop is cyclic, so this costs nothing to fix: try calling each step
-    the downbeat and keep whichever reading looks most like 4/4. Only whole
-    beats are considered - a downbeat is never a sixteenth off, and letting
-    it be one lets a busy hat pattern outvote the kick."""
-    if not placed:
-        return 0
-    beats = range(0, total_steps, STEPS_PER_BAR // beat_writer.BEATS_PER_BAR)
-    return max(beats, key=lambda rotation: _rotation_score(placed, rotation, total_steps))
 
 
 def _bar_count(span_sec: float, bar_sec: float) -> int:
@@ -264,9 +213,8 @@ def build(
         key = (step, piece)
         loudest[key] = max(loudest.get(key, 0), velocity)
 
-    rotation = _downbeat_rotation(loudest, total_steps)
     hits = tuple(
-        beat_writer.Hit(piece, (step - rotation) % total_steps, velocity)
+        beat_writer.Hit(piece, step, velocity)
         for (step, piece), velocity in sorted(loudest.items())
     )
     beat = beat_writer.Beat(
@@ -279,7 +227,7 @@ def build(
     return Loop(
         beat=beat,
         bars=bars,
-        origin_sec=start_sec + origin + rotation * step_sec,
+        origin_sec=start_sec + origin,
         hits_used=len(hits),
         hits_dropped=dropped,
         tempo=loop_tempo,

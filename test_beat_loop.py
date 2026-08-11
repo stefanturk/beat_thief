@@ -71,47 +71,6 @@ class TestBarCount(unittest.TestCase):
         self.assertEqual(beat_loop._bar_count(500.0, 1.0), beat_loop.MAX_BARS)
 
 
-class TestDownbeatRotation(unittest.TestCase):
-    """A section marked by ear starts where somebody clicked, so the
-    quantized pattern is a rotation of the beat rather than the beat."""
-
-    @staticmethod
-    def _placed(hits):
-        return {(step, piece): velocity for piece, step, velocity in hits}
-
-    def test_a_beat_already_starting_on_one_is_left_alone(self):
-        placed = self._placed([
-            ("kick", 0, 110), ("snare", 4, 110), ("kick", 8, 110), ("snare", 12, 110),
-        ])
-        self.assertEqual(beat_loop._downbeat_rotation(placed, 16), 0)
-
-    def test_a_beat_captured_from_the_backbeat_is_turned_round(self):
-        # The same beat, marked starting on two: everything shifted by four
-        # sixteenths. The rotation has to undo exactly that.
-        placed = self._placed([
-            ("snare", 0, 110), ("kick", 4, 110), ("snare", 8, 110), ("kick", 12, 110),
-        ])
-        self.assertEqual(beat_loop._downbeat_rotation(placed, 16), 12)
-
-    def test_the_downbeat_is_never_placed_off_a_beat(self):
-        # A busy hat pattern must not be able to drag the downbeat onto a
-        # sixteenth - a downbeat is never a sixteenth off.
-        placed = self._placed(
-            [("kick", 0, 120), ("snare", 4, 120)]
-            + [("closed hat", step, 70) for step in range(1, 16, 2)]
-        )
-        self.assertEqual(beat_loop._downbeat_rotation(placed, 16) % 4, 0)
-
-    def test_nothing_placed_rotates_nowhere(self):
-        self.assertEqual(beat_loop._downbeat_rotation({}, 16), 0)
-
-    def test_a_crash_is_strong_evidence_for_the_downbeat(self):
-        placed = self._placed([
-            ("crash", 8, 120), ("kick", 8, 120), ("snare", 12, 100), ("snare", 4, 100),
-        ])
-        self.assertEqual(beat_loop._downbeat_rotation(placed, 16), 8)
-
-
 class TestBuild(unittest.TestCase):
     """build() against a faked transcription - what's under test is the
     gridding, not the model."""
@@ -196,6 +155,31 @@ class TestBuild(unittest.TestCase):
     def test_an_end_before_the_start_is_refused(self):
         with self.assertRaises(ValueError):
             beat_loop.build(self.wav, self.TEMPO, 10.0, 10.0)
+
+    def test_the_loop_starts_where_it_was_marked_and_is_not_turned_round(self):
+        # A section marked with a snare on the click and a kick half a beat
+        # later. This used to be scored as "really" starting at the kick and
+        # rotated onto it, which put every hit a beat late in Ableton and
+        # silently overrode where the section was marked. The click is the
+        # one; it stays the one.
+        notes = []
+        for bar in (0.0, 2.0):
+            notes += [_note(38, bar + 0.0), _note(36, bar + 0.5),
+                      _note(38, bar + 1.0), _note(36, bar + 1.5)]
+        loop = self._build(notes)
+
+        placed = {(hit.step, hit.piece) for hit in loop.beat.hits}
+        self.assertIn((0, "snare"), placed)
+        self.assertNotIn((0, "kick"), placed)
+
+    def test_the_first_step_of_the_loop_is_the_marked_start(self):
+        # origin_sec is where step 0 sits in the stem. It may be pulled onto
+        # the drumming's own grid by a fraction of a sixteenth, but never by
+        # a beat.
+        notes = [_note(38, 0.0), _note(36, 0.5), _note(38, 1.0), _note(36, 1.5)]
+        loop = self._build(notes, start=10.0, span=2.0)
+
+        self.assertLess(abs(loop.origin_sec - 10.0), 0.125 / 2)
 
     def test_a_section_marked_exactly_right_agrees_with_the_song(self):
         # 4.0s at 120 BPM is exactly two bars, so measuring the section
