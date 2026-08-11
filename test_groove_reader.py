@@ -107,6 +107,54 @@ class TestTakingAVoiceOffTheSnare(unittest.TestCase):
         self.assertEqual(steps_of(out, "snare"), [2, 14, 18])
 
 
+class TestTakingAVoiceOffTheHihat(unittest.TestCase):
+    """The hi-hat class's equivalent of TestTakingAVoiceOffTheSnare. Unlike
+    the snare class, a real hi-hat is also on a pulse - so every pattern here
+    is written to have exactly the same rhythm on both pieces, and what
+    decides the outcome is only which piece the audio put the hits on
+    ("closed hat" or "hat percussion"), not the shape of the pattern."""
+
+    def test_a_voice_the_audio_heard_as_percussion_moves(self):
+        out, inferred = refine({
+            "hat percussion": "X...X...X...X...|X...X...X...X...|X...X...X...X...|X...X...X...X...",
+        })
+
+        self.assertEqual(steps_of(out, "tambourine"), list(range(0, 64, 4)))
+        self.assertEqual(steps_of(out, "closed hat"), [])
+        self.assertEqual(inferred, 0)
+
+    def test_a_voice_the_audio_heard_as_a_real_hihat_stays(self):
+        out, inferred = refine({
+            "closed hat": "X...X...X...X...|X...X...X...X...|X...X...X...X...|X...X...X...X...",
+        })
+
+        self.assertEqual(steps_of(out, "closed hat"), list(range(0, 64, 4)))
+        self.assertEqual(steps_of(out, "tambourine"), [])
+        self.assertEqual(inferred, 0)
+
+    def test_a_voice_split_across_two_pads_is_made_one(self):
+        # Same pulse, mixed per-hit votes - the pulse is what says these are
+        # one instrument, same as it does for the snare class.
+        out, inferred = refine({
+            "hat percussion": "X...X.......X...|X...X...X.......|X...X...X...X...|....X...X...X...",
+            "closed hat":      "........X.......|............X...|................|X...............",
+        })
+
+        self.assertEqual(steps_of(out, "tambourine"), list(range(0, 64, 4)))
+
+    def test_a_stray_bright_hit_is_still_a_closed_hat(self):
+        # One hit voted percussion out of a steady closed-hat voice. A lone
+        # tambourine note scattered into a loop is the failure this stage
+        # exists to prevent, same as for the snare class.
+        out, inferred = refine({
+            "closed hat":     "....X...X...X...X...X...X...X.|....X...X...X...X...X...X...X.",
+            "hat percussion": "................................|X...............................",
+        })
+
+        self.assertEqual(steps_of(out, "tambourine"), [])
+        self.assertEqual(inferred, 0)
+
+
 class TestLeavingRealDrumsAlone(unittest.TestCase):
     """Everything above has to happen without touching a beat that was
     transcribed correctly in the first place."""

@@ -66,6 +66,15 @@ import statistics
 # is the only scale it was reliable at when measured.
 _SNARE_CLASS = ("snare", "tambourine")
 
+# The hi-hat class's equivalent pool. Kept separate from _SNARE_CLASS on
+# purpose: a real hi-hat is *also* almost always on a pulse, so the test that
+# tells a tambourine from a snare here - does it keep time, or is it
+# structural - can't do the same job for hi-hat, since nearly everything in
+# this class would pass it. What decides a hi-hat voice is the audio's own
+# vote instead (see drum_transcriber._HAT_PERCUSSION_NOTE); the pulse is only
+# used, same as below, to restore hits that vote covered up.
+_HAT_CLASS = ("closed hat", "hat percussion")
+
 # Voices that keep time, and so are allowed to have missed hits restored. A
 # kick, a snare or a crash never is: those are structural, their silences are
 # the composition, and inventing one changes the groove rather than clarifying
@@ -320,9 +329,62 @@ def refine(
         if piece in _SNARE_CLASS and piece not in ("snare", percussion):
             _put(out, step, "snare", out.pop((step, piece)))
 
+    # --- the hi-hat class: a real hi-hat, or something being shaken? ---
+    #
+    # Same shape as the snare class above, but what counts as "heard alone"
+    # is the audio's vote rather than the rhythm - see _HAT_CLASS.
+    hat_pool: dict[int, str] = {}
+    for step, piece in out:
+        if piece in _HAT_CLASS and hat_pool.get(step) != "closed hat":
+            hat_pool[step] = piece
+
+    hat_percussion: str | None = None
+    hat_pulse = _best_pulse(set(hat_pool), total_steps, steps_per_beat) if hat_pool else None
+    if hat_pulse:
+        division, phase = hat_pulse
+        positions = _positions(phase, steps_per_beat // division, total_steps)
+        on_pulse = [step for step in positions if step in hat_pool]
+
+        covered_by = {step for step in on_pulse
+                      if any(key[0] == step and _confounds_the_vote(key[1]) for key in placed)}
+        heard_alone = [step for step in on_pulse
+                       if hat_pool[step] != "closed hat" or step not in covered_by]
+        voted = sum(1 for step in heard_alone if hat_pool[step] != "closed hat")
+
+        # Reuses the snare class's threshold - the same "contamination pushes
+        # votes one way" argument applies, though it's only been measured
+        # against one confirmed section (see
+        # officially-missing-you-tambourine-labels) and may want its own
+        # number once there's more than one.
+        if voted >= _PERCUSSION_MAJORITY * len(heard_alone or on_pulse):
+            hat_percussion = _PIECE_FOR_DIVISION[division]
+
+            velocities: dict[int, int] = {}
+            for step in on_pulse:
+                if hat_pool[step] == "closed hat" and step not in covered_by:
+                    continue
+                velocities[step] = out.pop((step, hat_pool[step]))
+                _put(out, step, hat_percussion, velocities[step])
+
+            for step in on_pulse:
+                if hat_pool[step] == "closed hat" and step not in covered_by:
+                    _put(out, step, hat_percussion,
+                         _velocity_like(velocities, step, steps_per_beat))
+                    inferred += 1
+
+            inferred += _restore_covered(out, hat_percussion, positions, velocities,
+                                         steps_per_beat)
+
+    # Anything still carrying a hat-class percussion vote that didn't turn
+    # into a voice goes back to being a closed hat - the conservative answer,
+    # the same bias _split_hihats already has toward an ambiguous hit.
+    for step, piece in list(out):
+        if piece in _HAT_CLASS and piece not in ("closed hat", hat_percussion):
+            _put(out, step, "closed hat", out.pop((step, piece)))
+
     # --- every other voice that keeps time: restore what was covered ---
     for piece in _TIMEKEEPING:
-        if piece == percussion:
+        if piece in (percussion, hat_percussion):
             continue  # just done, above
         steps = {step for (step, this) in out if this == piece}
         if not steps:

@@ -75,10 +75,16 @@ class TranscriberTestCase(unittest.TestCase):
 
 class TestNoteMap(TranscriberTestCase):
     def test_every_class_lands_on_its_drum_rack_pad(self):
-        notes = self._transcribe(
-            _click(3.0, [0.5, 1.5, 2.0, 2.5]) + _drum(3.0, [1.0]),
-            {0: [50], 1: [100], 2: [150], 3: [200], 4: [250]},
-        )
+        # Not about percussion classification - a bare click has no body and
+        # would otherwise read as a tambourine on both the snare and hi-hat
+        # class (see TestTheSnareClassSplitsThreeWays / TestHiHatPercussion),
+        # which isn't what this test is checking.
+        with mock.patch.object(dt.percussion_splitter, "split",
+                                side_effect=lambda audio, times, sr: [dt.percussion_splitter.SNARE] * len(times)):
+            notes = self._transcribe(
+                _click(3.0, [0.5, 1.5, 2.0, 2.5]) + _drum(3.0, [1.0]),
+                {0: [50], 1: [100], 2: [150], 3: [200], 4: [250]},
+            )
 
         self.assertEqual([note.pitch for note in notes], [36, 38, 47, 42, 49])
 
@@ -141,6 +147,55 @@ class TestTheSnareClassSplitsThreeWays(TranscriberTestCase):
     def test_every_pad_the_snare_class_can_reach_is_in_the_rack(self):
         for note in (dt._PERCUSSION_NOTE, dt._NOTE_FOR_CLASS[dt._SNARE]):
             self.assertTrue(36 <= note <= 51, f"{note} is outside the drum rack")
+
+
+def _real_hihat(length_sec, hits, amplitude=1.0):
+    """A hi-hat with a shell under the jingle, at the ratio that scores as a
+    real drum on percussion_splitter (see TestOpenHihats and
+    drum_transcriber._HAT_PERCUSSION_NOTE). What percussion_splitter is
+    looking for is the body - a bare jingle click with nothing under it is a
+    tambourine as far as it's concerned, same as _shaken is for the snare
+    class, and correctly so."""
+    jingle = _click(length_sec, hits, freq=9000.0, decay_sec=0.02, amplitude=amplitude * 0.25)
+    body = _click(length_sec, hits, freq=220.0, decay_sec=0.05, amplitude=amplitude * 0.75)
+    return jingle + body
+
+
+class TestHiHatPercussion(TranscriberTestCase):
+    """Same vote as the snare class, taken on the hi-hat class's hits - see
+    drum_transcriber._HAT_PERCUSSION_NOTE for why it's a second pool rather
+    than folded into the first. Hits here are spaced well apart; a hi-hat
+    right behind another is exactly the kind of noisy single-hit case
+    groove_reader's whole-voice vote exists to absorb, not something this
+    per-hit vote is expected to get right alone."""
+
+    def test_a_hit_with_a_shell_under_it_is_a_real_hihat(self):
+        notes = self._transcribe(_real_hihat(2.0, [1.0]), {3: [100]})
+
+        self.assertEqual([note.pitch for note in notes], [dt._NOTE_FOR_CLASS[dt._HIHAT]])
+
+    def test_a_hit_with_no_shell_at_all_is_percussion(self):
+        notes = self._transcribe(_shaken(2.0, [1.0]), {3: [100]})
+
+        self.assertEqual([note.pitch for note in notes], [dt._HAT_PERCUSSION_NOTE])
+
+    def test_a_quiet_percussion_hit_is_still_percussion(self):
+        audio = _shaken(3.0, [0.5], amplitude=1.0) + _shaken(3.0, [1.5], amplitude=0.1)
+        notes = self._transcribe(audio, {3: [50, 150]})
+
+        self.assertEqual({note.pitch for note in notes}, {dt._HAT_PERCUSSION_NOTE})
+
+    def test_a_silent_onset_stays_a_real_hihat(self):
+        notes = self._transcribe(np.zeros(SR * 2, dtype=np.float32), {3: [100]})
+
+        self.assertEqual([note.pitch for note in notes], [dt._NOTE_FOR_CLASS[dt._HIHAT]])
+
+    def test_the_percussion_pad_is_in_the_rack(self):
+        # Provisional and never written by name - beat_loop._PIECE_FOR_NOTE
+        # maps it, and groove_reader always resolves it away before a beat
+        # reaches beat_writer - but if it ever did leak through, it has to
+        # land somewhere a stock Drum Rack can play.
+        self.assertTrue(36 <= dt._HAT_PERCUSSION_NOTE <= 51)
 
 
 class TestChunking(unittest.TestCase):
@@ -221,7 +276,10 @@ class TestVelocity(TranscriberTestCase):
         # dynamics.
         audio = _click(3.0, [0.5], freq=60.0, decay_sec=0.05, amplitude=1.0)
         audio = audio + _click(3.0, [1.5], freq=9000.0, amplitude=0.03)
-        notes = self._transcribe(audio, {0: [50], 3: [150]})
+        # Not about percussion classification - see test_every_class_lands_on_its_drum_rack_pad.
+        with mock.patch.object(dt.percussion_splitter, "split",
+                                side_effect=lambda audio, times, sr: [dt.percussion_splitter.SNARE] * len(times)):
+            notes = self._transcribe(audio, {0: [50], 3: [150]})
 
         hihat = next(note for note in notes if note.pitch == 42)
         self.assertEqual(hihat.velocity, 127)
@@ -239,6 +297,19 @@ class TestVelocity(TranscriberTestCase):
 
 
 class TestOpenHihats(TranscriberTestCase):
+    """Open-vs-closed ring detection, not percussion classification - see
+    TestHiHatPercussion for that. percussion_splitter is mocked off here so a
+    bare test click (no body, which genuinely would read as a tambourine -
+    see _shaken) doesn't interfere with what these tests are about."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(
+            dt.percussion_splitter, "split",
+            side_effect=lambda audio, times, sr: [dt.percussion_splitter.SNARE] * len(times))
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def _hihat(self, hits, decay_sec, length_sec=4.0):
         return _click(length_sec, hits, freq=9000.0, decay_sec=decay_sec)
 

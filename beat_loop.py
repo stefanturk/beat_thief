@@ -104,6 +104,7 @@ _PIECE_FOR_NOTE = {
     37: "ghost snare",
     38: "snare",
     39: "tambourine",
+    41: "hat percussion",  # provisional - see drum_transcriber._HAT_PERCUSSION_NOTE
     42: "closed hat",
     46: "open hat",
     47: "low-mid tom",
