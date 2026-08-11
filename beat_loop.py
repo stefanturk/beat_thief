@@ -62,6 +62,7 @@ import numpy as np
 
 import beat_writer
 import drum_transcriber
+import groove_reader
 import instrument_isolator
 
 # The model is bidirectional and judges a hit partly on what surrounds it,
@@ -91,7 +92,9 @@ MAX_BARS = 16
 # beat_writer in its vocabulary rather than in raw note numbers.
 _PIECE_FOR_NOTE = {
     36: "kick",
+    37: "ghost snare",
     38: "snare",
+    39: "tambourine",
     42: "closed hat",
     46: "open hat",
     47: "low-mid tom",
@@ -106,6 +109,9 @@ class Loop(NamedTuple):
                         # marked start, nudged onto the drumming's own grid
     hits_used: int
     hits_dropped: int
+    hits_inferred: int   # hits groove_reader put back that no onset was
+                         # detected for - a stage that quietly adds notes to
+                         # your beat has to be able to say that it did
     tempo: float        # the loop's own tempo, measured off the marked section
     song_tempo: float   # what the whole song was estimated at, for comparison
 
@@ -316,6 +322,13 @@ def build(
     from_sec = origin + rotation * step_sec
     loudest = quantize(from_sec, heard)
 
+    # Now that there's a grid, the loop can be read as music rather than as a
+    # list of onsets: percussion taken off the snare pad on the evidence of
+    # what it plays, and the hits a louder drum was covering put back. This
+    # runs after the rotation on purpose - the phases it measures have to be
+    # phases of the loop that will actually be written.
+    loudest, inferred = groove_reader.refine(loudest, total_steps, STEPS_PER_BAR)
+
     # What was marked and didn't make it: a piece the map doesn't cover, or
     # a hit left behind at the front when the loop moved on to the kick.
     # Counted over the marked section only - the spare bar is there to build
@@ -342,6 +355,7 @@ def build(
         origin_sec=start_sec + from_sec,
         hits_used=len(hits),
         hits_dropped=dropped,
+        hits_inferred=inferred,
         tempo=loop_tempo,
         song_tempo=tempo,
     )

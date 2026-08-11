@@ -28,16 +28,25 @@ from typing import NamedTuple
 import pretty_midi
 
 # Name -> MIDI note, in the order the kit is laid out low to high. Every one
-# of these is a pad in the stock Drum Rack (36-51) and carries its General
-# MIDI meaning, so the file reads correctly in anything else too.
+# of these is a pad in the stock Drum Rack (36-51), and most carry their
+# General MIDI meaning so the file reads correctly in anything else too.
+#
+# Three of them don't, and borrow a neighbour's pad instead: a ghost snare
+# sits where GM puts a side stick, a tambourine where it puts a hand clap,
+# and a shaker where it puts a pedal hi-hat. General MIDI does have a
+# tambourine (54) and a shaker (70), and they are both outside 36-51 - which
+# means they import onto a pad a stock kit has loaded no sample into, so they
+# are silent and invisible, the one failure this whole file exists to avoid.
+# A borrowed pad that plays beats a correct note that doesn't.
 PIECES = {
     "kick": 36,          # Bass Drum 1
-    "side stick": 37,    # Side Stick
+    "ghost snare": 37,   # borrowed: GM Side Stick
     "snare": 38,         # Acoustic Snare
+    "tambourine": 39,    # borrowed: GM Hand Clap
     "low floor tom": 41,
     "closed hat": 42,    # Closed Hi-Hat
     "high floor tom": 43,
-    "pedal hat": 44,     # Pedal Hi-Hat
+    "shaker": 44,        # borrowed: GM Pedal Hi-Hat
     "low tom": 45,
     "open hat": 46,      # Open Hi-Hat
     "low-mid tom": 47,

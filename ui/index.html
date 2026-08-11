@@ -1134,7 +1134,9 @@
       el("build").disabled = false;
       if (loop.error) { el("picker-hint").textContent = loop.error; return; }
       el("picker-hint").textContent =
-        loop.bars + " bar" + (loop.bars === 1 ? "" : "s") + ", " + loop.hits + " hits, " +
+        loop.bars + " bar" + (loop.bars === 1 ? "" : "s") + ", " + loop.hits + " hits" +
+        // Notes worked out from the pattern rather than heard - say so.
+        (loop.inferred ? " (" + loop.inferred + " put back)" : "") + ", " +
         loop.pieces.join(" / ") + " — set Ableton to " + loop.tempo + " BPM" +
         tempoQuibble(loop);
       refreshLibrary();

@@ -174,12 +174,20 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(snares[0].velocity, 118)
 
     def test_velocity_survives(self):
-        notes = [_note(36, 0.0, 120), _note(38, 0.5, 45)]
+        notes = [_note(36, 0.0, 120), _note(38, 0.5, 105)]
         loop = self._build(notes, span=2.0)
 
         by_piece = {hit.piece: hit.velocity for hit in loop.beat.hits}
         self.assertEqual(by_piece["kick"], 120)
-        self.assertEqual(by_piece["snare"], 45)
+        self.assertEqual(by_piece["snare"], 105)
+
+    def test_a_quiet_snare_lands_on_the_ghost_pad_with_its_velocity_intact(self):
+        notes = [_note(36, 0.0, 120), _note(38, 0.5, 30)]
+        loop = self._build(notes, span=2.0)
+
+        by_piece = {hit.piece: hit.velocity for hit in loop.beat.hits}
+        self.assertEqual(by_piece["ghost snare"], 30)
+        self.assertNotIn("snare", by_piece)
 
     def test_every_piece_it_emits_is_a_name_beat_writer_knows(self):
         # A note number the map doesn't cover must be dropped, not passed
@@ -190,6 +198,44 @@ class TestBuild(unittest.TestCase):
         for hit in loop.beat.hits:
             self.assertIn(hit.piece, beat_writer.PIECES)
         self.assertGreaterEqual(loop.hits_dropped, 1)
+
+    def test_the_pads_the_snare_class_splits_into_reach_the_loop(self):
+        # _PIECE_FOR_NOTE is a whitelist, so a pad missing from it is silently
+        # dropped and the whole percussion split would appear to do nothing.
+        notes = [_note(36, 0.0), _note(37, 0.5), _note(39, 1.0), _note(36, 2.0)]
+        loop = self._build(notes)
+
+        self.assertEqual(loop.hits_dropped, 0)
+        for hit in loop.beat.hits:
+            self.assertIn(hit.piece, beat_writer.PIECES)
+
+    def test_a_percussion_voice_is_read_off_the_snare_and_completed(self):
+        # A tambourine on every quarter, with the two under the backbeat
+        # missing because the snare was louder there and only one onset was
+        # detected. groove_reader is what puts those back.
+        notes = []
+        for bar in (0.0, 2.0):
+            for beat in range(4):
+                at = bar + beat * 0.5
+                if beat in (1, 3):
+                    notes.append(_note(38, at, 118))    # snare on two and four
+                else:
+                    notes.append(_note(39, at, 70))     # tambourine elsewhere
+            notes.append(_note(36, bar))
+        loop = self._build(notes)
+
+        tambourine = {hit.step for hit in loop.beat.hits if hit.piece == "tambourine"}
+        self.assertEqual(tambourine, {0, 4, 8, 12, 16, 20, 24, 28})
+        # ...without taking the backbeat away.
+        self.assertEqual({hit.step for hit in loop.beat.hits if hit.piece == "snare"},
+                         {4, 12, 20, 28})
+        self.assertEqual(loop.hits_inferred, 4)
+
+    def test_a_beat_with_nothing_to_read_reports_nothing_inferred(self):
+        notes = [_note(36, 0.0), _note(38, 0.5), _note(36, 1.0), _note(38, 1.5)]
+        loop = self._build(notes, span=2.0)
+
+        self.assertEqual(loop.hits_inferred, 0)
 
     def test_an_end_before_the_start_is_refused(self):
         with self.assertRaises(ValueError):
@@ -334,7 +380,7 @@ class TestWrite(unittest.TestCase):
             steps_per_bar=16, bars=bars, name="Stolen Beat",
         )
         return beat_loop.Loop(
-            beat=beat, bars=bars, origin_sec=10.0, hits_used=1, hits_dropped=0,
+            beat=beat, bars=bars, origin_sec=10.0, hits_used=1, hits_dropped=0, hits_inferred=0,
             tempo=120.0, song_tempo=120.0,
         )
 

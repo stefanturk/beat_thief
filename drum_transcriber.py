@@ -18,6 +18,7 @@ import torch
 from scipy.signal import butter, sosfilt
 
 import adtof
+import percussion_splitter
 
 SAMPLE_RATE = 44100  # what adtof.AudioProcessor loads at; the bands below assume it
 
@@ -30,6 +31,25 @@ _KICK, _SNARE, _TOM, _HIHAT, _CYMBAL = range(5)
 # emits, since 35 is below the rack's first pad and would be invisible.
 _NOTE_FOR_CLASS = (36, 38, 47, 42, 49)
 _OPEN_HIHAT_NOTE = 46
+
+# The snare class comes back out as three pads, because the model has one
+# class for everything that hit like a snare and a real drummer had more than
+# one thing that did.
+#
+#   39  percussion - a tambourine or a shaker, voted on by percussion_splitter
+#       and confirmed or overturned by groove_reader once the loop is on a
+#       grid and its rhythm can be read
+#
+# 39 is General MIDI's hand clap, borrowed: the rack has no tambourine pad
+# inside 36-51, and GM's real one at 54 imports onto an empty pad and is
+# silent (see beat_writer's docstring).
+#
+# The third pad the snare class ends up on - 37, for ghost notes - is not
+# decided here. It's a judgement about how quiet a hit is relative to the
+# loop's other snares, and by the time groove_reader has finished moving
+# voices between pads, which hits those are has changed. So it happens there,
+# once, at the end.
+_PERCUSSION_NOTE = 39
 
 # How long each class's notes are written as. Cosmetic in a rack full of
 # one-shots, but a drum part whose notes are all 50ms slivers is hard to
@@ -314,9 +334,14 @@ def transcribe(wav_path: str) -> list[pretty_midi.Note]:
     """Detect every drum hit in wav_path and return them as MIDI notes,
     sorted by time, with times in seconds from the start of the file.
 
-    Six pieces: kick, snare, toms, closed hi-hat, open hi-hat and cymbal.
-    The first five classes come from the model; open vs closed hi-hat is
-    measured here (see _split_hihats)."""
+    Seven pieces out of five classes: kick, snare, percussion, toms, closed
+    hi-hat, open hi-hat and cymbal. The five classes come from the model;
+    open vs closed hi-hat is measured here (see _split_hihats), and the snare
+    class is split in two by percussion_splitter.
+
+    The percussion note is provisional. It's one weak vote on one hit, and
+    groove_reader is what decides - over a whole voice, on a grid, once
+    there's a rhythm to read."""
     processor = adtof.create_adtof_processor()
     audio = processor.load_audio(wav_path)
     if audio.size == 0:
@@ -334,6 +359,12 @@ def transcribe(wav_path: str) -> list[pretty_midi.Note]:
     hihat_band = _band_filtered(audio, *_VELOCITY_BAND[_HIHAT])
     open_hihats = _split_hihats(hit_times, hihat_band)
 
+    # Which of the snare class's hits weren't drums. Weak per hit on purpose -
+    # groove_reader aggregates it over a whole voice once the loop is on a
+    # grid. Until then it travels as the note the hit was written to.
+    snares = hit_times.get(_SNARE, [])
+    votes = dict(zip(snares, percussion_splitter.split(audio, snares, SAMPLE_RATE)))
+
     notes: list[pretty_midi.Note] = []
     for class_index, times in hit_times.items():
         if not times:
@@ -347,6 +378,8 @@ def transcribe(wav_path: str) -> list[pretty_midi.Note]:
                 pitch, duration = _OPEN_HIHAT_NOTE, min(ring, _OPEN_HIHAT_MAX_RING_SEC)
             else:
                 pitch, duration = _NOTE_FOR_CLASS[class_index], _NOTE_DURATION_SEC[class_index]
+            if class_index == _SNARE and votes.get(time_sec) == percussion_splitter.PERCUSSION:
+                pitch = _PERCUSSION_NOTE
             notes.append(pretty_midi.Note(velocity=velocity, pitch=pitch, start=time_sec, end=time_sec + duration))
 
     notes.sort(key=lambda note: (note.start, note.pitch))
