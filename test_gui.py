@@ -439,13 +439,17 @@ class TestStealBeat(unittest.TestCase):
             return gui.Api().steal_beat(self.stem, start, end)
 
     def test_the_tempo_it_reports_is_the_loops_not_the_songs(self):
-        # This is the number the page tells you to set Ableton to. Reporting
-        # the stem's tempo instead would have the loop and the instruction
-        # disagree by however far the marking was off.
-        loop = self._steal([(36, 0.0), (38, 0.55), (36, 2.2), (38, 2.75)])
+        # This is the number the page tells you to set Ableton to, so it has
+        # to be the loop's. Drumming at 110 inside a stem whose filename says
+        # 120: the reported tempo follows the playing.
+        step = 60.0 / 110.0 / 4
+        played = [(42, i * step) for i in range(32)]
+        played += [(36, i * 16 * step) for i in range(2)]
+        played += [(38, (i * 16 + 4) * step) for i in range(2)]
+        loop = self._steal(played, start=10.0, end=10.0 + 32 * step)
 
         self.assertEqual(loop["bars"], 2)
-        self.assertAlmostEqual(loop["tempo"], 240.0 / 2.2, places=2)
+        self.assertAlmostEqual(loop["tempo"], 110.0, delta=1.0)
         self.assertAlmostEqual(loop["song_tempo"], 120.0, places=6)
 
     def test_the_tempo_it_reports_is_the_one_in_the_filename(self):

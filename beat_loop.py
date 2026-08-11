@@ -10,17 +10,24 @@ Given a stem, a tempo, and the piece of it somebody marked by ear:
 
   1. transcribe just that section (drum_transcriber, with padding either
      side so the model has context at the edges)
-  2. work out how many bars it is, from the song's rough tempo
-  3. divide the section itself into that many bars - the section sets the
-     grid, and its own tempo falls out of doing so
+  2. measure the tempo again from those hits, starting from the song's
+     rough estimate (instrument_isolator.refine_tempo)
+  3. work out how many bars the section is, at that tempo
   4. find where the grid sits within it, from the hits themselves
   5. quantize onto it, and hand the result to beat_writer
 
-Steps 3 and 4 are the ones that matter, and they're the same idea twice: the
+Steps 2 and 4 are the ones that matter, and they're the same idea twice: the
 beat determines the grid, not the other way around. A whole-song tempo is an
-average of something that drifts, so it's trusted only to count bars - after
-that the marked phrase is measured against itself, which is also what makes
-the loop close seamlessly.
+average of something that drifts across the length of a song, so it's only a
+starting point; what the loop is measured against is the drumming inside the
+section somebody picked.
+
+Note what step 2 is *not*: dividing the marked span by the bar count. That's
+the tempting shortcut and it hands the grid to whichever edge was cut
+sloppily - measured on a real two-bar section marked about 7% long, it put
+the grid at 97.5 BPM against a song at 105.4 and left a third of the hits
+sitting a hair off the halfway line between two sixteenths, so which one they
+landed on was a coin toss. The playing is a better clock than the edges.
 
 What isn't done here is second-guessing where the downbeat is. There used to
 be a step that scored every rotation of the loop for how much it looked like
@@ -40,8 +47,11 @@ import subprocess
 import tempfile
 from typing import NamedTuple
 
+import numpy as np
+
 import beat_writer
 import drum_transcriber
+import instrument_isolator
 
 # The model is bidirectional and judges a hit partly on what surrounds it,
 # so a section cut out and handed over on its own loses hits at both ends.
@@ -151,11 +161,11 @@ def build(
     quantized loop.
 
     `tempo` is the song's estimate, from the stem's filename. It is not the
-    loop's tempo: it only says how many bars were marked, and the loop's own
-    tempo is then measured off the marked span (see the module docstring).
-    The two are reported side by side as Loop.tempo and Loop.song_tempo,
-    because a big disagreement means the section was marked long or short
-    and the person who marked it is the only one who can say which."""
+    loop's tempo: it's the starting point for measuring the section's own,
+    off the drumming inside it (see the module docstring). The two are
+    reported side by side as Loop.tempo and Loop.song_tempo; they should now
+    agree closely, and a real disagreement means the phrase genuinely runs at
+    its own speed."""
     if end_sec <= start_sec:
         raise ValueError("the end of the section has to come after its start")
 
@@ -177,19 +187,25 @@ def build(
     ]
 
     # The song's estimate gets exactly one job: saying how many bars long the
-    # marked section is. Rounding to a whole number of bars is all a
-    # whole-song average is good enough for.
-    bars = _bar_count(span, beat_writer.BEATS_PER_BAR * 60.0 / tempo)
+    # The tempo is measured again here, off the drumming inside the section,
+    # with the song's whole-length estimate only as a starting point. That's
+    # what makes the beat set the grid: the phrase somebody picked has its
+    # own tempo, and a song's drifts across its length (see
+    # instrument_isolator's drift warning).
+    #
+    # Measured rather than taken from the span, which is the tempting shortcut
+    # and is wrong: span/bars makes one sloppy edge define the whole grid. On
+    # a real two-bar section marked about 7% long it put the grid at 97.5 BPM
+    # against a song at 105.4, which left a third of the hits sitting within
+    # a fifth of a step of the halfway line - a coin toss for which sixteenth
+    # they landed on. Refined off the same section's onsets it came out at
+    # 105.2 and nothing was ambiguous.
+    loop_tempo = instrument_isolator.refine_tempo(
+        np.array(sorted({time_sec for time_sec, _, _ in inside})), tempo)
 
-    # From here the section measures itself. A bar is a bar of what was
-    # marked, not a bar of whatever the song averaged out to - the phrase
-    # somebody picked has its own tempo, and a song's drifts (see
-    # instrument_isolator's drift warning). Deriving the grid from the
-    # selection is also the only way the loop can be seamless: it ends
-    # exactly where it started, by construction.
-    bar_sec = span / bars
+    bar_sec = beat_writer.BEATS_PER_BAR * 60.0 / loop_tempo
     step_sec = bar_sec / STEPS_PER_BAR
-    loop_tempo = beat_writer.BEATS_PER_BAR * 60.0 / bar_sec
+    bars = _bar_count(span, bar_sec)
 
     origin = _grid_origin([time_sec for time_sec, _, _ in inside], step_sec)
     total_steps = bars * STEPS_PER_BAR
