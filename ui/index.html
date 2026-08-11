@@ -575,7 +575,7 @@
     <section class="picker" id="picker" hidden>
       <div class="picker-head">
         <span id="picker-title">Steal a beat</span>
-        <span id="picker-hint">Click at the 1 of the phrase — ← → to nudge — space at the next 1.</span>
+        <span id="picker-hint">Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — space at the next 1.</span>
       </div>
       <canvas id="wave" width="1000" height="156"></canvas>
       <div class="picker-controls">
@@ -966,9 +966,10 @@
         // Only ever used as the size of a keystroke - nothing is drawn or
         // quantized with it. A stem with no tempo in its name falls back to
         // a round second.
-        beat: prepared.tempo > 0 ? 60 / prepared.tempo : BIG_NUDGE_SEC,
+        beat: prepared.tempo > 0 ? 60 / prepared.tempo : FALLBACK_BEAT_SEC,
+        nudge: prepared.tempo > 0 ? 60 / prepared.tempo / 4 : FALLBACK_NUDGE_SEC,
       };
-      el("picker-hint").textContent = "Click at the 1 of the phrase — ← → to nudge — space at the next 1.";
+      el("picker-hint").textContent = "Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — space at the next 1.";
       audio.src = prepared.audio;
       // An mp3 can't be seeked until it's playable, so a click before this
       // fires would silently land at zero.
@@ -1020,8 +1021,14 @@
   // Nudging re-seeks and keeps playing, so every press re-auditions the one
   // from its new spot. That's the whole point: you find the downbeat by
   // hearing it land, not by looking at anything.
-  const NUDGE_SEC = 0.2;
-  const BIG_NUDGE_SEC = 1.0;
+  //
+  // The steps are musical - a sixteenth, and a beat with shift - rather than
+  // round numbers of seconds. A round 0.2s couldn't express a sixteenth (at
+  // 105 BPM that's 0.142s), and a section landing a sixteenth off the beat
+  // is the commonest way a loop comes out right in every respect except
+  // where it starts. There was no key combination that fixed it.
+  const FALLBACK_NUDGE_SEC = 0.2;   // a stem with no tempo in its name
+  const FALLBACK_BEAT_SEC = 1.0;
 
   function nudgeStart(seconds) {
     if (!picker || picker.start === null) return;
@@ -1114,6 +1121,7 @@
     end: picker.end,
     duration: picker.duration,
     beat: picker.beat,
+    nudge: picker.nudge,
     playing: !audio.paused,
     at: audio.currentTime,
   };
@@ -1268,7 +1276,7 @@
     if (event.code === "Space") { markEnd(); return; }
     const direction = event.code === "ArrowLeft" ? -1 : 1;
     if (event.shiftKey) slideSection(direction);
-    else nudgeStart(direction * NUDGE_SEC);
+    else nudgeStart(direction * picker.nudge);
   });
 
   window.addEventListener("pywebviewready", () => {

@@ -29,15 +29,19 @@ the grid at 97.5 BPM against a song at 105.4 and left a third of the hits
 sitting a hair off the halfway line between two sixteenths, so which one they
 landed on was a coin toss. The playing is a better clock than the edges.
 
-What isn't done here is second-guessing where the downbeat is. There used to
-be a step that scored every rotation of the loop for how much it looked like
-4/4 and turned the beat round to suit. It was wrong often enough to matter -
-a kick on the and-of-four would win over the one, and the whole loop came out
-a beat late - and it was wrong in a way nobody could correct, since it
-silently overrode where you clicked. The picker lets you play from the start
-you've marked and walk it with the arrow keys, so the one is something you
-hear and place. That's a better instrument than a heuristic, and this file's
-job is to take it at its word."""
+The one place the marking is corrected is the start, and only in one way: a
+loop is turned to begin on a kick (_kick_downbeat). People click a little
+before the phrase, so a loop that begins on silence is the ordinary outcome
+of marking by ear, and starting on a kick is what a loop is almost always
+for.
+
+That's deliberately narrower than what used to be here. An earlier version
+scored every rotation for how much it looked like 4/4 and turned the beat
+round to suit; on a real section it could not tell its best answer from its
+second best - 59.4 against 58.1 - while the two were a whole beat apart, and
+it silently overrode the marking either way. Which beat is the one is a
+musical judgement, and the picker's shift-arrows are the instrument for it.
+This file only does the part that isn't a judgement."""
 
 from __future__ import annotations
 
@@ -142,6 +146,45 @@ def _grid_origin(times: list[float], step_sec: float) -> float:
     return math.atan2(y, x) / (2 * math.pi) * step_sec
 
 
+# How close a kick has to come to the strongest one to be preferred for
+# being earlier. Loops nearly always want the first strong kick rather than
+# the loudest one somewhere later, and without this a beat whose kick on
+# three is a few velocity steps harder than its kick on one gets turned
+# round - which is how the old downbeat guesser used to ruin a good marking.
+_KICK_MARGIN = 0.9
+
+
+def _kick_downbeat(placed: dict, total_steps: int) -> int:
+    """Which step of the loop to call one.
+
+    A stolen loop is nearly always wanted starting with a kick on the one,
+    and a section marked by ear starts wherever the mouse went - usually a
+    little before the phrase, since people click early. So the loop is
+    turned to begin on a kick.
+
+    Only kicks vote, and they vote by how hard they are and by turning up in
+    every bar. Nothing here scores how much the result "looks like 4/4":
+    that's what the old guesser did, and on a real section it could not tell
+    its best answer from its second best (59.4 against 58.1) while being a
+    whole beat apart. Where the one goes is a musical judgement, and the
+    picker's shift-arrows are how you make it. This only does the part that
+    isn't a judgement - don't start the loop on silence.
+
+    Positions are folded across bars and searched within a single bar, since
+    rotating a repeating loop by a whole bar changes nothing you can hear.
+    Returns 0 when there are no kicks, which leaves the marking alone."""
+    within_bar = min(STEPS_PER_BAR, total_steps)
+    force = [0.0] * within_bar
+    for (step, piece), velocity in placed.items():
+        if piece == "kick":
+            force[step % within_bar] += velocity
+
+    strongest = max(force)
+    if strongest <= 0:
+        return 0
+    return next(step for step, f in enumerate(force) if f >= strongest * _KICK_MARGIN)
+
+
 def _bar_count(span_sec: float, bar_sec: float) -> int:
     """How many whole bars the marked section is, rounded to the nearest.
 
@@ -229,8 +272,9 @@ def build(
         key = (step, piece)
         loudest[key] = max(loudest.get(key, 0), velocity)
 
+    rotation = _kick_downbeat(loudest, total_steps)
     hits = tuple(
-        beat_writer.Hit(piece, step, velocity)
+        beat_writer.Hit(piece, (step - rotation) % total_steps, velocity)
         for (step, piece), velocity in sorted(loudest.items())
     )
     beat = beat_writer.Beat(
@@ -243,7 +287,7 @@ def build(
     return Loop(
         beat=beat,
         bars=bars,
-        origin_sec=start_sec + origin,
+        origin_sec=start_sec + origin + rotation * step_sec,
         hits_used=len(hits),
         hits_dropped=dropped,
         tempo=loop_tempo,
