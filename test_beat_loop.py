@@ -20,6 +20,26 @@ def _note(pitch, start, velocity=100):
     return pretty_midi.Note(velocity=velocity, pitch=pitch, start=start, end=start + 0.05)
 
 
+def _sixteenths(tempo, bars=2):
+    """A plain beat played on the grid at `tempo`: hat on every sixteenth,
+    kick on one and three, snare on the backbeat.
+
+    Enough onsets to measure a tempo from - refine_tempo wants at least
+    instrument_isolator._MIN_ONSETS_FOR_REFINEMENT of them and hands back
+    the estimate it was given otherwise."""
+    step = 60.0 / tempo / 4
+    notes = []
+    for step_index in range(bars * 16):
+        at = step_index * step
+        notes.append(_note(42, at))
+        within = step_index % 16
+        if within in (0, 8):
+            notes.append(_note(36, at))
+        elif within in (4, 12):
+            notes.append(_note(38, at))
+    return notes
+
+
 class TestGridOrigin(unittest.TestCase):
     def test_hits_already_on_the_grid_need_no_offset(self):
         step = 0.1
@@ -191,34 +211,41 @@ class TestBuild(unittest.TestCase):
         self.assertAlmostEqual(loop.tempo, self.TEMPO, places=6)
         self.assertAlmostEqual(loop.song_tempo, self.TEMPO, places=6)
 
-    def test_a_section_marked_long_slows_the_loop_down_to_suit(self):
-        # 4.4s is still nearest to two bars, but it's two bars of a slower
-        # tempo - and the section is what counts. This is the whole point:
-        # the beat determines the grid, not the song's average.
-        notes = [_note(36, 0.0), _note(38, 0.55), _note(36, 2.2), _note(38, 2.75)]
-        loop = self._build(notes, span=4.4)
+    def test_a_sloppy_edge_does_not_move_the_grid(self):
+        # The same drumming, marked 10% long. The tempo comes from the
+        # playing, not from where the section was cut, so it doesn't budge.
+        #
+        # This is the one that matters. Deriving the tempo from span/bars
+        # instead put a real two-bar section at 97.5 BPM against a song at
+        # 105.4, and a third of its hits landed within a fifth of a step of
+        # the halfway line - a coin toss for which sixteenth they got, which
+        # is what a stacked kick and snare that should be apart looks like.
+        exact = self._build(_sixteenths(self.TEMPO, bars=2), span=4.0)
+        sloppy = self._build(_sixteenths(self.TEMPO, bars=2), span=4.4)
 
-        self.assertEqual(loop.bars, 2)
-        self.assertAlmostEqual(loop.tempo, 240.0 / 2.2, places=6)   # ~109 BPM
-        self.assertAlmostEqual(loop.song_tempo, self.TEMPO, places=6)
+        self.assertAlmostEqual(sloppy.tempo, self.TEMPO, delta=1.0)
+        self.assertAlmostEqual(sloppy.tempo, exact.tempo, delta=0.5)
+        self.assertEqual(sloppy.bars, 2)
 
-    def test_the_loop_carries_its_own_tempo_not_the_songs(self):
-        # The tempo in the Beat is what reaches the MIDI header and the
-        # filename, so it has to be the loop's rather than the stem's.
-        notes = [_note(36, 0.0), _note(38, 0.55)]
-        loop = self._build(notes, span=4.4)
+    def test_the_loop_carries_the_tempo_of_what_was_played(self):
+        # Drumming at 110 inside a song estimated at 120. The tempo in the
+        # Beat is what reaches the MIDI header and the filename, so it has
+        # to follow the playing rather than the whole-song average.
+        loop = self._build(_sixteenths(110.0, bars=2), span=4 * 60.0 / 110.0 * 2)
 
         self.assertEqual(loop.beat.tempo, loop.tempo)
-        self.assertNotAlmostEqual(loop.beat.tempo, self.TEMPO, places=1)
+        self.assertAlmostEqual(loop.tempo, 110.0, delta=1.0)
+        self.assertAlmostEqual(loop.song_tempo, self.TEMPO, places=6)
 
-    def test_a_loop_is_exactly_as_long_as_the_section_that_was_marked(self):
-        # What makes it loop seamlessly: bars * bar length == the span, by
-        # construction, however far off the song's tempo the marking was.
+    def test_a_loop_is_a_whole_number_of_bars_of_its_own_tempo(self):
+        # What makes it seamless. It's the nearest whole number of bars to
+        # what was marked, so it can differ from the marked span by up to
+        # half a bar - and that half bar is the sloppy edge, not the music.
         for span in (2.0, 4.0, 4.4, 7.6):
             with self.subTest(span=span):
-                loop = self._build([_note(36, 0.0)], span=span)
+                loop = self._build(_sixteenths(self.TEMPO, bars=4), span=span)
                 bar_sec = beat_writer.BEATS_PER_BAR * 60.0 / loop.tempo
-                self.assertAlmostEqual(loop.bars * bar_sec, span, places=6)
+                self.assertLess(abs(loop.bars * bar_sec - span), bar_sec / 2 + 1e-6)
 
     def test_the_reported_origin_points_back_into_the_stem(self):
         notes = [_note(36, 0.0), _note(38, 0.5), _note(36, 1.0), _note(38, 1.5)]
