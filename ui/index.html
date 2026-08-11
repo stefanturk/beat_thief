@@ -500,8 +500,17 @@
   #mark { border-color: var(--violet); color: var(--violet); }
   #mark:hover { background: var(--violet-dim); }
 
-  #clock {
+  /* How long you've held the section for. Pushed to the right with the
+     clock, and violet because it's the thing you're deciding. */
+  #marked {
     margin-left: auto;
+    font-family: var(--display);
+    font-size: 11px;
+    color: var(--violet);
+    font-variant-numeric: tabular-nums;
+  }
+  #clock {
+    margin-left: 0;
     font-family: var(--display);
     font-size: 11px;
     color: var(--dim);
@@ -567,13 +576,14 @@
     <section class="picker" id="picker" hidden>
       <div class="picker-head">
         <span id="picker-title">Steal a beat</span>
-        <span id="picker-hint">Click where the phrase starts, press play, then hit space at its end.</span>
+        <span id="picker-hint">Click at the 1 of the phrase — ← → to nudge — space at the next 1.</span>
       </div>
       <canvas id="wave" width="1000" height="156"></canvas>
       <div class="picker-controls">
         <button id="play" type="button">Play</button>
         <button id="mark" type="button" disabled>Mark the end</button>
         <button id="picker-close" type="button">Close</button>
+        <span id="marked"></span>
         <span id="clock">0:00</span>
       </div>
     </section>
@@ -860,11 +870,69 @@
     }
   }
 
+  function markedSoFar() {
+    if (!picker || picker.start === null) return null;
+    const to = picker.end === null ? audio.currentTime : picker.end;
+    return Math.max(0, to - picker.start);
+  }
+
+  // Deliberately no bar count here. Bars aren't known until the section
+  // exists - the section is what decides how long a bar is - so the only
+  // honest thing to show while you're still listening is how long you've
+  // held it for.
+  function showClock() {
+    if (!picker) return;
+    const marked = markedSoFar();
+    el("marked").textContent = marked === null ? "" : "marked " + marked.toFixed(1) + "s";
+    el("clock").textContent = clock(audio.currentTime) + " / " + clock(picker.duration);
+  }
+
   function tick() {
     if (!picker) return;
-    el("clock").textContent = clock(audio.currentTime) + " / " + clock(picker.duration);
+    showClock();
     drawWave();
     raf = requestAnimationFrame(tick);
+  }
+
+  // Seek first, play once the seek has landed. Setting currentTime on a
+  // playing element and calling play() in the same breath leaves WebKit
+  // stuck in a seek that never resolves - measured in a real window, where
+  // playback simply stopped advancing while paused stayed false. Nudging
+  // does exactly that, several times a second, so it has to be the other
+  // way round: pause, seek, resume when the element says it's ready.
+  // Seek first, play once the seek has landed. Setting currentTime on a
+  // playing element and calling play() in the same breath leaves WebKit
+  // stuck in a seek that never resolves - measured in a real window, where
+  // playback stopped advancing while paused stayed false. Nudging does
+  // exactly that, potentially several times a second, so it has to be the
+  // other way round: pause, seek, resume when the element says it's ready.
+  //
+  // The intent is held in a variable rather than in a one-shot listener,
+  // because nudging again mid-seek would leave the old listener to resume
+  // playback after the new pause.
+  let wantPlaying = false;
+  audio.addEventListener("seeked", () => { if (wantPlaying) audio.play(); });
+  audio.addEventListener("timeupdate", showClock);
+
+  function playFrom(seconds) {
+    if (!picker) return;
+    wantPlaying = true;
+    el("play").textContent = "Pause";
+    if (!raf) tick();
+    if (seconds === null) { audio.play(); return; }
+
+    audio.pause();
+    audio.currentTime = seconds;
+    if (!audio.seeking) audio.play();
+  }
+
+  function pausePlay() {
+    wantPlaying = false;
+    audio.pause();
+    el("play").textContent = "Play";
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    showClock();
+    drawWave();
   }
 
   function openPicker(song) {
@@ -883,7 +951,7 @@
     window.pywebview.api.audition(song.have.drums).then((prepared) => {
       if (prepared.error) { el("picker-hint").textContent = prepared.error; return; }
       picker = { song, peaks: prepared.peaks, duration: prepared.duration, start: null, end: null };
-      el("picker-hint").textContent = "Click where the phrase starts, press play, then hit space at its end.";
+      el("picker-hint").textContent = "Click at the 1 of the phrase — ← → to nudge — space at the next 1.";
       audio.src = prepared.audio;
       // An mp3 can't be seeked until it's playable, so a click before this
       // fires would silently land at zero.
@@ -894,6 +962,7 @@
   }
 
   function closePicker() {
+    wantPlaying = false;
     audio.pause();
     audio.removeAttribute("src");
     if (raf) { cancelAnimationFrame(raf); raf = null; }
@@ -901,17 +970,37 @@
     el("picker").hidden = true;
     el("play").textContent = "Play";
     el("mark").disabled = true;
+    el("marked").textContent = "";
   }
 
+  // Clicking is one intent - "start it here" - so it's one action. It used
+  // to set the point silently and leave you to go and find the Play button,
+  // which is two actions for one thought and made every correction cost a
+  // trip to the mouse. Clicking again mid-play is how you make a big move.
   function seekFromClick(event) {
-    if (!picker) return;
+    if (!picker || el("play").disabled) return;
     const box = wave.getBoundingClientRect();
     const at = ((event.clientX - box.left) / box.width) * picker.duration;
-    picker.start = Math.max(0, Math.min(at, picker.duration));
+    setStart(at);
+  }
+
+  function setStart(seconds) {
+    picker.start = Math.max(0, Math.min(seconds, picker.duration));
     picker.end = null;
-    audio.currentTime = picker.start;
     el("mark").disabled = false;
+    playFrom(picker.start);
     drawWave();
+  }
+
+  // Nudging re-seeks and keeps playing, so every press re-auditions the one
+  // from its new spot. That's the whole point: you find the downbeat by
+  // hearing it land, not by looking at anything.
+  const NUDGE_SEC = 0.2;
+  const BIG_NUDGE_SEC = 1.0;
+
+  function nudgeStart(seconds) {
+    if (!picker || picker.start === null) return;
+    setStart(picker.start + seconds);
   }
 
   function markEnd() {
@@ -919,21 +1008,51 @@
     const end = audio.currentTime;
     if (end <= picker.start) { el("picker-hint").textContent = "That is before the start - click again and play on."; return; }
     picker.end = end;
-    audio.pause();
-    el("play").textContent = "Play";
+    pausePlay();
     el("picker-hint").textContent = "Stealing it...";
     el("mark").disabled = true;
-    drawWave();
 
     window.pywebview.api.steal_beat(picker.song.have.drums, picker.start, end).then((loop) => {
       el("mark").disabled = false;
       if (loop.error) { el("picker-hint").textContent = loop.error; return; }
       el("picker-hint").textContent =
         loop.bars + " bar" + (loop.bars === 1 ? "" : "s") + ", " + loop.hits + " hits, " +
-        loop.pieces.join(" / ") + " — set Ableton to " + loop.tempo + " BPM";
+        loop.pieces.join(" / ") + " — set Ableton to " + loop.tempo + " BPM" +
+        tempoQuibble(loop);
       refreshLibrary();
     });
   }
+
+  // The loop is measured off the section you marked, so if you held it a bar
+  // too long its tempo comes out wrong by that much. Nothing can tell from
+  // here whether that was a slip or a phrase that genuinely runs at its own
+  // speed, so it says what it found and leaves the judgement with you.
+  const TEMPO_QUIBBLE = 0.05;
+
+  function tempoQuibble(loop) {
+    if (!loop.song_tempo) return "";
+    const off = Math.abs(loop.tempo - loop.song_tempo) / loop.song_tempo;
+    if (off < TEMPO_QUIBBLE) return "";
+    // A section held too long stretches its own bars, so it reads as slower.
+    const longOrShort = loop.tempo < loop.song_tempo ? "long" : "short";
+    return " (the song runs at " + loop.song_tempo +
+           " — you may have marked the phrase " + longOrShort + ")";
+  }
+
+  // The picker is the one part of this page that can only be checked by
+  // driving a real window - the pywebview bridge and a playing <audio>
+  // don't exist anywhere else - and all of its state is in closures above.
+  // This is the single read-only window onto it, so a driver can dispatch
+  // real clicks and keystrokes and then ask what happened, rather than
+  // calling the handlers directly and proving nothing (which is exactly how
+  // a dead spacebar survived a round of "verified").
+  window.__picker = () => picker && {
+    start: picker.start,
+    end: picker.end,
+    duration: picker.duration,
+    playing: !audio.paused,
+    at: audio.currentTime,
+  };
 
   // --- talking to Python -------------------------------------------------
 
@@ -1057,30 +1176,30 @@
 
   el("play").addEventListener("click", () => {
     if (!picker) return;
-    if (audio.paused) {
-      audio.play();
-      el("play").textContent = "Pause";
-      if (!raf) tick();
-    } else {
-      audio.pause();
-      el("play").textContent = "Play";
-      if (raf) { cancelAnimationFrame(raf); raf = null; }
-      drawWave();
-    }
+    if (audio.paused) playFrom(null); else pausePlay();
   });
 
   el("mark").addEventListener("click", markEnd);
 
-  // Space marks the end, which is the whole interaction - but only while
-  // the picker is open, and never while a link is being typed into the box.
+  // The keyboard is the picker. Space marks the end and the arrows walk the
+  // start onto the one - but only while the picker is open, and never while
+  // a link is being typed into the box.
   document.addEventListener("keydown", (event) => {
-    if (event.code !== "Space" || el("picker").hidden) return;
-    // Somewhere you can type is the one place a space is a space.
+    if (el("picker").hidden) return;
+    const keyed = event.code === "Space" || event.code === "ArrowLeft" || event.code === "ArrowRight";
+    if (!keyed) return;
+    // Somewhere you can type is the one place these are just keys. The link
+    // box is autofocused, so without this the whole interaction is dead -
+    // which is exactly how the spacebar came to do nothing for a while.
     const typing = document.activeElement;
     if (typing && (typing.tagName === "INPUT" || typing.tagName === "TEXTAREA")) return;
-    // Stops a space from also pressing whatever button was last clicked.
+    // Stops space pressing whatever button was last clicked, and stops the
+    // arrows scrolling the window out from under the waveform.
     event.preventDefault();
-    markEnd();
+
+    if (event.code === "Space") { markEnd(); return; }
+    const step = event.shiftKey ? BIG_NUDGE_SEC : NUDGE_SEC;
+    nudgeStart(event.code === "ArrowLeft" ? -step : step);
   });
 
   window.addEventListener("pywebviewready", () => {

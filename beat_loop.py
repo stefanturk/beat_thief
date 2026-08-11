@@ -10,14 +10,19 @@ Given a stem, a tempo, and the piece of it somebody marked by ear:
 
   1. transcribe just that section (drum_transcriber, with padding either
      side so the model has context at the edges)
-  2. work out how many bars it is, from the tempo
-  3. find where the grid actually sits, from the hits themselves
-  4. quantize onto it, and hand the result to beat_writer
+  2. work out how many bars it is, from the song's rough tempo
+  3. divide the section itself into that many bars - the section sets the
+     grid, and its own tempo falls out of doing so
+  4. find where the grid sits within it, from the hits themselves
+  5. quantize onto it, and hand the result to beat_writer
 
-Step 3 is the one that matters. Somebody picking a section by ear starts it
-wherever they clicked, which is nowhere in particular - so the loop's
-downbeat has to be recovered from the drumming rather than assumed to be
-where the mouse was."""
+Steps 3 and 4 are the ones that matter, and they're the same idea twice: the
+beat determines the grid, not the other way around. A whole-song tempo is an
+average of something that drifts, so it's trusted only to count bars - after
+that the marked phrase is measured against itself, which is also what makes
+the loop close seamlessly. And somebody picking a section by ear starts it
+wherever they clicked, which is nowhere in particular, so the downbeat is
+recovered from the drumming rather than assumed to be where the mouse was."""
 
 from __future__ import annotations
 
@@ -86,6 +91,8 @@ class Loop(NamedTuple):
     origin_sec: float   # where in the stem the loop's downbeat was found
     hits_used: int
     hits_dropped: int
+    tempo: float        # the loop's own tempo, measured off the marked section
+    song_tempo: float   # what the whole song was estimated at, for comparison
 
 
 def _section_wav(wav_path: str, start_sec: float, end_sec: float, out_path: str) -> float:
@@ -194,10 +201,12 @@ def build(
     """Transcribe [start_sec, end_sec] of wav_path and return it as a
     quantized loop.
 
-    tempo comes from the song's own alignment (it's in the stem's filename)
-    rather than being re-derived here - every export from a song shares one
-    tempo, and a loop that disagreed with the stem it came from would be
-    the one thing worse than no loop."""
+    `tempo` is the song's estimate, from the stem's filename. It is not the
+    loop's tempo: it only says how many bars were marked, and the loop's own
+    tempo is then measured off the marked span (see the module docstring).
+    The two are reported side by side as Loop.tempo and Loop.song_tempo,
+    because a big disagreement means the section was marked long or short
+    and the person who marked it is the only one who can say which."""
     if end_sec <= start_sec:
         raise ValueError("the end of the section has to come after its start")
 
@@ -218,9 +227,20 @@ def build(
         if 0 <= (note.start - lead) <= span
     ]
 
-    bar_sec = beat_writer.BEATS_PER_BAR * 60.0 / tempo
-    bars = _bar_count(span, bar_sec)
+    # The song's estimate gets exactly one job: saying how many bars long the
+    # marked section is. Rounding to a whole number of bars is all a
+    # whole-song average is good enough for.
+    bars = _bar_count(span, beat_writer.BEATS_PER_BAR * 60.0 / tempo)
+
+    # From here the section measures itself. A bar is a bar of what was
+    # marked, not a bar of whatever the song averaged out to - the phrase
+    # somebody picked has its own tempo, and a song's drifts (see
+    # instrument_isolator's drift warning). Deriving the grid from the
+    # selection is also the only way the loop can be seamless: it ends
+    # exactly where it started, by construction.
+    bar_sec = span / bars
     step_sec = bar_sec / STEPS_PER_BAR
+    loop_tempo = beat_writer.BEATS_PER_BAR * 60.0 / bar_sec
 
     origin = _grid_origin([time_sec for time_sec, _, _ in inside], step_sec)
     total_steps = bars * STEPS_PER_BAR
@@ -250,7 +270,7 @@ def build(
         for (step, piece), velocity in sorted(loudest.items())
     )
     beat = beat_writer.Beat(
-        tempo=tempo,
+        tempo=loop_tempo,
         hits=hits,
         steps_per_bar=STEPS_PER_BAR,
         bars=bars,
@@ -262,6 +282,8 @@ def build(
         origin_sec=start_sec + origin + rotation * step_sec,
         hits_used=len(hits),
         hits_dropped=dropped,
+        tempo=loop_tempo,
+        song_tempo=tempo,
     )
 
 

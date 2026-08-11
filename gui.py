@@ -185,9 +185,12 @@ class Api:
     def steal_beat(self, wav_path: str, start_sec: float, end_sec: float) -> dict:
         """Turn the marked section into a looping .mid next to the stem.
 
-        The tempo is read back out of the stem's own filename rather than
-        estimated here, so a stolen loop and the stem it came from can't
-        disagree about what tempo the song is."""
+        Two tempos come back and they're different things. "tempo" is the
+        loop's, measured off the section that was marked, and it's the
+        number to set Ableton to. "song_tempo" is the whole song's rough
+        estimate, read back out of the stem's filename rather than
+        re-estimated here; it's only useful for noticing that the two
+        disagree, which means the phrase was marked long or short."""
         try:
             song_dir = os.path.dirname(wav_path)
             basename = os.path.splitext(os.path.basename(wav_path))[0]
@@ -203,7 +206,8 @@ class Api:
             "path": path,
             "name": os.path.basename(path),
             "bars": loop.bars,
-            "tempo": tempo,
+            "tempo": round(loop.tempo, 3),
+            "song_tempo": round(loop.song_tempo, 3),
             "hits": loop.hits_used,
             "pieces": sorted({hit.piece for hit in loop.beat.hits}),
         }
