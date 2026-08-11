@@ -125,10 +125,16 @@ def score(audio: np.ndarray, times: list[float], sample_rate: int) -> list[float
     return scores
 
 
-def split(audio: np.ndarray, times: list[float], sample_rate: int) -> list[str]:
+def split(audio: np.ndarray, times: list[float], sample_rate: int,
+          threshold: float = _PERCUSSION_SCORE_DB) -> list[str]:
     """For each hit the model called a snare: SNARE, or PERCUSSION.
 
     A vote, not a verdict. groove_reader gets the last word, and is built on
-    the assumption that a good fraction of these are wrong."""
-    return [PERCUSSION if value > _PERCUSSION_SCORE_DB else SNARE
+    the assumption that a good fraction of these are wrong.
+
+    `threshold` defaults to the line calibrated on Officially Missing You,
+    but a caller with a better idea of what "real" sounds like on this
+    specific recording - see drum_transcriber.calibrate_hat_threshold - can
+    supply its own."""
+    return [PERCUSSION if value > threshold else SNARE
             for value in score(audio, times, sample_rate)]

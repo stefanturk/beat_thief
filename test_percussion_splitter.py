@@ -56,6 +56,16 @@ class TestTheVote(unittest.TestCase):
     def test_no_hits_is_not_an_error(self):
         self.assertEqual(ps.split(_drum(2.0, 1.0), [], SR), [])
 
+    def test_a_caller_can_supply_its_own_line(self):
+        # A hit that reads as percussion against the default line can still
+        # be called a drum against a line fitted to a brighter-sounding kit -
+        # see drum_transcriber.calibrate_hat_threshold.
+        audio = _shaken(2.0, 1.0)
+        score = ps.score(audio, [1.0], SR)[0]
+
+        self.assertEqual(ps.split(audio, [1.0], SR), [ps.PERCUSSION])
+        self.assertEqual(ps.split(audio, [1.0], SR, threshold=score + 1.0), [ps.SNARE])
+
     def test_a_hit_at_the_very_start_does_not_reach_behind_the_file(self):
         # There is no "just before" to measure against at time zero.
         self.assertEqual(len(ps.split(_shaken(2.0, 0.0), [0.0], SR)), 1)

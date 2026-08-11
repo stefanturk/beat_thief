@@ -66,11 +66,11 @@ class TranscriberTestCase(unittest.TestCase):
         sf.write(path, audio, SR)
         return path
 
-    def _transcribe(self, audio, hits_by_class):
+    def _transcribe(self, audio, hits_by_class, **kwargs):
         path = self._wav(audio)
         frames = int(len(audio) / SR * dt.adtof.FPS) + 1
         with mock.patch.object(dt, "_activations", return_value=_activations(frames, hits_by_class)):
-            return dt.transcribe(path)
+            return dt.transcribe(path, **kwargs)
 
 
 class TestNoteMap(TranscriberTestCase):
@@ -196,6 +196,69 @@ class TestHiHatPercussion(TranscriberTestCase):
         # reaches beat_writer - but if it ever did leak through, it has to
         # land somewhere a stock Drum Rack can play.
         self.assertTrue(36 <= dt._HAT_PERCUSSION_NOTE <= 51)
+
+    def test_a_caller_can_supply_a_different_line(self):
+        # A real hi-hat that reads as percussion against the default line
+        # (see calibrate_hat_threshold) shouldn't, against one fitted to a
+        # brighter-sounding kit.
+        audio = _real_hihat(2.0, [1.0])
+        default_notes = self._transcribe(audio, {3: [100]})
+        self.assertEqual([n.pitch for n in default_notes], [dt._NOTE_FOR_CLASS[dt._HIHAT]])
+
+        notes = self._transcribe(audio, {3: [100]}, hat_threshold=-100.0)
+        self.assertEqual([n.pitch for n in notes], [dt._HAT_PERCUSSION_NOTE])
+
+
+class TestCalibratingTheHatThreshold(TranscriberTestCase):
+    """calibrate_hat_threshold reads a whole file's hi-hat class and sets the
+    percussion line relative to what's typical there, rather than trusting
+    the fixed line calibrated on one other song (see the module docstring
+    and beat-thief-jazz-genre-limits in project memory)."""
+
+    def setUp(self):
+        super().setUp()
+        dt.calibrate_hat_threshold.cache_clear()
+
+    def _calibrate(self, audio, hits_by_class):
+        path = self._wav(audio)
+        frames = int(len(audio) / SR * dt.adtof.FPS) + 1
+        with mock.patch.object(dt, "_activations", return_value=_activations(frames, hits_by_class)):
+            return dt.calibrate_hat_threshold(path)
+
+    def test_too_few_hits_falls_back_to_the_fixed_line(self):
+        hits = [0.5 + i for i in range(dt._MIN_HITS_FOR_CALIBRATION - 1)]
+        audio = sum((_real_hihat(len(hits) + 2.0, [t]) for t in hits), start=np.zeros(
+            int((len(hits) + 2.0) * SR), dtype=np.float32))
+        threshold = self._calibrate(audio, {3: [int(t * dt.adtof.FPS) for t in hits]})
+
+        self.assertEqual(threshold, dt.percussion_splitter._PERCUSSION_SCORE_DB)
+
+    def test_the_line_sits_above_a_mostly_real_kit_own_median(self):
+        length = dt._MIN_HITS_FOR_CALIBRATION + 2.0
+        hits = [1.0 + i for i in range(dt._MIN_HITS_FOR_CALIBRATION)]
+        audio = sum((_real_hihat(length, [t]) for t in hits),
+                    start=np.zeros(int(length * SR), dtype=np.float32))
+        threshold = self._calibrate(audio, {3: [int(t * dt.adtof.FPS) for t in hits]})
+
+        # A real hit's own score should land comfortably under the line
+        # calibrated from a population of hits just like it.
+        score = dt.percussion_splitter.score(audio, [hits[0]], SR)[0]
+        self.assertLess(score, threshold)
+
+    def test_is_cached_per_file(self):
+        hits = [1.0 + i for i in range(dt._MIN_HITS_FOR_CALIBRATION)]
+        length = dt._MIN_HITS_FOR_CALIBRATION + 2.0
+        audio = sum((_real_hihat(length, [t]) for t in hits),
+                    start=np.zeros(int(length * SR), dtype=np.float32))
+        path = self._wav(audio)
+        frames = int(len(audio) / SR * dt.adtof.FPS) + 1
+
+        with mock.patch.object(dt, "_activations",
+                                return_value=_activations(frames, {3: [int(t * dt.adtof.FPS) for t in hits]})) as activations:
+            dt.calibrate_hat_threshold(path)
+            dt.calibrate_hat_threshold(path)
+
+        self.assertEqual(activations.call_count, 1)
 
 
 class TestChunking(unittest.TestCase):
