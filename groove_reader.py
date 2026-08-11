@@ -72,22 +72,27 @@ _SNARE_CLASS = ("snare", "tambourine")
 # it.
 _TIMEKEEPING = ("closed hat", "open hat", "tambourine", "shaker")
 
-# Pulses looked for, in steps of a sixteenth grid: sixteenths, eighths and
-# quarters. Deliberately not eight - a voice on every eighth step is a
-# backbeat, and a backbeat is exactly what has to be left alone. Triplets and
-# swing can't be expressed on this grid at all (see beat_loop.STEPS_PER_BAR).
-_PERIODS = (1, 2, 4)
+# Pulses looked for, as how many of them fit in a beat: quarters, eighths,
+# sixteenths and thirty-seconds. Written this way, and not as a number of
+# steps, because the grid's fineness is beat_loop's business and changing it
+# must not silently change which rhythms this module is looking for.
+#
+# Deliberately no half-beat - a voice on every other beat is a backbeat, and a
+# backbeat is exactly what has to be left alone. Triplets and swing can't be
+# expressed on this grid at all (see beat_loop.STEPS_PER_BAR).
+_DIVISIONS = (1, 2, 4, 8)
 
-# What the pulse's period says the instrument is. A voice on the quarters or
-# the eighths is marking the beat, which is a tambourine's job; a voice on
-# every sixteenth is a fill, which is a shaker's.
+# What the pulse says the instrument is. A voice marking the beat or halving
+# it is doing a tambourine's job; a voice on every thirty-second is a swish
+# rather than a hit, which is a shaker's.
 #
 # This is a guess about the *role*, not about the sound. Nothing measurable in
 # the audio told a tambourine from a shaker on real material - attack time and
 # ring length both turned out to be measuring how busy the surrounding mix was
 # - so the honest thing is to guess from what it plays and to be easy to
 # overrule. One line, right here.
-_PIECE_FOR_PERIOD = {1: "shaker", 2: "tambourine", 4: "tambourine"}
+_PIECE_FOR_DIVISION = {1: "tambourine", 2: "tambourine",
+                       4: "tambourine", 8: "shaker"}
 
 # How much of a pulse has to be occupied before it counts as a voice keeping
 # time rather than a coincidence. Four bars of quarter notes is sixteen
@@ -120,14 +125,24 @@ _PULSE_MAX_STRAY = 0.35
 # and 16% on the busiest chorus.
 _PERCUSSION_MAJORITY = 0.3
 
-# A voice on every single sixteenth is never taken off the snare pad. On a
-# pulse that fine, every snare in the loop is on the pulse by definition, so
-# there is no way to tell a percussion line with a snare through it from a
-# snare playing sixteenths - and the failure is expensive, because confirming
-# it doubles the note count of the busiest bar in the song. Checked against
-# the outro of the Brasstracks stem, which is a busy snare and which this
-# turns away: without it, that loop went from 83 hits to 125.
-_MIN_PERCUSSION_PERIOD = 2
+# The one pulse a voice is never taken off the snare pad on. A snare roll
+# fills the sixteenths, so a sixteenth pulse can't tell a percussion line with
+# a snare through it from a snare playing sixteenths - and getting that wrong
+# is expensive, because it doubles the note count of the busiest bar in the
+# song. On the sixteenth grid this was the only thing standing between the
+# Brasstracks outro - a busy snare, and a section confirmed by ear to have no
+# tambourine in it - and 42 invented notes.
+#
+# On the thirty-second grid it's a belt to the braces: measured on that same
+# outro, the sixteenth pulse now fails _PULSE_OCCUPANCY on its own evidence
+# (0.59), because the roll isn't as straight as a sixteenth grid made it look.
+# It stays because the next busy snare may well be straighter.
+#
+# Thirty-seconds are still allowed, which reads backwards and isn't: the roll
+# that fakes a sixteenth pulse leaves every thirty-second in between empty,
+# which is half the pulse missing. A pulse that asks for hits a snare doesn't
+# play is a pulse a snare can't fake.
+_SNARE_CAN_FAKE_DIVISION = 4
 
 # Pieces whose presence on a step makes the audio's vote there worthless.
 # This is the single biggest thing measured in Part 0: the snare-class hits
@@ -155,14 +170,20 @@ def _positions(phase: int, period: int, total_steps: int) -> list[int]:
     return list(range(phase, total_steps, period))
 
 
-def _best_pulse(steps: set[int], total_steps: int) -> tuple[int, int] | None:
-    """The (period, phase) this set of steps is keeping time on, or None.
+def _best_pulse(steps: set[int], total_steps: int,
+                steps_per_beat: int) -> tuple[int, int] | None:
+    """The (division, phase) this set of steps is keeping time on, or None.
+    The division is how many of the pulse fit in a beat; the phase is in
+    steps.
 
     Keeping time is three things at once and all three are needed: enough of
     the pulse is occupied, there are enough hits for that to mean anything,
     and not too many hits sit off it."""
     best = None
-    for period in _PERIODS:
+    for division in _DIVISIONS:
+        period = steps_per_beat // division
+        if period < 1:
+            continue  # finer than the grid can express
         for phase in range(period):
             positions = _positions(phase, period, total_steps)
             if not positions:
@@ -176,9 +197,9 @@ def _best_pulse(steps: set[int], total_steps: int) -> tuple[int, int] | None:
                 continue
             # The pulse that accounts for the most of what was played. A
             # sixteenth voice fits a quarter pulse too, but three quarters of
-            # it would be strays, so that candidate is already gone.
+            # it would be strays, so that candidate is already gone by here.
             if best is None or len(on) > best[0]:
-                best = (len(on), period, phase)
+                best = (len(on), division, phase)
     return (best[1], best[2]) if best else None
 
 
@@ -252,10 +273,10 @@ def refine(
             pool[step] = piece
 
     percussion: str | None = None
-    pulse = _best_pulse(set(pool), total_steps) if pool else None
-    if pulse and pulse[0] >= _MIN_PERCUSSION_PERIOD:
-        period, phase = pulse
-        positions = _positions(phase, period, total_steps)
+    pulse = _best_pulse(set(pool), total_steps, steps_per_beat) if pool else None
+    if pulse and pulse[0] != _SNARE_CAN_FAKE_DIVISION:
+        division, phase = pulse
+        positions = _positions(phase, steps_per_beat // division, total_steps)
         on_pulse = [step for step in positions if step in pool]
 
         # A step with a kick on it can't tell us anything, so it doesn't get
@@ -268,7 +289,7 @@ def refine(
         voted = sum(1 for step in heard_alone if pool[step] != "snare")
 
         if voted >= _PERCUSSION_MAJORITY * len(heard_alone or on_pulse):
-            percussion = _PIECE_FOR_PERIOD[period]
+            percussion = _PIECE_FOR_DIVISION[division]
 
             velocities: dict[int, int] = {}
             for step in on_pulse:
@@ -306,13 +327,14 @@ def refine(
         steps = {step for (step, this) in out if this == piece}
         if not steps:
             continue
-        found = _best_pulse(steps, total_steps)
+        found = _best_pulse(steps, total_steps, steps_per_beat)
         if not found:
             continue
-        period, phase = found
+        division, phase = found
         velocities = {step: out[(step, piece)] for step in steps}
-        inferred += _restore_covered(out, piece, _positions(phase, period, total_steps),
-                                     velocities, steps_per_beat)
+        inferred += _restore_covered(
+            out, piece, _positions(phase, steps_per_beat // division, total_steps),
+            velocities, steps_per_beat)
 
     # --- and last, what's left on the snare pad: which of it is a ghost ---
     for step, piece in list(out):

@@ -99,8 +99,10 @@ class Hit(NamedTuple):
 class Beat(NamedTuple):
     """A drum pattern on a grid.
 
-    steps_per_bar is how finely the bar is divided: 16 for sixteenths, which
-    is what nearly everything wants, 12 for eighth-note triplets. bars is
+    steps_per_bar is how finely the bar is divided: 16 for sixteenths, 32
+    for thirty-seconds (which is what a stolen loop uses, so that percussion
+    doubling up between the sixteenths survives), 12 for eighth-note
+    triplets. bars is
     how long the clip is, and is what makes it loop cleanly - it's set
     rather than inferred from the hits, so a bar that ends in silence stays
     a full bar instead of being trimmed to the last note."""

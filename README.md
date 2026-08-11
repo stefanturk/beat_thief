@@ -238,11 +238,17 @@ grid out — no audio, no model — so every one of its tests is a pattern
 written by hand, which is the point. These are musical judgements and they
 should be arguable on paper.
 
+Pulses are looked for as quarters, eighths, sixteenths and thirty-seconds —
+named that way rather than as a number of steps, so that making the grid
+finer doesn't quietly make every pulse it looks for twice as fast.
+
 Two things it deliberately refuses. A voice on every single sixteenth is
-never taken off the snare, because on a pulse that fine there's no telling a
-percussion line from a snare roll and confirming it doubles the busiest bar
-in the song. And a structural voice — kick, snare, crash — never has a hit
-put back, because its silences are the composition.
+never taken off the snare, because a snare roll fills the sixteenths too, so
+there's no telling one from the other — and confirming it doubles the
+busiest bar in the song. (Thirty-seconds are allowed, which reads backwards
+and isn't: the roll that fakes a sixteenth pulse leaves every thirty-second
+in between empty.) And a structural voice — kick, snare, crash — never has a
+hit put back, because its silences are the composition.
 
 Quiet snare hits go to their own pad too (37), so the hard ones aren't
 sharing with them.
@@ -283,6 +289,15 @@ it works on a section you choose.
 That reverses this project's old "never quantize" rule, deliberately and
 only here: a stolen loop wants to be tight, and there's no longer a
 faithful full-song transcription for it to contradict.
+
+The grid is **thirty-seconds**, not sixteenths. Sixteenths are what drum
+parts are *written* in, but they're not what percussion is *played* in — a
+tambourine doubles up in between, and on a sixteenth grid the second of each
+pair lands on the step the first already occupies, where the louder of the
+two wins and the double disappears. Measured across six four-bar loops of
+the test song, the finer grid keeps one to seven hits per loop that used to
+collide like that. Straight parts are untouched by the change, because every
+sixteenth is a thirty-second too.
 
 `beat_writer.py` is the first piece of it — everything that ends up as a
 `.mid` goes through it, so there's one place that knows what Ableton

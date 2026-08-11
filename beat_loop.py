@@ -71,10 +71,19 @@ import instrument_isolator
 # costs a second and makes the edges as good as the middle.
 _CONTEXT_SEC = 3.0
 
-# The grid the loop is quantized onto. Sixteenths are what nearly every
-# drum part is written in, and finer would be preserving the timing detail
-# this feature exists to throw away.
-STEPS_PER_BAR = 16
+# The grid the loop is quantized onto. Thirty-seconds: sixteenths are what
+# nearly every drum part is *written* in, but they're not what percussion is
+# played in. A tambourine doubles up between the sixteenths, and on a
+# sixteenth grid the second of the pair lands on the same step as the first
+# and the louder of the two wins - the doubling disappears, and what's left
+# is a note that no longer matches what you can hear.
+#
+# The cost is that a sloppy hit can now fall a step off where it belongs
+# rather than being pulled into line. That's the trade, and it's the right
+# way round: a straight part quantizes to thirty-seconds exactly as it
+# quantizes to sixteenths, because every sixteenth is a thirty-second too.
+# Only the parts that were being flattened change.
+STEPS_PER_BAR = 32
 
 # How much drumming past the marked end to keep, in bars. Moving the loop's
 # start onto a kick moves its end by the same amount, and the notes for that
@@ -85,7 +94,7 @@ _SPARE_BARS = 1
 
 # Longest loop worth calling a loop. A marked section far longer than this
 # is somebody having missed the end of the phrase, and quantizing four
-# minutes onto sixteenths is the thing we just stopped doing.
+# minutes onto a step grid is the thing we just stopped doing.
 MAX_BARS = 16
 
 # What drum_transcriber's notes mean, by name, so a loop can be handed to
@@ -298,8 +307,8 @@ def build(
         for the loop starting at from_sec.
 
         The loudest of two hits of the same piece on one step wins: a flam is
-        two hits a few milliseconds apart, and on a sixteenth grid it can
-        only be one note."""
+        two hits a few milliseconds apart, and even on a thirty-second grid
+        it can only be one note."""
         placed: dict[tuple[int, str], int] = {}
         for time_sec, pitch, velocity in played:
             piece = _PIECE_FOR_NOTE.get(pitch)

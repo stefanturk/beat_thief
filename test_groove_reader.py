@@ -27,8 +27,8 @@ def length(patterns: dict[str, str]) -> int:
     return len(next(iter(patterns.values())).replace("|", ""))
 
 
-def refine(patterns: dict[str, str]):
-    return groove_reader.refine(grid(patterns), length(patterns), 16)
+def refine(patterns: dict[str, str], steps_per_bar: int = 16):
+    return groove_reader.refine(grid(patterns), length(patterns), steps_per_bar)
 
 
 class TestTakingAVoiceOffTheSnare(unittest.TestCase):
@@ -227,6 +227,56 @@ class TestGhostNotes(unittest.TestCase):
 
         self.assertEqual(steps_of(out, "ghost snare"), [2])
         self.assertEqual(steps_of(out, "snare"), [4, 12, 20, 28])
+
+
+class TestHowFineTheGridIs(unittest.TestCase):
+    """A loop is quantized to thirty-seconds, but a pulse is a musical thing
+    and has to mean the same at any resolution. These are written twice, once
+    on each grid, because the bug this guards against is a pulse silently
+    becoming twice as fast when the grid does."""
+
+    def test_the_same_music_reads_the_same_on_either_grid(self):
+        # A tambourine on the quarters with the backbeat over it, written out
+        # once in sixteenths and once in thirty-seconds. Same two bars.
+        sixteenths, _ = refine({
+            "tambourine": "X...X...X...X...|X...X...X...X...",
+            "snare":      "....X.......X...|....X.......X...",
+        }, steps_per_bar=16)
+        thirty_seconds, _ = refine({
+            "tambourine": "X.......X.......X.......X.......|X.......X.......X.......X.......",
+            "snare":      "........X...............X.......|........X...............X.......",
+        }, steps_per_bar=32)
+
+        self.assertEqual(len(steps_of(sixteenths, "tambourine")), 8)
+        self.assertEqual(len(steps_of(thirty_seconds, "tambourine")), 8)
+        self.assertEqual(len(steps_of(sixteenths, "snare")),
+                         len(steps_of(thirty_seconds, "snare")))
+
+    def test_a_voice_on_every_thirty_second_is_a_shaker(self):
+        # The pulse the finer grid can express that the old one couldn't. A
+        # voice this fast isn't marking the beat, it's a swish.
+        out, _ = refine({"tambourine": "X" * 64}, steps_per_bar=32)
+
+        self.assertEqual(len(steps_of(out, "shaker")), 64)
+        self.assertEqual(steps_of(out, "snare"), [])
+
+    def test_a_voice_on_the_sixteenths_is_still_left_on_the_snare(self):
+        # The refusal has to survive the change of grid: on thirty-seconds a
+        # sixteenth voice is a pulse of period two rather than of period one,
+        # and the rule is about sixteenths, not about "the finest thing the
+        # grid can hold".
+        out, inferred = refine({"tambourine": "X." * 32}, steps_per_bar=32)
+
+        self.assertEqual(len(steps_of(out, "snare")), 32)
+        self.assertEqual(steps_of(out, "tambourine"), [])
+        self.assertEqual(inferred, 0)
+
+    def test_a_pulse_finer_than_the_grid_is_not_looked_for(self):
+        # steps_per_beat // division is zero for thirty-seconds on a grid of
+        # eighths, and a period of zero is an infinite loop waiting to happen.
+        out, _ = refine({"tambourine": "X" * 8}, steps_per_bar=8)
+
+        self.assertEqual(len(out), 8)
 
 
 class TestTheGridItself(unittest.TestCase):
