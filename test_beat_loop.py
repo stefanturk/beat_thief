@@ -176,12 +176,10 @@ class TestBuild(unittest.TestCase):
         with self.assertRaises(ValueError):
             beat_loop.build(self.wav, self.TEMPO, 10.0, 10.0)
 
-    def test_the_loop_starts_where_it_was_marked_and_is_not_turned_round(self):
-        # A section marked with a snare on the click and a kick half a beat
-        # later. This used to be scored as "really" starting at the kick and
-        # rotated onto it, which put every hit a beat late in Ableton and
-        # silently overrode where the section was marked. The click is the
-        # one; it stays the one.
+    def test_a_loop_is_turned_to_start_on_a_kick(self):
+        # Marked a beat early, on a snare, with the kick a beat later - the
+        # ordinary result of clicking just before the phrase. A loop is
+        # nearly always wanted starting on a kick, so it's turned onto one.
         notes = []
         for bar in (0.0, 2.0):
             notes += [_note(38, bar + 0.0), _note(36, bar + 0.5),
@@ -189,17 +187,39 @@ class TestBuild(unittest.TestCase):
         loop = self._build(notes)
 
         placed = {(hit.step, hit.piece) for hit in loop.beat.hits}
-        self.assertIn((0, "snare"), placed)
-        self.assertNotIn((0, "kick"), placed)
+        self.assertIn((0, "kick"), placed)
 
-    def test_the_first_step_of_the_loop_is_the_marked_start(self):
-        # origin_sec is where step 0 sits in the stem. It may be pulled onto
-        # the drumming's own grid by a fraction of a sixteenth, but never by
-        # a beat.
+    def test_a_loop_that_already_starts_on_a_kick_is_left_alone(self):
+        # The turn is only ever a correction. A marking that landed on the
+        # one must come through untouched, even when a later kick is harder -
+        # a beat whose kick on three is a shade louder than its kick on one
+        # is completely ordinary, and turning it round would ruin it.
+        notes = []
+        for bar in (0.0, 2.0):
+            notes += [_note(36, bar + 0.0, 100), _note(38, bar + 0.5),
+                      _note(36, bar + 1.0, 108), _note(38, bar + 1.5)]
+        loop = self._build(notes)
+
+        placed = {(hit.step, hit.piece) for hit in loop.beat.hits}
+        self.assertIn((0, "kick"), placed)
+        self.assertIn((4, "snare"), placed)
+        self.assertAlmostEqual(loop.origin_sec, 10.0, delta=0.01)
+
+    def test_a_loop_with_no_kick_in_it_is_not_turned(self):
+        notes = [_note(38, i * 0.5) for i in range(8)]
+        loop = self._build(notes)
+
+        self.assertIn((0, "snare"), {(h.step, h.piece) for h in loop.beat.hits})
+
+    def test_the_first_step_of_the_loop_stays_inside_the_marked_bar(self):
+        # origin_sec is where step 0 sits in the stem. Turning onto a kick
+        # can move it, but only within one bar of what was marked - never
+        # far enough to be a different part of the song.
         notes = [_note(38, 0.0), _note(36, 0.5), _note(38, 1.0), _note(36, 1.5)]
         loop = self._build(notes, start=10.0, span=2.0)
 
-        self.assertLess(abs(loop.origin_sec - 10.0), 0.125 / 2)
+        self.assertGreaterEqual(loop.origin_sec, 10.0 - 0.01)
+        self.assertLess(loop.origin_sec, 12.0)
 
     def test_a_section_marked_exactly_right_agrees_with_the_song(self):
         # 4.0s at 120 BPM is exactly two bars, so measuring the section
