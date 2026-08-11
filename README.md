@@ -183,7 +183,7 @@ detail.
 `<Song Title> (Isolated Drums at N.NNN BPM).wav` is the isolated drum mix.
 The exact BPM is in the filename, there to read at a glance.
 
-The drum transcriber that reads it — six pieces, per-hit velocity — is
+The drum transcriber that reads it — nine pieces, per-hit velocity — is
 still here in `drum_transcriber.py`, now aimed at a chosen section rather
 than a whole song. It is [ADTOF](https://github.com/MZehren/ADTOF) — a
 convolutional-recurrent network trained on 114 hours of real annotated
@@ -206,6 +206,46 @@ it — and scaled in decibels against the loudest hit **of the same piece**.
 Hi-hats sit around 20dB under the kick in most mixes, so scaling everything
 together would push every hat to the bottom of the range and flatten the
 part.
+
+#### Reading the pattern
+
+The model has five classes and none of them is a tambourine, so percussion
+comes back labelled as a snare — which is why stolen beats used to arrive
+with everything piled onto one pad. Measured on the drum stem of *Officially
+Missing You*: the snare class fires 375 times in three minutes, and a
+backbeat is made of hits eight sixteenths apart. **Six** of those 375 were.
+A hundred and fifty were a quarter apart.
+
+No amount of listening to a single hit fixes that, and several attempts
+proved it. Band levels near an onset measure the kick's decay, not the hit.
+Velocity doesn't separate the layers — on-quarter median 102, off-quarter
+103. Attack time and ring length both turn out to measure how busy the
+surrounding mix is.
+
+What separates them is what they *play*. A percussion instrument keeps time,
+repeating on a pulse right through the bar; a snare is structural, landing on
+two and four. So there are two stages. `percussion_splitter.py` asks of each
+hit how much brighter it got than it got heavier — a weak vote, deliberately
+— and `groove_reader.py` reads the quantized loop as music: it finds the
+pulse a voice is sitting on, moves the whole voice off the snare pad at once
+if the votes lean that way, and puts back the hits the pulse says were played
+but no onset was detected for, because a louder drum was on top of them.
+
+That last part is the one no per-hit measurement can reach: a tambourine
+struck with the backbeat is inside the snare's window, so its hits on two and
+four are exactly the ones that get lost. `groove_reader` is a grid in and a
+grid out — no audio, no model — so every one of its tests is a pattern
+written by hand, which is the point. These are musical judgements and they
+should be arguable on paper.
+
+Two things it deliberately refuses. A voice on every single sixteenth is
+never taken off the snare, because on a pulse that fine there's no telling a
+percussion line from a snare roll and confirming it doubles the busiest bar
+in the song. And a structural voice — kick, snare, crash — never has a hit
+put back, because its silences are the composition.
+
+Quiet snare hits go to their own pad too (37), so the hard ones aren't
+sharing with them.
 
 ### Bass
 

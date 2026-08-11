@@ -221,6 +221,10 @@ class Api:
             "tempo": round(loop.tempo, 3),
             "song_tempo": round(loop.song_tempo, 3),
             "hits": loop.hits_used,
+            # Hits nothing was detected for, worked out from the pulse the
+            # rest of that voice is on (see groove_reader). Reported because
+            # a stage that adds notes to your beat shouldn't do it quietly.
+            "inferred": loop.hits_inferred,
             "pieces": sorted({hit.piece for hit in loop.beat.hits}),
         }
 

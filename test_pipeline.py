@@ -582,7 +582,7 @@ class TestWhatASongHas(unittest.TestCase):
         import beat_loop
         loop = beat_loop.Loop(
             beat=beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0),)),
-            bars=2, origin_sec=0.0, hits_used=1, hits_dropped=0,
+            bars=2, origin_sec=0.0, hits_used=1, hits_dropped=0, hits_inferred=0,
             tempo=120.0, song_tempo=120.0,
         )
         written = beat_loop.write(loop, self.tmp_dir, "Song - Artist")

@@ -24,6 +24,21 @@ def _click(length_sec, hits, freq=6000.0, decay_sec=0.01, amplitude=1.0):
     return audio
 
 
+def _drum(length_sec, hits, amplitude=1.0):
+    """A hit with a shell under it: a 220Hz body plus the crack on top. What
+    percussion_splitter is looking for is the body, so this is what has to be
+    used wherever a test means an actual snare - a bare high burst is a
+    tambourine as far as the splitter is concerned, and correctly so."""
+    body = _click(length_sec, hits, freq=220.0, decay_sec=0.05, amplitude=amplitude)
+    crack = _click(length_sec, hits, freq=3000.0, decay_sec=0.01, amplitude=amplitude * 0.3)
+    return body + crack
+
+
+def _shaken(length_sec, hits, amplitude=1.0):
+    """A hit with no shell at all - all jingle, no body."""
+    return _click(length_sec, hits, freq=9000.0, decay_sec=0.02, amplitude=amplitude)
+
+
 def _activations(length_frames, hits_by_class):
     """A fake model output: [frames, 5], with a sharp spike wherever a class
     was hit."""
@@ -61,7 +76,7 @@ class TranscriberTestCase(unittest.TestCase):
 class TestNoteMap(TranscriberTestCase):
     def test_every_class_lands_on_its_drum_rack_pad(self):
         notes = self._transcribe(
-            _click(3.0, [0.5, 1.0, 1.5, 2.0, 2.5]),
+            _click(3.0, [0.5, 1.5, 2.0, 2.5]) + _drum(3.0, [1.0]),
             {0: [50], 1: [100], 2: [150], 3: [200], 4: [250]},
         )
 
@@ -90,6 +105,42 @@ class TestNoteMap(TranscriberTestCase):
         notes = self._transcribe(np.zeros(SR * 2, dtype=np.float32), {})
 
         self.assertEqual(notes, [])
+
+
+class TestTheSnareClassSplitsThreeWays(TranscriberTestCase):
+    """The model has one class for everything that hit like a snare, and a
+    real kit has more than one thing that does. These are the votes cast
+    here; groove_reader is what decides once the loop is on a grid."""
+
+    def test_a_hit_with_a_shell_under_it_is_a_snare(self):
+        notes = self._transcribe(_drum(2.0, [1.0]), {1: [100]})
+
+        self.assertEqual([note.pitch for note in notes], [38])
+
+    def test_a_hit_with_no_shell_at_all_is_percussion(self):
+        notes = self._transcribe(_shaken(2.0, [1.0]), {1: [100]})
+
+        self.assertEqual([note.pitch for note in notes], [dt._PERCUSSION_NOTE])
+
+    def test_a_quiet_percussion_hit_is_still_percussion(self):
+        # How loud it was is not this stage's business - which of what's left
+        # on the snare pad is a ghost note is decided by groove_reader, after
+        # the voices have stopped moving between pads.
+        audio = _shaken(3.0, [0.5], amplitude=1.0) + _shaken(3.0, [1.5], amplitude=0.1)
+        notes = self._transcribe(audio, {1: [50, 150]})
+
+        self.assertEqual({note.pitch for note in notes}, {dt._PERCUSSION_NOTE})
+
+    def test_a_silent_onset_stays_a_snare(self):
+        # Nothing to measure is not evidence of percussion, even though
+        # silence has the same rise in every band.
+        notes = self._transcribe(np.zeros(SR * 2, dtype=np.float32), {1: [100]})
+
+        self.assertEqual([note.pitch for note in notes], [38])
+
+    def test_every_pad_the_snare_class_can_reach_is_in_the_rack(self):
+        for note in (dt._PERCUSSION_NOTE, dt._NOTE_FOR_CLASS[dt._SNARE]):
+            self.assertTrue(36 <= note <= 51, f"{note} is outside the drum rack")
 
 
 class TestChunking(unittest.TestCase):
