@@ -136,6 +136,7 @@ class TestBuild(unittest.TestCase):
         # front; transcribe() then sees the section shifted by that much.
         shifted = [_note(n.pitch, n.start + lead, n.velocity) for n in notes]
         with mock.patch("beat_loop._section_wav", return_value=lead), \
+             mock.patch("drum_transcriber.calibrate_hat_threshold", return_value=-5.0), \
              mock.patch("drum_transcriber.transcribe", return_value=shifted):
             return beat_loop.build(self.wav, self.TEMPO, start, start + span)
 

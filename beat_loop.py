@@ -256,11 +256,16 @@ def build(
     # needs from what actually follows (see _SPARE_BARS).
     spare = _SPARE_BARS * beat_writer.BEATS_PER_BAR * 60.0 / tempo if tempo > 0 else 0.0
 
+    # A song's own hi-hat/ride, not Officially Missing You's - see
+    # calibrate_hat_threshold. Cached per file, so stealing several loops out
+    # of one song only pays for this once.
+    hat_threshold = drum_transcriber.calibrate_hat_threshold(wav_path)
+
     handle, section_path = tempfile.mkstemp(suffix=".wav")
     os.close(handle)
     try:
         lead = _section_wav(wav_path, start_sec, end_sec + spare, section_path)
-        notes = drum_transcriber.transcribe(section_path)
+        notes = drum_transcriber.transcribe(section_path, hat_threshold=hat_threshold)
     finally:
         os.remove(section_path)
 

@@ -478,6 +478,7 @@ class TestStealBeat(unittest.TestCase):
             for pitch, at in notes
         ]
         with mock.patch("beat_loop._section_wav", return_value=3.0), \
+             mock.patch("drum_transcriber.calibrate_hat_threshold", return_value=-5.0), \
              mock.patch("drum_transcriber.transcribe", return_value=shifted):
             return gui.Api().steal_beat(self.stem, start, end)
 

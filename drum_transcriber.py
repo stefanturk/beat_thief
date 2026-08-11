@@ -12,6 +12,9 @@ actual MIDI file. This module only produces notes."""
 
 from __future__ import annotations
 
+import statistics
+from functools import lru_cache
+
 import numpy as np
 import pretty_midi
 import torch
@@ -63,6 +66,17 @@ _PERCUSSION_NOTE = 39
 # merging them here would erase the distinction before groove_reader ever
 # gets to use it. 41 is unused by anything else this file writes.
 _HAT_PERCUSSION_NOTE = 41
+
+# calibrate_hat_threshold's margin above a song's own median hi-hat-class
+# score, and how many hits it needs before trusting that median at all.
+# Measured on Officially Missing You, where percussion_splitter's fixed line
+# happens to sit close to the midpoint between real hi-hats elsewhere
+# (~-18 median) and the confirmed tambourine section (~+7.1) - about 12-13dB
+# either side. There's only the one song's worth of calibration behind this
+# margin, same as the fixed threshold it's meant to improve on; it's a
+# starting point, not a measured constant.
+_CALIBRATION_MARGIN_DB = 10.0
+_MIN_HITS_FOR_CALIBRATION = 20
 
 # How long each class's notes are written as. Cosmetic in a rack full of
 # one-shots, but a drum part whose notes are all 50ms slivers is hard to
@@ -343,7 +357,49 @@ def _split_hihats(
     return open_hits
 
 
-def transcribe(wav_path: str) -> list[pretty_midi.Note]:
+@lru_cache(maxsize=None)
+def calibrate_hat_threshold(wav_path: str) -> float:
+    """How bright a hi-hat-class hit has to score, on this recording's own
+    hi-hat/ride, before it's called percussion rather than the real thing.
+
+    percussion_splitter._PERCUSSION_SCORE_DB is one fixed number, calibrated
+    against one song. What "real" sounds like varies by kit, mic'ing and
+    genre - measured on a jazz kit ("Three", Nicholas Payton), the fixed
+    line read as close to a coin flip on hits that, filtered to the actual
+    rhythmic pulse groove_reader uses, were confidently real. So instead of
+    a fixed line, this reads the whole file's own hi-hat class and sets the
+    line relative to what's typical *here*: most songs' hi-hat parts are
+    mostly the real instrument (full-song tambourine-instead-of-hi-hat is
+    rare), so the median of the whole population is a reasonable stand-in
+    for "what a real hit here scores," and a hit has to clear that by a real
+    margin (_CALIBRATION_MARGIN_DB) before it's treated as percussion.
+
+    Falls back to the fixed threshold when there's too little of the class
+    to calibrate against - a handful of hits don't make a trustworthy
+    median. Cached per file for the life of the process: this is a whole-
+    song pass, done once, not per marked section - beat_loop.build calls it
+    before every transcribe() so multiple loops stolen from the same song
+    share one calibration."""
+    processor = adtof.create_adtof_processor()
+    audio = processor.load_audio(wav_path)
+    if audio.size == 0:
+        return percussion_splitter._PERCUSSION_SCORE_DB
+
+    spectrogram = processor.apply_filterbank(processor.compute_stft(audio)).T[:, :, np.newaxis]
+    activations = _activations(np.asarray(spectrogram, dtype=np.float32))
+    frames = _pick_peaks(activations[:, _HIHAT], adtof.THRESHOLDS_5[_HIHAT], adtof.FPS)
+    times = [frame / float(adtof.FPS) for frame in frames]
+    if len(times) < _MIN_HITS_FOR_CALIBRATION:
+        return percussion_splitter._PERCUSSION_SCORE_DB
+
+    scores = [s for s in percussion_splitter.score(audio, times, SAMPLE_RATE) if s != float("-inf")]
+    if len(scores) < _MIN_HITS_FOR_CALIBRATION:
+        return percussion_splitter._PERCUSSION_SCORE_DB
+
+    return statistics.median(scores) + _CALIBRATION_MARGIN_DB
+
+
+def transcribe(wav_path: str, hat_threshold: float | None = None) -> list[pretty_midi.Note]:
     """Detect every drum hit in wav_path and return them as MIDI notes,
     sorted by time, with times in seconds from the start of the file.
 
@@ -354,7 +410,13 @@ def transcribe(wav_path: str) -> list[pretty_midi.Note]:
 
     The percussion note is provisional. It's one weak vote on one hit, and
     groove_reader is what decides - over a whole voice, on a grid, once
-    there's a rhythm to read."""
+    there's a rhythm to read.
+
+    `hat_threshold` overrides percussion_splitter's default line for the
+    hi-hat class's vote only (the snare class's is untouched). None uses the
+    default - see calibrate_hat_threshold for where a caller gets a better
+    number, one fitted to this recording rather than to Officially Missing
+    You."""
     processor = adtof.create_adtof_processor()
     audio = processor.load_audio(wav_path)
     if audio.size == 0:
@@ -382,7 +444,8 @@ def transcribe(wav_path: str) -> list[pretty_midi.Note]:
     # instead. See _HAT_PERCUSSION_NOTE for why this is a second pool rather
     # than folded into the one above.
     hats = hit_times.get(_HIHAT, [])
-    hat_votes = dict(zip(hats, percussion_splitter.split(audio, hats, SAMPLE_RATE)))
+    hat_split_kwargs = {} if hat_threshold is None else {"threshold": hat_threshold}
+    hat_votes = dict(zip(hats, percussion_splitter.split(audio, hats, SAMPLE_RATE, **hat_split_kwargs)))
 
     notes: list[pretty_midi.Note] = []
     for class_index, times in hit_times.items():
