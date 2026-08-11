@@ -497,8 +497,9 @@
   }
   .picker-controls button:hover { border-color: var(--violet); color: var(--violet); }
   .picker-controls button:disabled { opacity: 0.4; cursor: default; border-color: var(--edge); color: var(--dim); }
-  #mark { border-color: var(--violet); color: var(--violet); }
-  #mark:hover { background: var(--violet-dim); }
+  /* The one thing in here that writes a file, so it's the one that's lit. */
+  #build { border-color: var(--violet); color: var(--violet); }
+  #build:hover { background: var(--violet-dim); }
 
   /* How long you've held the section for. Pushed to the right with the
      clock, and violet because it's the thing you're deciding. */
@@ -558,11 +559,32 @@
       </div>
     </section>
 
-    <section class="readout">
+    <section class="readout" id="readout">
       <div id="figure" data-copyable="false">···</div>
       <div id="unit"></div>
       <p id="message">Paste a link to get started.</p>
       <div class="track"><div id="bar"></div></div>
+    </section>
+
+    <!--
+      The picker takes the readout's place rather than sitting below it.
+      Marking a section is a whole task on its own - while you're doing it
+      the tempo, the progress bar and Steal it are all about a run that has
+      already finished, and having them there just invites the wrong click.
+    -->
+    <section class="picker" id="picker" hidden>
+      <div class="picker-head">
+        <span id="picker-title">Steal a beat</span>
+        <span id="picker-hint">Click at the 1 of the phrase — ← → to nudge — space at the next 1.</span>
+      </div>
+      <canvas id="wave" width="1000" height="156"></canvas>
+      <div class="picker-controls">
+        <button id="play" type="button">Play</button>
+        <button id="build" type="button" disabled>Build beat</button>
+        <button id="picker-close" type="button">Close</button>
+        <span id="marked"></span>
+        <span id="clock">0:00</span>
+      </div>
     </section>
 
     <button id="go">Steal it</button>
@@ -573,20 +595,6 @@
     <p id="empty">Nothing yet this session.</p>
     <ul id="outputs"></ul>
 
-    <section class="picker" id="picker" hidden>
-      <div class="picker-head">
-        <span id="picker-title">Steal a beat</span>
-        <span id="picker-hint">Click at the 1 of the phrase — ← → to nudge — space at the next 1.</span>
-      </div>
-      <canvas id="wave" width="1000" height="156"></canvas>
-      <div class="picker-controls">
-        <button id="play" type="button">Play</button>
-        <button id="mark" type="button" disabled>Mark the end</button>
-        <button id="picker-close" type="button">Close</button>
-        <span id="marked"></span>
-        <span id="clock">0:00</span>
-      </div>
-    </section>
     <button id="destination" type="button" title="Open this folder in Finder">
       <span class="where"></span><span class="open">Open</span>
     </button>
@@ -938,6 +946,10 @@
   function openPicker(song) {
     closePicker();
     el("picker").hidden = false;
+    // Marking a section takes the readout's place. What's in it - the tempo,
+    // the progress bar, Steal it - all belongs to the run that just ended.
+    el("readout").hidden = true;
+    el("go").hidden = true;
     // The link box has focus at this point - it's autofocused on load, and
     // it's where a link was just typed or a song's name was just put. Space
     // typed into a text box is a space, so the keydown handler below has to
@@ -968,8 +980,10 @@
     if (raf) { cancelAnimationFrame(raf); raf = null; }
     picker = null;
     el("picker").hidden = true;
+    el("readout").hidden = false;
+    el("go").hidden = false;
     el("play").textContent = "Play";
-    el("mark").disabled = true;
+    el("build").disabled = true;
     el("marked").textContent = "";
   }
 
@@ -987,7 +1001,7 @@
   function setStart(seconds) {
     picker.start = Math.max(0, Math.min(seconds, picker.duration));
     picker.end = null;
-    el("mark").disabled = false;
+    el("build").disabled = true;
     playFrom(picker.start);
     drawWave();
   }
@@ -1003,17 +1017,31 @@
     setStart(picker.start + seconds);
   }
 
+  // Space only says where the phrase ends. Building the .mid is a separate
+  // press, because the two are separate decisions - marking is something you
+  // do by reflex, on the beat, and it shouldn't be able to commit you to an
+  // export you haven't looked at yet.
   function markEnd() {
     if (!picker || picker.start === null) return;
     const end = audio.currentTime;
     if (end <= picker.start) { el("picker-hint").textContent = "That is before the start - click again and play on."; return; }
     picker.end = end;
     pausePlay();
-    el("picker-hint").textContent = "Stealing it...";
-    el("mark").disabled = true;
+    el("build").disabled = false;
+    el("picker-hint").textContent =
+      (end - picker.start).toFixed(1) + "s marked — build the beat, or click again to start over.";
+    drawWave();
+  }
+
+  function buildBeat() {
+    if (!picker || picker.start === null || picker.end === null) return;
+    const end = picker.end;
+    pausePlay();
+    el("picker-hint").textContent = "Building it...";
+    el("build").disabled = true;
 
     window.pywebview.api.steal_beat(picker.song.have.drums, picker.start, end).then((loop) => {
-      el("mark").disabled = false;
+      el("build").disabled = false;
       if (loop.error) { el("picker-hint").textContent = loop.error; return; }
       el("picker-hint").textContent =
         loop.bars + " bar" + (loop.bars === 1 ? "" : "s") + ", " + loop.hits + " hits, " +
@@ -1179,7 +1207,7 @@
     if (audio.paused) playFrom(null); else pausePlay();
   });
 
-  el("mark").addEventListener("click", markEnd);
+  el("build").addEventListener("click", buildBeat);
 
   // The keyboard is the picker. Space marks the end and the arrows walk the
   // start onto the one - but only while the picker is open, and never while
