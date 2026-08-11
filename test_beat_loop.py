@@ -20,6 +20,12 @@ def _note(pitch, start, velocity=100):
     return pretty_midi.Note(velocity=velocity, pitch=pitch, start=start, end=start + 0.05)
 
 
+# Steps to the beat. Expectations below are written in these rather than in
+# step numbers, so that making the grid finer moves them all together instead
+# of failing four tests that are about something else entirely.
+BEAT = beat_loop.STEPS_PER_BAR // beat_writer.BEATS_PER_BAR
+
+
 def _sixteenths(tempo, bars=2):
     """A plain beat played on the grid at `tempo`: hat on every sixteenth,
     kick on one and three, snare on the backbeat.
@@ -144,8 +150,10 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(loop.bars, 2)
         placed = {(hit.step, hit.piece) for hit in loop.beat.hits}
         self.assertEqual(placed, {
-            (0, "kick"), (4, "snare"), (8, "kick"), (12, "snare"),
-            (16, "kick"), (20, "snare"), (24, "kick"), (28, "snare"),
+            (0 * BEAT, "kick"), (1 * BEAT, "snare"),
+            (2 * BEAT, "kick"), (3 * BEAT, "snare"),
+            (4 * BEAT, "kick"), (5 * BEAT, "snare"),
+            (6 * BEAT, "kick"), (7 * BEAT, "snare"),
         })
 
     def test_hits_slightly_off_the_grid_are_pulled_onto_it(self):
@@ -225,10 +233,10 @@ class TestBuild(unittest.TestCase):
         loop = self._build(notes)
 
         tambourine = {hit.step for hit in loop.beat.hits if hit.piece == "tambourine"}
-        self.assertEqual(tambourine, {0, 4, 8, 12, 16, 20, 24, 28})
+        self.assertEqual(tambourine, {beat * BEAT for beat in range(8)})
         # ...without taking the backbeat away.
         self.assertEqual({hit.step for hit in loop.beat.hits if hit.piece == "snare"},
-                         {4, 12, 20, 28})
+                         {beat * BEAT for beat in (1, 3, 5, 7)})
         self.assertEqual(loop.hits_inferred, 4)
 
     def test_a_beat_with_nothing_to_read_reports_nothing_inferred(self):
@@ -267,7 +275,7 @@ class TestBuild(unittest.TestCase):
 
         placed = {(hit.step, hit.piece) for hit in loop.beat.hits}
         self.assertIn((0, "kick"), placed)
-        self.assertIn((4, "snare"), placed)
+        self.assertIn((BEAT, "snare"), placed)
         self.assertAlmostEqual(loop.origin_sec, 10.0, delta=0.01)
 
     def test_a_loop_with_no_kick_in_it_is_not_turned(self):
@@ -344,7 +352,8 @@ class TestBuild(unittest.TestCase):
         loop = self._build(_straight(self.TEMPO, bars=4, offset=1.0), span=4.0)
 
         last = max(hit.step for hit in loop.beat.hits)
-        self.assertEqual(last, loop.bars * beat_loop.STEPS_PER_BAR - 2)   # the last eighth
+        # The last eighth of the last bar.
+        self.assertEqual(last, loop.bars * beat_loop.STEPS_PER_BAR - BEAT // 2)
 
     def test_where_you_clicked_within_the_bar_does_not_change_the_loop(self):
         # The same drumming marked from three different places in the bar.
