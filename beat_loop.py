@@ -30,10 +30,17 @@ sitting a hair off the halfway line between two sixteenths, so which one they
 landed on was a coin toss. The playing is a better clock than the edges.
 
 The one place the marking is corrected is the start, and only in one way: a
-loop is turned to begin on a kick (_kick_downbeat). People click a little
+loop is moved on to begin on a kick (_kick_downbeat). People click a little
 before the phrase, so a loop that begins on silence is the ordinary outcome
 of marking by ear, and starting on a kick is what a loop is almost always
 for.
+
+Moving the start moves the end with it, so the loop's last stretch comes from
+after the mark - which is why a bar past it is transcribed too (_SPARE_BARS).
+It used to be wrapped round from the front instead, and since the front was
+the silence somebody clicked into, that silence arrived at the end: a loop
+whose last beats were empty while the drumming that belonged there had been
+transcribed and thrown away.
 
 That's deliberately narrower than what used to be here. An earlier version
 scored every rotation for how much it looked like 4/4 and turned the beat
@@ -68,6 +75,13 @@ _CONTEXT_SEC = 3.0
 # this feature exists to throw away.
 STEPS_PER_BAR = 16
 
+# How much drumming past the marked end to keep, in bars. Moving the loop's
+# start onto a kick moves its end by the same amount, and the notes for that
+# last stretch are past the mark - so they have to be transcribed too or the
+# loop ends in silence. A bar is the most the start can ever move, since the
+# kick is looked for within one bar.
+_SPARE_BARS = 1
+
 # Longest loop worth calling a loop. A marked section far longer than this
 # is somebody having missed the end of the phrase, and quantizing four
 # minutes onto sixteenths is the thing we just stopped doing.
@@ -99,7 +113,10 @@ class Loop(NamedTuple):
 def _section_wav(wav_path: str, start_sec: float, end_sec: float, out_path: str) -> float:
     """Cut [start, end] out of wav_path with _CONTEXT_SEC either side, and
     return how much padding actually made it onto the front (less than
-    asked for, when the section starts near the beginning of the file)."""
+    asked for, when the section starts near the beginning of the file).
+
+    Pass an end past the marked one to keep the drumming that follows it -
+    see _SPARE_BARS."""
     lead = min(_CONTEXT_SEC, start_sec)
     subprocess.run(
         [
@@ -155,12 +172,13 @@ _KICK_MARGIN = 0.9
 
 
 def _kick_downbeat(placed: dict, total_steps: int) -> int:
-    """Which step of the loop to call one.
+    """Which step of the marked section to call one, so the loop can start
+    there instead.
 
     A stolen loop is nearly always wanted starting with a kick on the one,
     and a section marked by ear starts wherever the mouse went - usually a
-    little before the phrase, since people click early. So the loop is
-    turned to begin on a kick.
+    little before the phrase, since people click early. So the loop is moved
+    on to begin at a kick, and runs its full length from there.
 
     Only kicks vote, and they vote by how hard they are and by turning up in
     every bar. Nothing here scores how much the result "looks like 4/4":
@@ -171,7 +189,7 @@ def _kick_downbeat(placed: dict, total_steps: int) -> int:
     isn't a judgement - don't start the loop on silence.
 
     Positions are folded across bars and searched within a single bar, since
-    rotating a repeating loop by a whole bar changes nothing you can hear.
+    moving a repeating loop on by a whole bar changes nothing you can hear.
     Returns 0 when there are no kicks, which leaves the marking alone."""
     within_bar = min(STEPS_PER_BAR, total_steps)
     force = [0.0] * within_bar
@@ -212,22 +230,31 @@ def build(
     if end_sec <= start_sec:
         raise ValueError("the end of the section has to come after its start")
 
+    span = end_sec - start_sec
+    # A bar of the drumming past the marked end, kept rather than thrown
+    # away, so that moving the loop's start onto a kick can take the bars it
+    # needs from what actually follows (see _SPARE_BARS).
+    spare = _SPARE_BARS * beat_writer.BEATS_PER_BAR * 60.0 / tempo if tempo > 0 else 0.0
+
     handle, section_path = tempfile.mkstemp(suffix=".wav")
     os.close(handle)
     try:
-        lead = _section_wav(wav_path, start_sec, end_sec, section_path)
+        lead = _section_wav(wav_path, start_sec, end_sec + spare, section_path)
         notes = drum_transcriber.transcribe(section_path)
     finally:
         os.remove(section_path)
 
-    span = end_sec - start_sec
     # Back into the section's own timeline, and drop the padding that was
     # only ever there to give the model something to look at.
-    inside = [
+    heard = [
         (note.start - lead, note.pitch, note.velocity)
         for note in notes
-        if 0 <= (note.start - lead) <= span
+        if 0 <= (note.start - lead) <= span + spare
     ]
+    # What was actually marked. The tempo and the grid come from this and
+    # only this - the spare bar is material to build with, not evidence
+    # about what somebody picked.
+    inside = [hit for hit in heard if hit[0] <= span]
 
     # The song's estimate gets exactly one job: saying how many bars long the
     # The tempo is measured again here, off the drumming inside the section,
@@ -253,28 +280,53 @@ def build(
     origin = _grid_origin([time_sec for time_sec, _, _ in inside], step_sec)
     total_steps = bars * STEPS_PER_BAR
 
-    # Quantize, keeping the loudest of any two hits of the same piece that
-    # land on the same step - a flam is two hits a few milliseconds apart,
-    # and on a sixteenth grid it can only be one note.
-    loudest: dict[tuple[int, str], int] = {}
-    dropped = 0
-    for time_sec, pitch, velocity in inside:
-        piece = _PIECE_FOR_NOTE.get(pitch)
-        if piece is None:
-            dropped += 1
-            continue
-        step = round((time_sec - origin) / step_sec)
-        if not 0 <= step < total_steps:
-            # A hit right on the closing downbeat belongs to the next
-            # repeat of the loop, not to a bar that doesn't exist.
-            dropped += 1
-            continue
-        key = (step, piece)
-        loudest[key] = max(loudest.get(key, 0), velocity)
+    def landed(time_sec: float, from_sec: float) -> int | None:
+        """Which step of a loop starting at from_sec a hit belongs to, or
+        None if it falls outside one - a hit on the closing downbeat belongs
+        to the next repeat, not to a bar that doesn't exist."""
+        step = round((time_sec - from_sec) / step_sec)
+        return step if 0 <= step < total_steps else None
 
-    rotation = _kick_downbeat(loudest, total_steps)
+    def quantize(from_sec: float, played: list) -> dict:
+        """The hits of `played` on the grid, as {(step, piece): velocity},
+        for the loop starting at from_sec.
+
+        The loudest of two hits of the same piece on one step wins: a flam is
+        two hits a few milliseconds apart, and on a sixteenth grid it can
+        only be one note."""
+        placed: dict[tuple[int, str], int] = {}
+        for time_sec, pitch, velocity in played:
+            piece = _PIECE_FOR_NOTE.get(pitch)
+            step = landed(time_sec, from_sec)
+            if piece is None or step is None:
+                continue
+            key = (step, piece)
+            placed[key] = max(placed.get(key, 0), velocity)
+        return placed
+
+    # Where the one is, decided on what was marked, and then the loop is
+    # taken from there: a full count of bars starting at that kick, its tail
+    # coming out of the spare bar rather than being wrapped round from the
+    # front. Wrapping was the bug. People click a little early, so the front
+    # of a marked section is usually silence, and rotating carried that
+    # silence to the end - a loop whose last two beats were empty while the
+    # drumming that belonged there sat just past the mark, transcribed and
+    # thrown away.
+    rotation = _kick_downbeat(quantize(origin, inside), total_steps)
+    from_sec = origin + rotation * step_sec
+    loudest = quantize(from_sec, heard)
+
+    # What was marked and didn't make it: a piece the map doesn't cover, or
+    # a hit left behind at the front when the loop moved on to the kick.
+    # Counted over the marked section only - the spare bar is there to build
+    # with, and the part of it the loop didn't need was never asked for.
+    dropped = sum(
+        1 for time_sec, pitch, _ in inside
+        if _PIECE_FOR_NOTE.get(pitch) is None or landed(time_sec, from_sec) is None
+    )
+
     hits = tuple(
-        beat_writer.Hit(piece, (step - rotation) % total_steps, velocity)
+        beat_writer.Hit(piece, step, velocity)
         for (step, piece), velocity in sorted(loudest.items())
     )
     beat = beat_writer.Beat(
@@ -287,7 +339,7 @@ def build(
     return Loop(
         beat=beat,
         bars=bars,
-        origin_sec=start_sec + origin + rotation * step_sec,
+        origin_sec=start_sec + from_sec,
         hits_used=len(hits),
         hits_dropped=dropped,
         tempo=loop_tempo,
