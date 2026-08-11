@@ -51,6 +51,19 @@ _OPEN_HIHAT_NOTE = 46
 # once, at the end.
 _PERCUSSION_NOTE = 39
 
+# The hi-hat class gets the same treatment, and for the same reason: on the
+# drum stem of Officially Missing You, the one section confirmed by ear to be
+# solo tambourine has the model calling it hi-hat throughout, not snare - the
+# tambourine there scores +7.1 on percussion_splitter.score, where real
+# hi-hats elsewhere score about -18. So a hi-hat hit that scores as percussion
+# is written provisionally to its own borrowed pad rather than 39: hi-hat and
+# snare are different pools with different evidence (a real hi-hat is *also*
+# almost always on a pulse, so groove_reader can't tell the two pools apart
+# by rhythm the way it does for the snare class - see that module), and
+# merging them here would erase the distinction before groove_reader ever
+# gets to use it. 41 is unused by anything else this file writes.
+_HAT_PERCUSSION_NOTE = 41
+
 # How long each class's notes are written as. Cosmetic in a rack full of
 # one-shots, but a drum part whose notes are all 50ms slivers is hard to
 # read in a MIDI editor. An open hi-hat gets its measured ring instead of a
@@ -365,6 +378,12 @@ def transcribe(wav_path: str) -> list[pretty_midi.Note]:
     snares = hit_times.get(_SNARE, [])
     votes = dict(zip(snares, percussion_splitter.split(audio, snares, SAMPLE_RATE)))
 
+    # Same vote, same audio, same bands - taken on the hi-hat class's hits
+    # instead. See _HAT_PERCUSSION_NOTE for why this is a second pool rather
+    # than folded into the one above.
+    hats = hit_times.get(_HIHAT, [])
+    hat_votes = dict(zip(hats, percussion_splitter.split(audio, hats, SAMPLE_RATE)))
+
     notes: list[pretty_midi.Note] = []
     for class_index, times in hit_times.items():
         if not times:
@@ -374,7 +393,11 @@ def transcribe(wav_path: str) -> list[pretty_midi.Note]:
 
         for time_sec, velocity in zip(times, _velocities(amplitudes)):
             ring = open_hihats.get(time_sec) if class_index == _HIHAT else None
-            if ring is not None:
+            if class_index == _HIHAT and hat_votes.get(time_sec) == percussion_splitter.PERCUSSION:
+                # A vote against being a drum at all overrides open-vs-closed -
+                # that question doesn't apply to whatever this turns out to be.
+                pitch, duration = _HAT_PERCUSSION_NOTE, _NOTE_DURATION_SEC[_HIHAT]
+            elif ring is not None:
                 pitch, duration = _OPEN_HIHAT_NOTE, min(ring, _OPEN_HIHAT_MAX_RING_SEC)
             else:
                 pitch, duration = _NOTE_FOR_CLASS[class_index], _NOTE_DURATION_SEC[class_index]
