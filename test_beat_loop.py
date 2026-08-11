@@ -197,6 +197,45 @@ class TestBuild(unittest.TestCase):
         with self.assertRaises(ValueError):
             beat_loop.build(self.wav, self.TEMPO, 10.0, 10.0)
 
+    def test_a_section_marked_exactly_right_agrees_with_the_song(self):
+        # 4.0s at 120 BPM is exactly two bars, so measuring the section
+        # against itself has to land back on the tempo we came in with.
+        notes = [_note(36, 0.0), _note(38, 0.5), _note(36, 2.0), _note(38, 2.5)]
+        loop = self._build(notes, span=4.0)
+
+        self.assertEqual(loop.bars, 2)
+        self.assertAlmostEqual(loop.tempo, self.TEMPO, places=6)
+        self.assertAlmostEqual(loop.song_tempo, self.TEMPO, places=6)
+
+    def test_a_section_marked_long_slows_the_loop_down_to_suit(self):
+        # 4.4s is still nearest to two bars, but it's two bars of a slower
+        # tempo - and the section is what counts. This is the whole point:
+        # the beat determines the grid, not the song's average.
+        notes = [_note(36, 0.0), _note(38, 0.55), _note(36, 2.2), _note(38, 2.75)]
+        loop = self._build(notes, span=4.4)
+
+        self.assertEqual(loop.bars, 2)
+        self.assertAlmostEqual(loop.tempo, 240.0 / 2.2, places=6)   # ~109 BPM
+        self.assertAlmostEqual(loop.song_tempo, self.TEMPO, places=6)
+
+    def test_the_loop_carries_its_own_tempo_not_the_songs(self):
+        # The tempo in the Beat is what reaches the MIDI header and the
+        # filename, so it has to be the loop's rather than the stem's.
+        notes = [_note(36, 0.0), _note(38, 0.55)]
+        loop = self._build(notes, span=4.4)
+
+        self.assertEqual(loop.beat.tempo, loop.tempo)
+        self.assertNotAlmostEqual(loop.beat.tempo, self.TEMPO, places=1)
+
+    def test_a_loop_is_exactly_as_long_as_the_section_that_was_marked(self):
+        # What makes it loop seamlessly: bars * bar length == the span, by
+        # construction, however far off the song's tempo the marking was.
+        for span in (2.0, 4.0, 4.4, 7.6):
+            with self.subTest(span=span):
+                loop = self._build([_note(36, 0.0)], span=span)
+                bar_sec = beat_writer.BEATS_PER_BAR * 60.0 / loop.tempo
+                self.assertAlmostEqual(loop.bars * bar_sec, span, places=6)
+
     def test_the_reported_origin_points_back_into_the_stem(self):
         notes = [_note(36, 0.0), _note(38, 0.5), _note(36, 1.0), _note(38, 1.5)]
         loop = self._build(notes, start=10.0, span=2.0)
@@ -217,7 +256,10 @@ class TestWrite(unittest.TestCase):
             tempo=120.0, hits=(beat_writer.Hit("kick", 0, 100),),
             steps_per_bar=16, bars=bars, name="Stolen Beat",
         )
-        return beat_loop.Loop(beat=beat, bars=bars, origin_sec=10.0, hits_used=1, hits_dropped=0)
+        return beat_loop.Loop(
+            beat=beat, bars=bars, origin_sec=10.0, hits_used=1, hits_dropped=0,
+            tempo=120.0, song_tempo=120.0,
+        )
 
     def test_the_filename_carries_the_tempo_and_the_length(self):
         path = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")

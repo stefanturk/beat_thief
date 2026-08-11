@@ -412,6 +412,61 @@ class TestLibrary(unittest.TestCase):
             self.assertEqual(api.library(), [])
 
 
+class TestStealBeat(unittest.TestCase):
+    """What comes back from stealing a loop - specifically which of the two
+    tempos in play reaches the page."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.stem = os.path.join(
+            self.tmp_dir, "Song - Artist (Isolated Drums at 120.000 BPM).wav")
+        with open(self.stem, "wb") as f:
+            f.write(b"not really a wav")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _steal(self, notes, start=10.0, end=14.4):
+        # Real beat_loop, faked transcription: what's under test is which
+        # numbers gui hands the page, not the model.
+        import pretty_midi
+        shifted = [
+            pretty_midi.Note(velocity=100, pitch=pitch, start=at + 3.0, end=at + 3.05)
+            for pitch, at in notes
+        ]
+        with mock.patch("beat_loop._section_wav", return_value=3.0), \
+             mock.patch("drum_transcriber.transcribe", return_value=shifted):
+            return gui.Api().steal_beat(self.stem, start, end)
+
+    def test_the_tempo_it_reports_is_the_loops_not_the_songs(self):
+        # This is the number the page tells you to set Ableton to. Reporting
+        # the stem's tempo instead would have the loop and the instruction
+        # disagree by however far the marking was off.
+        loop = self._steal([(36, 0.0), (38, 0.55), (36, 2.2), (38, 2.75)])
+
+        self.assertEqual(loop["bars"], 2)
+        self.assertAlmostEqual(loop["tempo"], 240.0 / 2.2, places=2)
+        self.assertAlmostEqual(loop["song_tempo"], 120.0, places=6)
+
+    def test_the_tempo_it_reports_is_the_one_in_the_filename(self):
+        # The .mid is named with its own tempo, and the page quotes a tempo
+        # in the same breath. If those two ever differ the app is lying.
+        loop = self._steal([(36, 0.0), (38, 0.55), (36, 2.2), (38, 2.75)])
+
+        self.assertIn(f"{loop['tempo']:g} BPM", loop["name"])
+
+    def test_a_section_marked_right_leaves_the_two_tempos_agreeing(self):
+        loop = self._steal([(36, 0.0), (38, 0.5), (36, 2.0), (38, 2.5)], end=14.0)
+
+        self.assertAlmostEqual(loop["tempo"], loop["song_tempo"], places=6)
+
+    def test_a_stem_that_is_not_there_comes_back_as_a_message(self):
+        loop = gui.Api().steal_beat(
+            os.path.join(self.tmp_dir, "gone (Isolated Drums at 120.000 BPM).wav"), 0.0, 4.0)
+
+        self.assertIn("error", loop)
+
+
 class TestUiFile(unittest.TestCase):
     def test_the_page_the_window_loads_actually_exists(self):
         self.assertTrue(os.path.exists(gui.UI_FILE), gui.UI_FILE)
