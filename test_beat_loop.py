@@ -312,6 +312,23 @@ class TestWrite(unittest.TestCase):
 
         self.assertTrue(os.path.exists(path))
 
+    def test_a_second_beat_does_not_replace_the_first(self):
+        # A verse and a chorus of the same song can easily come out the same
+        # number of bars at the same tempo, and the name carries nothing else.
+        first = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
+        second = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
+
+        self.assertNotEqual(first, second)
+        self.assertTrue(os.path.exists(first))
+        self.assertTrue(os.path.exists(second))
+        self.assertIn("(2)", os.path.basename(second))
+
+    def test_it_keeps_counting_past_the_second(self):
+        written = [beat_loop.write(self._loop(), self.tmp_dir, "Some Song") for _ in range(4)]
+
+        self.assertEqual(len(set(written)), 4)
+        self.assertTrue(all(name.endswith(".mid") for name in written))
+
 
 if __name__ == "__main__":
     unittest.main()

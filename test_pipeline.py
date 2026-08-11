@@ -563,6 +563,19 @@ class TestWhatASongHas(unittest.TestCase):
 
         self.assertIn("beat", have)
 
+    def test_the_newest_of_several_beats_is_the_one_offered(self):
+        # A song can have several stolen out of it, and the one you want to
+        # reach for is the one you just made - not whichever sorted first.
+        older = os.path.join(self.tmp_dir, "Song - Artist (Stolen Beat, 2 bars) (120 BPM).mid")
+        newer = os.path.join(self.tmp_dir, "Song - Artist (Stolen Beat, 4 bars) (98 BPM).mid")
+        for path in (older, newer):
+            open(path, "wb").close()
+        os.utime(older, (0, 0))
+
+        have = pipeline._what_a_song_has(self.song, [self.song, older, newer])
+
+        self.assertEqual(have["beat"], newer)
+
     def test_the_beat_label_is_the_one_beat_loop_actually_writes(self):
         # pipeline names the file by a constant it doesn't build itself, so
         # this is what stops the two drifting apart.

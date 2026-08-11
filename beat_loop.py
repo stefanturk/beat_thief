@@ -295,11 +295,27 @@ def build(
     )
 
 
+def _free_path(path: str) -> str:
+    """path, or the next " (2)", " (3)"... that nothing is using.
+
+    A song is worth more than one beat - a verse and a chorus out of the
+    same drums are two different loops - and the name only carries the bar
+    count and the tempo, so two sections of the same song can easily ask for
+    the same filename. Without this the second steal silently replaces the
+    first, which is the worst possible way to find out."""
+    stem, ext = os.path.splitext(path)
+    nth = 2
+    while os.path.exists(path):
+        path = f"{stem} ({nth}){ext}"
+        nth += 1
+    return path
+
+
 def write(loop: Loop, out_dir: str, title: str) -> str:
     """Write loop next to a song's stems, named so the tempo is readable
     without opening it (see beat_writer.write - Ableton won't read the
-    tempo out of the file)."""
+    tempo out of the file), and never over a beat that's already there."""
     os.makedirs(out_dir, exist_ok=True)
     label = f"{title} ({beat_writer.STOLEN_BEAT_LABEL}, {loop.bars} bar{'s' if loop.bars != 1 else ''})"
-    path = os.path.join(out_dir, beat_writer.filename_for(loop.beat, label))
+    path = _free_path(os.path.join(out_dir, beat_writer.filename_for(loop.beat, label)))
     return beat_writer.write(loop.beat, path)
