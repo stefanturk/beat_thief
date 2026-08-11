@@ -231,6 +231,10 @@ def build(
     tempo: float,
     start_sec: float,
     end_sec: float,
+    # What the track inside the MIDI file is called, and so what Ableton
+    # calls the clip. A placeholder: write() renames it after the file it
+    # ends up in, which is the name worth having. It matters only to a
+    # caller that builds a loop and writes it some other way.
     name: str = "Stolen Beat",
 ) -> Loop:
     """Transcribe [start_sec, end_sec] of wav_path and return it as a
@@ -391,6 +395,13 @@ def write(loop: Loop, out_dir: str, title: str) -> str:
     without opening it (see beat_writer.write - Ableton won't read the
     tempo out of the file), and never over a beat that's already there."""
     os.makedirs(out_dir, exist_ok=True)
-    label = f"{title} ({beat_writer.STOLEN_BEAT_LABEL}, {loop.bars} bar{'s' if loop.bars != 1 else ''})"
-    path = _free_path(os.path.join(out_dir, beat_writer.filename_for(loop.beat, label)))
-    return beat_writer.write(loop.beat, path)
+    path = _free_path(os.path.join(out_dir, beat_writer.stolen_beat_filename(loop.beat, title)))
+    # The track inside the file is named after the file. Ableton names the
+    # clip you drag in after the track, and that name was the constant
+    # "Stolen Beat" - so every loop out of every song arrived in Live called
+    # the same thing, and telling two of them apart meant opening them.
+    #
+    # Taken from the final path rather than built alongside it, so that a
+    # second beat out of one song keeps the " (2)" that makes it distinct.
+    named = loop.beat._replace(name=os.path.splitext(os.path.basename(path))[0])
+    return beat_writer.write(named, path)

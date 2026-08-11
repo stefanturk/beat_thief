@@ -325,7 +325,7 @@ def _what_a_song_has(song_path: str, files: list[str]) -> dict:
     # whichever sorted first. A file that went away between the listing and
     # here sorts last rather than raising: this is a description of a folder,
     # and a missing file is a thing to leave out, not to fail over.
-    beats = [p for p in files if beat_writer.STOLEN_BEAT_LABEL in os.path.basename(p) and p.endswith(".mid")]
+    beats = [p for p in files if p.endswith(".mid") and beat_writer.is_stolen_beat(os.path.basename(p))]
     if beats:
         have["beat"] = max(beats, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0.0)
     return have

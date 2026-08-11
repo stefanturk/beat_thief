@@ -924,6 +924,41 @@
       ctx.fillStyle = "#e9e7e2";
       ctx.fillRect(x - 0.5, 0, 1, h);
     }
+
+    const flash = barFlash();
+    if (flash > 0) {
+      ctx.fillStyle = "rgba(233, 231, 226, " + (FLASH_STRENGTH * flash).toFixed(3) + ")";
+      ctx.fillRect(0, 0, w, h);
+    }
+  }
+
+  // Every bar, the whole waveform lights up on the one.
+  //
+  // This is the only way to check the thing the loop depends on and that
+  // nothing else shows you: whether the point you clicked really is a
+  // downbeat. The marker tells you where the start is, and the start is
+  // never in doubt - what's in doubt is whether the bars that follow from
+  // it land where the drummer's do. Blinking them past you at the song's
+  // tempo turns that from a calculation into something you either see
+  // agreeing with what you hear or you don't.
+  //
+  // Bars are counted from the start you set, not from zero: before there's
+  // a start there's no "one" to be right or wrong about, so nothing
+  // flashes.
+  //
+  // The light fades over its own length rather than blinking on and off,
+  // because a flash that vanishes in one frame reads as a dropped frame.
+  const BEATS_PER_BAR = 4;
+  const FLASH_SEC = 0.12;
+  const FLASH_STRENGTH = 0.14;
+
+  function barFlash() {
+    if (!picker || audio.paused || picker.start === null) return 0;
+    const bar = picker.beat * BEATS_PER_BAR;
+    const since = audio.currentTime - picker.start;
+    if (!(bar > 0) || since < 0) return 0;
+    const into = since % bar;
+    return into < FLASH_SEC ? 1 - into / FLASH_SEC : 0;
   }
 
   function markedSoFar() {
@@ -1105,7 +1140,7 @@
   function sayWhatIsMarked() {
     if (picker.end === null) return;
     el("picker-hint").textContent = (picker.end - picker.start).toFixed(1) +
-      "s marked — build the beat, ⇧← ⇧→ to slide it a beat, or space to re-mark the end.";
+      "s marked — build the beat, ⇧← ⇧→ to slide it a beat, or space to play it again and space at the next 1.";
   }
 
   // Space only says where the phrase ends. Building the .mid is a separate
@@ -1323,7 +1358,19 @@
     // arrows scrolling the window out from under the waveform.
     event.preventDefault();
 
-    if (event.code === "Space") { markEnd(); return; }
+    // Space does whichever of the two things the moment calls for. Stopped,
+    // it starts the stem playing - the same thing the Play button does, and
+    // the thing your hand is already on the key for. Playing, it marks the
+    // end. There's no ambiguity to resolve: you can't mark the end of a
+    // phrase that isn't running past you, and pressing Play was a trip to
+    // the mouse in the middle of an interaction that is otherwise entirely
+    // by ear.
+    if (event.code === "Space") {
+      if (el("play").disabled) return;
+      if (audio.paused) playFrom(picker.start === null ? 0 : picker.start);
+      else markEnd();
+      return;
+    }
     const direction = event.code === "ArrowLeft" ? -1 : 1;
     if (event.shiftKey) slideSection(direction);
     else nudgeStart(direction * picker.nudge);

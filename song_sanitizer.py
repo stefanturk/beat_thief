@@ -51,16 +51,49 @@ _JUNK_RE = re.compile("|".join(_JUNK_PATTERNS), re.IGNORECASE)
 
 DEDUP_THRESHOLD = 0.9
 
+# Anything in round brackets comes off the title, whether or not it's on the
+# junk list above. On a downloaded song the bracket is where the shelf label
+# lives - "(Bonus Track)", "(Remastered 2011)", "(Deluxe Edition)",
+# "(Extended Mix)" - and none of it is the name of the song. It's also what
+# makes one song read as two: the same recording turns up once bare and once
+# bracketed, and find_duplicate_pairs has to score its way past a suffix that
+# was never part of the title.
+#
+# Square brackets are left alone deliberately: the junk list already names
+# the ones worth removing, and what's left in them is usually a remixer or a
+# catalogue number somebody chose to put there.
+_PARENTHETICAL_RE = re.compile(r"\s*\([^()]*\)")
+
 
 # --- Title cleanup and ID3 tags ---------------------------------------------
 
 def clean_title(stem: str) -> str:
-    cleaned = _JUNK_RE.sub("", stem)
+    cleaned = _strip_parentheticals(stem)
+    cleaned = _JUNK_RE.sub("", cleaned)
     cleaned = re.sub(r"[\(\[]\s*[\)\]]", "", cleaned)  # leftover empty () or [] shells
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = re.sub(r"\s*-\s*$", "", cleaned).strip()
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
     return cleaned
+
+
+def _strip_parentheticals(stem: str) -> str:
+    """stem with every bracketed aside removed, unless that leaves nothing.
+
+    Repeated because one pass only takes the innermost pair of a nested
+    "(Live (1978))"; it stops as soon as a pass changes nothing.
+
+    A title that is entirely brackets - which happens, and is usually a
+    stylised name rather than an aside - is given back untouched. An empty
+    title is worse than a fussy one: it's what _derive_title_artist would
+    have to name the file."""
+    cleaned = stem
+    while True:
+        shorter = _PARENTHETICAL_RE.sub("", cleaned)
+        if shorter == cleaned:
+            break
+        cleaned = shorter
+    return cleaned if cleaned.strip() else stem
 
 
 def split_title_artist(stem: str) -> tuple[str, str]:

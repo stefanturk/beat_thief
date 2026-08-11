@@ -44,6 +44,35 @@ class TestCleanTitle(unittest.TestCase):
             "Song Name - Artist",
         )
 
+    def test_strips_a_bracketed_aside_the_junk_list_never_heard_of(self):
+        self.assertEqual(
+            sanitizer.clean_title("Officially Missing You (Bonus Track) - Brasstracks"),
+            "Officially Missing You - Brasstracks",
+        )
+
+    def test_strips_every_bracket_not_just_the_first(self):
+        self.assertEqual(
+            sanitizer.clean_title("Song Name (Remastered 2011) (Deluxe Edition) - Artist"),
+            "Song Name - Artist",
+        )
+
+    def test_strips_a_nested_bracket_too(self):
+        self.assertEqual(
+            sanitizer.clean_title("Song Name (Live (1978)) - Artist"),
+            "Song Name - Artist",
+        )
+
+    def test_a_title_that_is_all_brackets_is_left_alone(self):
+        # Stylised names exist, and an empty title is worse than a fussy
+        # one - it's what the file would have to be named.
+        self.assertEqual(sanitizer.clean_title("(Nice Dream)"), "(Nice Dream)")
+
+    def test_square_brackets_are_left_to_the_junk_list(self):
+        self.assertEqual(
+            sanitizer.clean_title("Song Name [Kaytranada Remix] - Artist"),
+            "Song Name [Kaytranada Remix] - Artist",
+        )
+
 
 class TestSplitTitleArtist(unittest.TestCase):
     def test_splits_on_last_dash(self):
