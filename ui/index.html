@@ -172,6 +172,19 @@
     color: var(--good);
     cursor: default;
   }
+  /* Except a beat, which is the one thing worth having more than one of: a
+     green Beat can be armed for another, and armed beats green. */
+  .pad[data-again="true"] { cursor: pointer; }
+  .pad[data-have="true"][aria-pressed="true"] {
+    background: var(--violet-dim);
+    border-color: var(--violet);
+    color: var(--violet);
+  }
+  /* Armed only because something armed above it is made out of it. Purple
+     like anything armed, but not yours to turn off while that thing is on -
+     so it doesn't take the hover, which is what invites the click. */
+  .pad[data-locked="true"] { cursor: default; }
+  .pad[data-locked="true"]:hover { border-color: var(--violet); }
   .pad:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
 
   .extras {
@@ -549,7 +562,7 @@
       <div class="pads">
         <button class="pad" id="pad-song" data-stem="song" aria-pressed="true">Song</button>
         <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="false">Drums</button>
-        <button class="pad" id="pad-beat" data-stem="beat" aria-pressed="false">Beat</button>
+        <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
         <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
         <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
         <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
@@ -743,23 +756,52 @@
 
   let selected = null;   // the song the Take section is pointed at, if any
 
+  // The one thing worth having more than one of. Every stem is a file the
+  // song either has or hasn't, and taking it again would only write the same
+  // file twice - but a beat is a phrase somebody picked by ear, and the verse
+  // and the chorus of the same drums are two different loops. So a green Beat
+  // can still be armed, and goes purple like anything else.
+  const MORE_THAN_ONE = new Set(["beat"]);
+
   function padFor(thing) { return el("pad-" + thing); }
   function isArmed(thing) { return padFor(thing).getAttribute("aria-pressed") === "true"; }
   function have(thing) { return padFor(thing).dataset.have === "true"; }
+  function canArm(thing) { return !have(thing) || MORE_THAN_ONE.has(thing); }
+
+  // Held on because something else that's armed is made out of it. Turning
+  // this off would leave a run that can't finish, so it isn't offered: the
+  // way to release it is to turn off the thing that needs it. A prerequisite
+  // already in the stash is never armed in the first place, so it's never
+  // locked either - green needs nothing.
+  function lockedOn(thing) {
+    return STASH_ORDER.some(
+      (other) => other !== thing && isArmed(other) && NEEDS[other].includes(thing));
+  }
 
   function setArmed(thing, on) {
-    // Something already in the stash is never armed - it isn't re-taken.
-    padFor(thing).setAttribute("aria-pressed", on && !have(thing) ? "true" : "false");
+    padFor(thing).setAttribute("aria-pressed", on && canArm(thing) ? "true" : "false");
+  }
+
+  function showLocks() {
+    for (const thing of STASH_ORDER) {
+      const locked = isArmed(thing) && lockedOn(thing);
+      padFor(thing).dataset.locked = locked ? "true" : "false";
+      padFor(thing).title = locked
+        ? "Needed for what else is armed — turn that off first"
+        : "";
+    }
   }
 
   function togglePad(thing) {
-    if (have(thing)) return;               // green isn't a state you click out of
+    if (!canArm(thing)) return;            // green isn't a state you click out of
     if (isArmed(thing)) {
+      if (lockedOn(thing)) return;         // and neither is something held on
       setArmed(thing, false);
     } else {
       setArmed(thing, true);
       for (const needed of NEEDS[thing]) setArmed(needed, true);
     }
+    showLocks();
     describeTake();
   }
 
@@ -770,6 +812,7 @@
       padFor(thing).dataset.have = (song.have || {})[thing] ? "true" : "false";
       setArmed(thing, false);
     }
+    showLocks();
     describeTake();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -780,14 +823,15 @@
       padFor(thing).dataset.have = "false";
       setArmed(thing, thing === "song");
     }
+    showLocks();
     describeTake();
   }
 
   function describeTake() {
     const armed = STASH_ORDER.filter(isArmed);
     el("take-note").textContent = selected
-      ? (armed.length ? "Taking " + armed.map((t) => LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
-                      : "Nothing armed — everything for this song is already in the stash.")
+      ? (armed.length ? "Taking " + armed.map((t) => (have(t) ? "another " : "") + LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
+                      : "Nothing armed — click a square to take something from " + selected.title + ".")
       : "All four stems rebuild the song.";
   }
 
@@ -804,8 +848,12 @@
           selected = fresh;
           for (const thing of STASH_ORDER) {
             padFor(thing).dataset.have = (fresh.have || {})[thing] ? "true" : "false";
-            if (have(thing)) setArmed(thing, false);
+            // Something that just arrived isn't waiting to be taken any
+            // more - except a beat, where staying armed is how you go
+            // straight on and steal the next one.
+            if (!canArm(thing)) setArmed(thing, false);
           }
+          showLocks();
           describeTake();
         }
       }
