@@ -57,6 +57,7 @@ actually be written."""
 
 from __future__ import annotations
 
+import math
 import statistics
 
 # The pieces the snare class can arrive as. drum_transcriber votes on each hit
@@ -161,6 +162,28 @@ _SNARE_CAN_FAKE_DIVISION = 4
 # whatever it was. Rather than believe it, the pulse decides that step.
 def _confounds_the_vote(piece: str) -> bool:
     return piece == "kick" or piece.endswith("tom")
+
+# How many standard errors above a coin flip a voice's percussion-vote
+# fraction has to sit before it's trusted, for pools where nothing says the
+# noise leans one way (see _HAT_CLASS - unlike the snare class, a real
+# hi-hat is also almost always on a pulse, so contamination isn't known to
+# push its votes toward "drum" the way it does for the snare class). Scaled
+# by sample size (0.5 / sqrt(n)) rather than a flat percentage, because a
+# flat number is either too loose for a handful of hits or too strict for a
+# hundred: a jazz kit's hi-hat/ride, measured on "Three" (Nicholas Payton),
+# voted percussion on 54% of 41 hits - indistinguishable from a coin flip,
+# and the flat 0.3 threshold this replaces for the hat pool would have
+# happily called that a voice. Officially Missing You's confirmed tambourine
+# section, at 82% of 28, clears this with room to spare.
+_CONFIDENCE_Z = 2.0
+
+
+def _confidently_voted(votes: int, total: int) -> bool:
+    if total == 0:
+        return False
+    fraction = votes / total
+    standard_error = 0.5 / math.sqrt(total)
+    return fraction - 0.5 >= _CONFIDENCE_Z * standard_error
 
 # Under this velocity, a hit left on the snare pad is a ghost note and goes to
 # its own pad, so the hits that are meant to sing aren't sharing with the ones
@@ -351,12 +374,7 @@ def refine(
                        if hat_pool[step] != "closed hat" or step not in covered_by]
         voted = sum(1 for step in heard_alone if hat_pool[step] != "closed hat")
 
-        # Reuses the snare class's threshold - the same "contamination pushes
-        # votes one way" argument applies, though it's only been measured
-        # against one confirmed section (see
-        # officially-missing-you-tambourine-labels) and may want its own
-        # number once there's more than one.
-        if voted >= _PERCUSSION_MAJORITY * len(heard_alone or on_pulse):
+        if _confidently_voted(voted, len(heard_alone or on_pulse)):
             hat_percussion = _PIECE_FOR_DIVISION[division]
 
             velocities: dict[int, int] = {}

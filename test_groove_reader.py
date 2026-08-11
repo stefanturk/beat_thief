@@ -142,6 +142,44 @@ class TestTakingAVoiceOffTheHihat(unittest.TestCase):
 
         self.assertEqual(steps_of(out, "tambourine"), list(range(0, 64, 4)))
 
+    def test_a_near_coin_flip_vote_is_not_trusted(self):
+        # Same shape as what the fidelity tool found on a jazz kit ("Three",
+        # Nicholas Payton, see beat-thief-jazz-genre-limits in project
+        # memory): the audio's vote was barely different from a coin flip
+        # (54% of 41 hits) - not the kind of evidence that should move a
+        # whole voice off a real instrument. A flat 30%-of-hits threshold
+        # (what the snare class still uses) would have happily called this a
+        # voice; this pool requires the vote to actually be distinguishable
+        # from noise, scaled to how many hits it's built from.
+        steps_per_bar, bars = 16, 10
+        total_steps = steps_per_bar * bars
+        positions = list(range(0, total_steps, 2))  # an eighth-note pulse
+        placed = {
+            (step, "hat percussion" if i % 20 < 11 else "closed hat"): 100
+            for i, step in enumerate(positions)
+        }
+
+        out, inferred = groove_reader.refine(placed, total_steps, steps_per_bar)
+
+        self.assertEqual(steps_of(out, "tambourine"), [])
+        self.assertEqual(inferred, 0)
+
+    def test_a_lopsided_vote_is_trusted_even_with_the_same_pulse(self):
+        # Same pulse and sample size as the coin-flip case above, but a vote
+        # that's actually one-sided - the fidelity tool's confirmed case
+        # (Officially Missing You's solo tambourine section) voted 82% of 28.
+        steps_per_bar, bars = 16, 10
+        total_steps = steps_per_bar * bars
+        positions = list(range(0, total_steps, 2))
+        placed = {
+            (step, "hat percussion" if i % 20 < 17 else "closed hat"): 100
+            for i, step in enumerate(positions)
+        }
+
+        out, inferred = groove_reader.refine(placed, total_steps, steps_per_bar)
+
+        self.assertEqual(steps_of(out, "tambourine"), positions)
+
     def test_a_stray_bright_hit_is_still_a_closed_hat(self):
         # One hit voted percussion out of a steady closed-hat voice. A lone
         # tambourine note scattered into a loop is the failure this stage
