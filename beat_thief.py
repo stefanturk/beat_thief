@@ -57,7 +57,10 @@ class _Printer:
 
         elif stage == "found":
             total = event["total"]
-            if total:
+            song = event.get("song")
+            if song:
+                print(f"Found {song}. Songs already downloaded before will be skipped automatically.\n")
+            elif total:
                 word = "song" if total == 1 else "songs"
                 print(f"Found {total} {word}. Songs already downloaded before will be skipped automatically.\n")
             else:

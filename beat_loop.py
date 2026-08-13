@@ -237,6 +237,12 @@ def build(
     # ends up in, which is the name worth having. It matters only to a
     # caller that builds a loop and writes it some other way.
     name: str = "Stolen Beat",
+    # Told what's happening as it happens, so a caller with no percentage
+    # to show (there's no per-chunk progress out of a single model pass,
+    # unlike demucs) can still say something other than a static "working"
+    # for the thirty-odd seconds this takes. None is a no-op, so nothing
+    # else calling build() has to care that this exists.
+    on_phase=None,
 ) -> Loop:
     """Transcribe [start_sec, end_sec] of wav_path and return it as a
     quantized loop.
@@ -250,12 +256,17 @@ def build(
     if end_sec <= start_sec:
         raise ValueError("the end of the section has to come after its start")
 
+    def phase(message):
+        if on_phase is not None:
+            on_phase(message)
+
     span = end_sec - start_sec
     # A bar of the drumming past the marked end, kept rather than thrown
     # away, so that moving the loop's start onto a kick can take the bars it
     # needs from what actually follows (see _SPARE_BARS).
     spare = _SPARE_BARS * beat_writer.BEATS_PER_BAR * 60.0 / tempo if tempo > 0 else 0.0
 
+    phase("Cutting the section...")
     # A song's own hi-hat/ride, not Officially Missing You's - see
     # calibrate_hat_threshold. Cached per file, so stealing several loops out
     # of one song only pays for this once.
@@ -265,9 +276,12 @@ def build(
     os.close(handle)
     try:
         lead = _section_wav(wav_path, start_sec, end_sec + spare, section_path)
+        phase("Listening for the hits...")
         notes = drum_transcriber.transcribe(section_path, hat_threshold=hat_threshold)
     finally:
         os.remove(section_path)
+
+    phase("Quantizing the pattern...")
 
     # Back into the section's own timeline, and drop the padding that was
     # only ever there to give the model something to look at.
@@ -411,3 +425,27 @@ def write(loop: Loop, out_dir: str, title: str) -> str:
     # second beat out of one song keeps the " (2)" that makes it distinct.
     named = loop.beat._replace(name=os.path.splitext(os.path.basename(path))[0])
     return beat_writer.write(named, path)
+
+
+def write_wav(loop: Loop, wav_path: str, mid_path: str) -> str:
+    """Cut the loop's own span - origin_sec to origin_sec + duration_sec,
+    the marking after it was nudged onto a kick, not the raw click - out of
+    wav_path and save it beside mid_path.
+
+    Named to match the .mid rather than run through _free_path on its own,
+    so the pair a second steal makes keeps its own " (2)" together instead
+    of the two drifting out of sync should one ever be written without the
+    other."""
+    out_path = os.path.splitext(mid_path)[0] + ".wav"
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y",
+            "-ss", f"{loop.origin_sec:.6f}",
+            "-t", f"{loop.beat.duration_sec:.6f}",
+            "-i", wav_path,
+            out_path,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return out_path

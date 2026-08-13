@@ -57,16 +57,6 @@
     overflow: hidden;
   }
 
-  /* Everything above the destination footer scrolls in here, so a long
-     session of stolen songs can never push the folder link off screen. */
-  .scroll {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    display: flex;
-    flex-direction: column;
-  }
-
   /* Silkscreen labels, the way a panel names its sections. */
   .label {
     font-family: var(--display);
@@ -128,7 +118,7 @@
     display: flex;
     flex-direction: column;
     gap: 22px;
-    flex: 1;
+    flex: none;
   }
 
   input[type="url"] {
@@ -336,12 +326,21 @@
   #go[data-mode="cancel"]:hover { background: rgba(255, 107, 94, 0.12); }
   #go:disabled { opacity: 0.45; cursor: default; }
 
-  .files { border-top: 1px solid var(--edge); padding: 18px 22px 22px; }
+  /* The one part of the page that scrolls: the header and the Take/readout
+     section above it stay put at their natural size, so a long session of
+     stolen songs pushes the file list, never the controls, off screen. */
+  .files {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    border-top: 1px solid var(--edge);
+    padding: 18px 22px 22px;
+  }
 
   #empty { color: #5b5d64; font-size: 12.5px; margin: 0 0 12px; }
 
-  /* Always here, whether or not this session downloaded anything, and
-     always visible without scrolling - see the .scroll wrapper above. The
+  /* Outside .files and last in the DOM, so it stays pinned to the bottom of
+     the window instead of scrolling away under a long file list. The
      folder is the one thing you always want to reach - it's where every
      previous session's work is too, and an empty list used to be a dead
      end that told you where your files were without offering to show you. */
@@ -551,7 +550,6 @@
 </style>
 
 <body data-state="idle">
-  <div class="scroll">
   <header>
     <div class="wordmark">
       <img src="logo.svg" alt="" width="26" height="26">
@@ -623,13 +621,12 @@
     <p id="empty">Nothing yet this session.</p>
     <ul id="outputs"></ul>
   </section>
-  </div>
 
   <!--
-    Outside the scroll container and last in the DOM, so it stays pinned to
-    the bottom of the window instead of scrolling away under a long file
-    list - the folder is the one thing you always want to reach, whether or
-    not this session downloaded anything (see the #destination rule below).
+    Outside .files and last in the DOM, so it stays pinned to the bottom of
+    the window instead of scrolling away under a long file list - the
+    folder is the one thing you always want to reach, whether or not this
+    session downloaded anything (see the #destination rule below).
   -->
   <button id="destination" type="button" title="Open this folder in Finder">
     <span class="where"></span><span class="open">Open</span>
@@ -836,7 +833,6 @@
     }
     showLocks();
     describeTake();
-    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function clearSelection() {
@@ -1180,16 +1176,37 @@
     drawWave();
   }
 
+  // Building a beat has no percentage of its own - one model pass with
+  // nothing to count chunks of, unlike demucs - so what there is to show is
+  // which phase it's in (see beat_loop.build's on_phase), polled the same
+  // way a run's status() is.
+  let beatPolling = null;
+
   function buildBeat() {
     if (!picker || picker.start === null || picker.end === null) return;
     const end = picker.end;
     pausePlay();
-    el("picker-hint").textContent = "Building it...";
     el("build").disabled = true;
 
-    window.pywebview.api.steal_beat(picker.song.have.drums, picker.start, end).then((loop) => {
+    window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end).then(() => {
+      if (beatPolling) clearInterval(beatPolling);
+      beatPolling = setInterval(pollBeat, 250);
+      pollBeat();
+    });
+  }
+
+  function pollBeat() {
+    window.pywebview.api.beat_status().then((state) => {
+      if (state.running) {
+        el("picker-hint").textContent = state.phase || "Building it...";
+        return;
+      }
+      clearInterval(beatPolling);
+      beatPolling = null;
       el("build").disabled = false;
-      if (loop.error) { el("picker-hint").textContent = loop.error; return; }
+
+      if (state.error) { el("picker-hint").textContent = state.error; return; }
+      const loop = state.result;
       el("picker-hint").textContent =
         loop.bars + " bar" + (loop.bars === 1 ? "" : "s") + ", " + loop.hits + " hits" +
         // Notes worked out from the pattern rather than heard - say so.
@@ -1235,9 +1252,20 @@
 
   // --- talking to Python -------------------------------------------------
 
+  // Which stage the library was last refreshed for, so a downloaded song
+  // (or a stem that just finished isolating) shows up green as soon as it
+  // exists rather than waiting for every armed instrument to be done -
+  // library() is cheap, but polling it every 250ms regardless would be
+  // wasteful, so this only calls it again when the stage actually moves on.
+  let lastStage = null;
+
   function poll() {
     window.pywebview.api.status().then((state) => {
       render(state);
+      if (state.stage !== lastStage) {
+        lastStage = state.stage;
+        refreshLibrary();
+      }
       if (!state.running && polling) {
         clearInterval(polling);
         polling = null;
@@ -1281,6 +1309,7 @@
     // that's the ordinary case: paste a link, click Beat, take it.
     pendingBeatFor = wantsBeat ? { song: selected ? selected.song : "" } : null;
 
+    lastStage = null;
     window.pywebview.api.start(el("url").value, options).then((state) => {
       render(state);
       if (state.running && !polling) polling = setInterval(poll, 250);

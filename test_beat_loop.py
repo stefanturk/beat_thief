@@ -4,16 +4,33 @@
 None of these run the model. build() is exercised against a faked
 transcription, so what's under test is the gridding, not ADTOF."""
 
+import contextlib
 import math
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
+import wave
 from unittest import mock
 
 import beat_loop
 import beat_writer
 import pretty_midi
+
+
+def _silent_wav(path: str, seconds: float, sample_rate: int = 44100) -> None:
+    """A plain silent wav, long enough to cut a section out of."""
+    with contextlib.closing(wave.open(path, "wb")) as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(sample_rate)
+        f.writeframes(b"\x00\x00" * int(seconds * sample_rate))
+
+
+def _wav_duration(path: str) -> float:
+    with contextlib.closing(wave.open(path, "rb")) as f:
+        return f.getnframes() / f.getframerate()
 
 
 def _note(pitch, start, velocity=100):
@@ -197,6 +214,18 @@ class TestBuild(unittest.TestCase):
         by_piece = {hit.piece: hit.velocity for hit in loop.beat.hits}
         self.assertEqual(by_piece["ghost snare"], 30)
         self.assertNotIn("snare", by_piece)
+
+    def test_on_phase_is_told_what_is_happening_in_order(self):
+        notes = [_note(36, 0.0), _note(38, 0.5), _note(36, 1.0), _note(38, 1.5)]
+        phases = []
+        shifted = [_note(n.pitch, n.start + beat_loop._CONTEXT_SEC, n.velocity) for n in notes]
+        with mock.patch("beat_loop._section_wav", return_value=beat_loop._CONTEXT_SEC), \
+             mock.patch("drum_transcriber.calibrate_hat_threshold", return_value=-5.0), \
+             mock.patch("drum_transcriber.transcribe", return_value=shifted):
+            beat_loop.build(self.wav, self.TEMPO, 10.0, 12.0, on_phase=phases.append)
+
+        self.assertEqual(len(phases), 3)
+        self.assertEqual(len(set(phases)), 3)  # each phase says something different
 
     def test_every_piece_it_emits_is_a_name_beat_writer_knows(self):
         # A note number the map doesn't cover must be dropped, not passed
@@ -439,6 +468,44 @@ class TestWrite(unittest.TestCase):
 
         self.assertEqual(len(set(written)), 4)
         self.assertTrue(all(name.endswith(".mid") for name in written))
+
+
+class TestWriteWav(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _loop(self, origin_sec=2.0, bars=2, tempo=120.0):
+        beat = beat_writer.Beat(
+            tempo=tempo, hits=(beat_writer.Hit("kick", 0, 100),),
+            steps_per_bar=16, bars=bars, name="Stolen Beat",
+        )
+        return beat_loop.Loop(
+            beat=beat, bars=bars, origin_sec=origin_sec, hits_used=1, hits_dropped=0,
+            hits_inferred=0, tempo=tempo, song_tempo=tempo,
+        )
+
+    def test_the_wav_sits_beside_the_midi_with_a_matching_name(self):
+        wav_path = os.path.join(self.tmp_dir, "stem.wav")
+        _silent_wav(wav_path, seconds=10.0)
+        mid_path = os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).mid")
+
+        out_path = beat_loop.write_wav(self._loop(), wav_path, mid_path)
+
+        self.assertEqual(out_path, os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).wav"))
+        self.assertTrue(os.path.exists(out_path))
+
+    def test_it_is_trimmed_to_the_loops_own_span_not_the_raw_marking(self):
+        wav_path = os.path.join(self.tmp_dir, "stem.wav")
+        _silent_wav(wav_path, seconds=10.0)
+        mid_path = os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).mid")
+        loop = self._loop(origin_sec=2.0, bars=2, tempo=120.0)  # 4s long
+
+        out_path = beat_loop.write_wav(loop, wav_path, mid_path)
+
+        self.assertAlmostEqual(_wav_duration(out_path), loop.beat.duration_sec, places=1)
 
 
 if __name__ == "__main__":

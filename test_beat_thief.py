@@ -1,7 +1,24 @@
+import io
 import unittest
 from unittest import mock
 
 import beat_thief
+
+
+class TestPrinterFoundStage(unittest.TestCase):
+    def test_names_the_song_when_it_knows_it(self):
+        printer = beat_thief._Printer()
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            printer({"stage": "found", "total": 1, "song": "Redbone"})
+        self.assertIn("Redbone", out.getvalue())
+
+    def test_falls_back_to_a_count_for_a_playlist(self):
+        printer = beat_thief._Printer()
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            printer({"stage": "found", "total": 12, "song": None})
+        self.assertIn("12 songs", out.getvalue())
 
 
 class CliTestCase(unittest.TestCase):
