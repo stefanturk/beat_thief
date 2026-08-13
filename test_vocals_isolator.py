@@ -208,5 +208,16 @@ class TestIsolateVocalsForPath(unittest.TestCase):
         mock_folder.assert_called_once_with(self.tmp_dir, context=None)
 
 
+class TestIsolateVocalsForSingleFile(unittest.TestCase):
+    """See the matching test in test_drum_isolator.py: a single file's
+    failure has to reach pipeline._isolate_songs, not vanish into a print()
+    the packaged GUI app has no console to show."""
+
+    @mock.patch("vocals_isolator.isolate_vocals", side_effect=RuntimeError("boom"))
+    def test_a_failure_is_not_swallowed(self, mock_isolate):
+        with self.assertRaises(RuntimeError):
+            vocals_isolator.isolate_vocals_for_single_file("Song - Artist.mp3")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -148,10 +148,9 @@ def isolate_bass_for_folder(output_dir: str, context: instrument_isolator.RunCon
 
 
 def isolate_bass_for_single_file(path: str, context: instrument_isolator.RunContext | None = None) -> None:
-    try:
-        isolate_bass(path, context=context)
-    except Exception as e:
-        print(f"  Could not isolate bass for {os.path.basename(path)}, skipping: {e}")
+    # Left to propagate - see the matching comment in
+    # drum_isolator.isolate_drums_for_single_file.
+    isolate_bass(path, context=context)
 
 
 def isolate_bass_for_path(path: str, context: instrument_isolator.RunContext | None = None) -> None:

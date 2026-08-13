@@ -53,7 +53,18 @@
     cursor: default;
     display: flex;
     flex-direction: column;
-    min-height: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  /* Everything above the destination footer scrolls in here, so a long
+     session of stolen songs can never push the folder link off screen. */
+  .scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
   }
 
   /* Silkscreen labels, the way a panel names its sections. */
@@ -329,19 +340,22 @@
 
   #empty { color: #5b5d64; font-size: 12.5px; margin: 0 0 12px; }
 
-  /* Always here, whether or not this session downloaded anything. The
+  /* Always here, whether or not this session downloaded anything, and
+     always visible without scrolling - see the .scroll wrapper above. The
      folder is the one thing you always want to reach - it's where every
      previous session's work is too, and an empty list used to be a dead
      end that told you where your files were without offering to show you. */
   #destination {
+    flex: none;
     display: flex;
     align-items: baseline;
     gap: 8px;
     width: 100%;
-    margin: 14px 0 0;
-    padding: 0;
-    background: none;
+    margin: 0;
+    padding: 12px 22px;
+    background: var(--panel);
     border: none;
+    border-top: 1px solid var(--edge);
     color: #4a4d55;
     font-family: var(--display);
     font-size: 10px;
@@ -537,6 +551,7 @@
 </style>
 
 <body data-state="idle">
+  <div class="scroll">
   <header>
     <div class="wordmark">
       <img src="logo.svg" alt="" width="26" height="26">
@@ -607,11 +622,18 @@
     <p class="label">Files</p>
     <p id="empty">Nothing yet this session.</p>
     <ul id="outputs"></ul>
-
-    <button id="destination" type="button" title="Open this folder in Finder">
-      <span class="where"></span><span class="open">Open</span>
-    </button>
   </section>
+  </div>
+
+  <!--
+    Outside the scroll container and last in the DOM, so it stays pinned to
+    the bottom of the window instead of scrolling away under a long file
+    list - the folder is the one thing you always want to reach, whether or
+    not this session downloaded anything (see the #destination rule below).
+  -->
+  <button id="destination" type="button" title="Open this folder in Finder">
+    <span class="where"></span><span class="open">Open</span>
+  </button>
 
 <script>
   const el = (id) => document.getElementById(id);
