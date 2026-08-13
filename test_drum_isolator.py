@@ -207,5 +207,18 @@ class TestIsolateDrumsForPath(unittest.TestCase):
         mock_folder.assert_called_once_with(self.tmp_dir, context=None)
 
 
+class TestIsolateDrumsForSingleFile(unittest.TestCase):
+    """Unlike the folder loop, a single file's failure has to reach the
+    caller - pipeline._isolate_songs (and through it, the GUI) depends on
+    a real crash surfacing as a run error rather than a message printed to
+    a console the packaged app doesn't have (see test_pipeline's
+    TestSeparatedAudioIsCleanedUp.test_after_an_isolator_blows_up)."""
+
+    @mock.patch("drum_isolator.isolate_drums", side_effect=RuntimeError("boom"))
+    def test_a_failure_is_not_swallowed(self, mock_isolate):
+        with self.assertRaises(RuntimeError):
+            drum_isolator.isolate_drums_for_single_file("Song - Artist.mp3")
+
+
 if __name__ == "__main__":
     unittest.main()

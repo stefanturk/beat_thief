@@ -91,10 +91,14 @@ def isolate_drums_for_folder(output_dir: str, context: instrument_isolator.RunCo
 
 
 def isolate_drums_for_single_file(path: str, context: instrument_isolator.RunContext | None = None) -> None:
-    try:
-        isolate_drums(path, context=context)
-    except Exception as e:
-        print(f"  Could not isolate drums for {os.path.basename(path)}, skipping: {e}")
+    # Left to propagate, not swallowed like the folder loop's per-file catch:
+    # pipeline._isolate_songs calls this directly for one song at a time and
+    # depends on a real failure surfacing as a run error (see
+    # test_pipeline.TestSeparatedAudioIsCleanedUp), so the GUI can say what
+    # went wrong instead of quietly reporting "done" with no drums wav and
+    # no explanation - the printed message here goes nowhere in a windowed
+    # app with no attached console.
+    isolate_drums(path, context=context)
 
 
 def isolate_drums_for_path(path: str, context: instrument_isolator.RunContext | None = None) -> None:

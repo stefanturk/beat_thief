@@ -352,7 +352,20 @@ def library(limit: int = 20) -> list[dict]:
 
         song_dir = instrument_isolator.song_output_dir(song_path)
         files = [song_path]
-        for name in sorted(os.listdir(song_dir)) if os.path.isdir(song_dir) else []:
+        try:
+            names = sorted(os.listdir(song_dir)) if os.path.isdir(song_dir) else []
+        except OSError:
+            # macOS blocks apps outside their own sandbox from reading
+            # ~/Downloads, ~/Desktop and ~/Documents without a permission
+            # grant that a python3 subprocess can't reliably get (see
+            # make_app.sh) - so a song the terminal front end downloaded to
+            # ~/Downloads can exist and still not be listable from here.
+            # One unreadable folder used to take the whole library down
+            # with it; now it's treated the same as a song that isn't on
+            # disk, since none of its stems could be reached from here
+            # either.
+            continue
+        for name in names:
             # Skip the .source.json markers the isolators keep for their
             # own "is this still up to date" checks - not output anyone
             # asked for. The mp3 lives in here too now, so it would

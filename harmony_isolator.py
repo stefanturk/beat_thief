@@ -99,10 +99,9 @@ def isolate_harmony_for_folder(output_dir: str, context: instrument_isolator.Run
 
 
 def isolate_harmony_for_single_file(path: str, context: instrument_isolator.RunContext | None = None) -> None:
-    try:
-        isolate_harmony(path, context=context)
-    except Exception as e:
-        print(f"  Could not isolate harmony for {os.path.basename(path)}, skipping: {e}")
+    # Left to propagate - see the matching comment in
+    # drum_isolator.isolate_drums_for_single_file.
+    isolate_harmony(path, context=context)
 
 
 def isolate_harmony_for_path(path: str, context: instrument_isolator.RunContext | None = None) -> None:

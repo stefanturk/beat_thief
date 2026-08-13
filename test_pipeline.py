@@ -425,6 +425,39 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
 
         self.assertEqual([song["song"] for song in listed], [real])
 
+    def test_a_song_whose_folder_cannot_be_read_does_not_blank_the_rest(self):
+        # macOS blocks a packaged app from listing ~/Downloads without a
+        # permission grant it can't reliably get (see make_app.sh) - a song
+        # the terminal front end downloaded there is unreadable from the
+        # GUI even though the mp3 itself still exists. That used to raise
+        # out of the whole function and blank every other song in the list;
+        # now it's dropped like a song that isn't on disk, and the readable
+        # ones still come back.
+        blocked_dir = os.path.join(self.tmp_dir, "Blocked Song - Artist")
+        blocked_song = os.path.join(blocked_dir, "Blocked Song - Artist.mp3")
+        os.makedirs(blocked_dir)
+        with open(blocked_song, "wb") as f:
+            f.write(b"x")
+
+        real = os.path.join(self.tmp_dir, "Real Song - Artist.mp3")
+        with open(real, "wb") as f:
+            f.write(b"x")
+
+        history.remember("https://example.com/blocked", [blocked_song])
+        history.remember("https://example.com/real", [real])
+
+        real_listdir = os.listdir
+
+        def blocked_listdir(path):
+            if path == blocked_dir:
+                raise PermissionError("Operation not permitted")
+            return real_listdir(path)
+
+        with mock.patch("os.listdir", side_effect=blocked_listdir):
+            listed = pipeline.library()
+
+        self.assertEqual([song["song"] for song in listed], [real])
+
     def test_the_library_lists_the_song_with_its_link_and_its_files(self):
         song_dir = os.path.join(self.tmp_dir, "Some Song - Artist")
         wav = os.path.join(song_dir, "Some Song - Artist (Isolated Drums at 120.000 BPM).wav")
