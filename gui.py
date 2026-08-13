@@ -55,6 +55,9 @@ class Api:
         self._thread = None
         self._cancel = threading.Event()
         self._state = self._idle_state()
+        self._beat_lock = threading.Lock()
+        self._beat_thread = None
+        self._beat_state = self._idle_beat_state()
 
     @staticmethod
     def _idle_state() -> dict:
@@ -68,6 +71,10 @@ class Api:
             "cancelled": False,
             "output_dir": DEFAULT_OUTPUT,
         }
+
+    @staticmethod
+    def _idle_beat_state() -> dict:
+        return {"running": False, "phase": "", "error": "", "result": None}
 
     # --- called from the page ------------------------------------------
 
@@ -194,23 +201,31 @@ class Api:
             prepared["tempo"] = 0.0
         return prepared
 
-    def steal_beat(self, wav_path: str, start_sec: float, end_sec: float) -> dict:
-        """Turn the marked section into a looping .mid next to the stem.
+    def steal_beat(self, wav_path: str, start_sec: float, end_sec: float, on_phase=None) -> dict:
+        """Turn the marked section into a looping .mid (and a matching .wav,
+        see beat_loop.write_wav) next to the stem.
 
         Two tempos come back and they're different things. "tempo" is the
         loop's, measured off the section that was marked, and it's the
         number to set Ableton to. "song_tempo" is the whole song's rough
         estimate, read back out of the stem's filename rather than
         re-estimated here; it's only useful for noticing that the two
-        disagree, which means the phrase was marked long or short."""
+        disagree, which means the phrase was marked long or short.
+
+        on_phase is optional and only used by steal_beat_start - a direct
+        caller (the tests, or a script) has no poller reading it, so it
+        defaults to doing nothing."""
         try:
             song_dir = os.path.dirname(wav_path)
             basename = os.path.splitext(os.path.basename(wav_path))[0]
             tempo = instrument_isolator.parse_tempo_from_basename(basename)
             title = basename.split(" (Isolated")[0]
 
-            loop = beat_loop.build(wav_path, tempo, float(start_sec), float(end_sec))
+            loop = beat_loop.build(wav_path, tempo, float(start_sec), float(end_sec), on_phase=on_phase)
+            if on_phase is not None:
+                on_phase("Saving the loop...")
             path = beat_loop.write(loop, song_dir, title)
+            beat_loop.write_wav(loop, wav_path, path)
         except Exception as e:
             return {"error": str(e) or e.__class__.__name__}
 
@@ -227,6 +242,49 @@ class Api:
             "inferred": loop.hits_inferred,
             "pieces": sorted({hit.piece for hit in loop.beat.hits}),
         }
+
+    def steal_beat_start(self, wav_path: str, start_sec: float, end_sec: float) -> dict:
+        """Like steal_beat, but returns immediately and reports progress
+        through beat_status() - the page polls it exactly the way it polls
+        status() for a run.
+
+        A state dict of its own rather than self._state: stealing a beat
+        happens after a run has already finished, and starting one
+        shouldn't overwrite that run's status while it's still on screen."""
+        with self._beat_lock:
+            if self._beat_thread is not None and self._beat_thread.is_alive():
+                return dict(self._beat_state)
+            self._beat_state = {
+                "running": True, "phase": "Cutting the section...", "error": "", "result": None,
+            }
+            snapshot = dict(self._beat_state)
+
+        self._beat_thread = threading.Thread(
+            target=self._steal_beat_work,
+            args=(wav_path, start_sec, end_sec),
+            daemon=True,
+        )
+        self._beat_thread.start()
+        return snapshot
+
+    def beat_status(self) -> dict:
+        """The current state of a steal_beat_start() build, polled by the
+        page a few times a second while the picker is waiting on it."""
+        with self._beat_lock:
+            return dict(self._beat_state)
+
+    def _set_beat_phase(self, phase: str) -> None:
+        with self._beat_lock:
+            self._beat_state["phase"] = phase
+
+    def _steal_beat_work(self, wav_path, start_sec, end_sec):
+        result = self.steal_beat(wav_path, start_sec, end_sec, on_phase=self._set_beat_phase)
+        with self._beat_lock:
+            self._beat_state["running"] = False
+            if "error" in result:
+                self._beat_state["error"] = result["error"]
+            else:
+                self._beat_state["result"] = result
 
     # --- internals -----------------------------------------------------
 
@@ -312,7 +370,8 @@ class Api:
         if stage == "looking-up":
             return "Looking up that link...", None
         if stage == "found":
-            return "Downloading...", None
+            song = event.get("song")
+            return (f"Found {song}" if song else "Downloading..."), None
         if stage == "downloading":
             return f"Downloading {event['song']}", event.get("percent")
         if stage == "downloaded":

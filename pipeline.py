@@ -82,9 +82,10 @@ def _base_ydl_opts(output_dir: str) -> dict:
     }
 
 
-def count_entries(url: str) -> int | None:
-    """How many songs this url resolves to, or None if that can't be
-    determined quickly. Metadata only - nothing is downloaded."""
+def _probe(url: str) -> tuple[int | None, str | None]:
+    """How many songs this url resolves to, and the name of the one worth
+    saying - only when there's exactly one, since a playlist has no single
+    "the" song to name. Metadata only - nothing is downloaded."""
     probe_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -98,9 +99,18 @@ def count_entries(url: str) -> int | None:
         with yt_dlp.YoutubeDL(probe_opts) as ydl:
             info = ydl.extract_info(url, download=False)
     except Exception:
-        return None
+        return None, None
     entries = info.get("entries") if info else None
-    return len(entries) if entries is not None else 1
+    if entries is None:
+        return 1, (info.get("title") if info else None)
+    title = entries[0].get("title") if len(entries) == 1 and entries[0] else None
+    return len(entries), title
+
+
+def count_entries(url: str) -> int | None:
+    """How many songs this url resolves to, or None if that can't be
+    determined quickly. Metadata only - nothing is downloaded."""
+    return _probe(url)[0]
 
 
 def requested_mp3_filenames(url: str, output_dir: str) -> list[str]:
@@ -201,8 +211,8 @@ class _Download:
         os.makedirs(self.output_dir, exist_ok=True)
 
         self.on_event({"stage": "looking-up"})
-        self.total = count_entries(self.url)
-        self.on_event({"stage": "found", "total": self.total})
+        self.total, title = _probe(self.url)
+        self.on_event({"stage": "found", "total": self.total, "song": title})
 
         opts = _base_ydl_opts(self.output_dir)
         if self.use_archive:

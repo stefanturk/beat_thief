@@ -123,6 +123,21 @@ class TestSongOnlyRun(PipelineTestCase):
 
         self.assertEqual(result["downloaded"], 1)
 
+    def test_found_names_the_song_for_a_single_song_link(self):
+        self._run()
+
+        found = next(e for e in self.events if e["stage"] == "found")
+        self.assertEqual(found["song"], "Some Song")
+
+    def test_found_does_not_name_a_song_for_a_playlist(self):
+        _FakeYoutubeDL.entries = [{"title": "One"}, {"title": "Two"}]
+        self.addCleanup(setattr, _FakeYoutubeDL, "entries", [{"title": "Some Song"}])
+
+        self._run()
+
+        found = next(e for e in self.events if e["stage"] == "found")
+        self.assertIsNone(found["song"])
+
 
 class TestInstrumentRuns(PipelineTestCase):
     def test_isolates_each_requested_instrument_for_the_song(self):

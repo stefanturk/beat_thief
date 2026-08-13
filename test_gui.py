@@ -1,3 +1,4 @@
+import contextlib
 import os
 import re
 import shutil
@@ -5,8 +6,13 @@ import tempfile
 import threading
 import time
 import unittest
+import wave
 from unittest import mock
 
+import pretty_midi
+
+import beat_loop
+import beat_writer
 import gui
 
 
@@ -204,6 +210,14 @@ class TestApiStatus(unittest.TestCase):
 
         message, _ = gui.Api._describe({"stage": "looking-up"})
         self.assertIn("Looking up", message)
+
+    def test_found_says_the_songs_name_when_it_knows_it(self):
+        message, _ = gui.Api._describe({"stage": "found", "total": 1, "song": "Redbone"})
+        self.assertIn("Redbone", message)
+
+    def test_found_falls_back_when_it_is_a_playlist(self):
+        message, _ = gui.Api._describe({"stage": "found", "total": 12, "song": None})
+        self.assertNotIn("None", message)
 
     def test_a_named_phase_replaces_the_generic_isolating_line(self):
         # Demucs is silent for the best part of a minute before it can
@@ -479,7 +493,8 @@ class TestStealBeat(unittest.TestCase):
         ]
         with mock.patch("beat_loop._section_wav", return_value=3.0), \
              mock.patch("drum_transcriber.calibrate_hat_threshold", return_value=-5.0), \
-             mock.patch("drum_transcriber.transcribe", return_value=shifted):
+             mock.patch("drum_transcriber.transcribe", return_value=shifted), \
+             mock.patch("beat_loop.write_wav") as self.mock_write_wav:
             return gui.Api().steal_beat(self.stem, start, end)
 
     def test_the_tempo_it_reports_is_the_loops_not_the_songs(self):
@@ -513,6 +528,113 @@ class TestStealBeat(unittest.TestCase):
             os.path.join(self.tmp_dir, "gone (Isolated Drums at 120.000 BPM).wav"), 0.0, 4.0)
 
         self.assertIn("error", loop)
+
+    def test_it_also_cuts_a_wav_of_the_loop_beside_the_midi(self):
+        self._steal([(36, 0.0), (38, 0.5), (36, 2.0), (38, 2.5)])
+
+        self.assertEqual(self.mock_write_wav.call_count, 1)
+        args = self.mock_write_wav.call_args.args
+        self.assertEqual(args[1], self.stem)  # cut out of the drum stem
+        self.assertTrue(args[2].endswith(".mid"))  # named after the .mid it sits beside
+
+    def test_the_wav_actually_lands_next_to_a_real_midi(self):
+        real_stem = os.path.join(self.tmp_dir, "Real - Artist (Isolated Drums at 120.000 BPM).wav")
+        with contextlib.closing(wave.open(real_stem, "wb")) as f:
+            f.setnchannels(1)
+            f.setsampwidth(2)
+            f.setframerate(44100)
+            f.writeframes(b"\x00\x00" * 44100 * 20)
+
+        played = [(36, 0.0), (38, 0.5), (36, 2.0), (38, 2.5)]
+        shifted = [
+            pretty_midi.Note(velocity=100, pitch=pitch, start=at + 3.0, end=at + 3.05)
+            for pitch, at in played
+        ]
+        with mock.patch("beat_loop._section_wav", return_value=3.0), \
+             mock.patch("drum_transcriber.calibrate_hat_threshold", return_value=-5.0), \
+             mock.patch("drum_transcriber.transcribe", return_value=shifted):
+            loop = gui.Api().steal_beat(real_stem, 10.0, 14.0)
+
+        mid_path = loop["path"]
+        wav_path = os.path.splitext(mid_path)[0] + ".wav"
+        self.assertTrue(os.path.exists(wav_path))
+
+
+class TestStealBeatAsync(unittest.TestCase):
+    """steal_beat_start()/beat_status(): the same start()/status() polling
+    shape as a run, so the picker can show something better than a static
+    "Building it..." for the whole transcription step."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.stem = os.path.join(
+            self.tmp_dir, "Song - Artist (Isolated Drums at 120.000 BPM).wav")
+        with open(self.stem, "wb") as f:
+            f.write(b"not really a wav")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_returns_immediately_and_reports_the_phase_as_it_goes(self):
+        release = threading.Event()
+
+        def slow_build(wav_path, tempo, start_sec, end_sec, name="Stolen Beat", on_phase=None):
+            on_phase("Listening for the hits...")
+            release.wait(timeout=2)
+            beat = beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0, 100),), bars=1)
+            return beat_loop.Loop(
+                beat=beat, bars=1, origin_sec=0.0, hits_used=1, hits_dropped=0,
+                hits_inferred=0, tempo=120.0, song_tempo=120.0,
+            )
+
+        with mock.patch("beat_loop.build", side_effect=slow_build), \
+             mock.patch("beat_loop.write", return_value=os.path.join(self.tmp_dir, "x.mid")), \
+             mock.patch("beat_loop.write_wav"):
+            api = gui.Api()
+            snapshot = api.steal_beat_start(self.stem, 0.0, 4.0)
+            self.assertTrue(snapshot["running"])
+
+            self.assertTrue(_wait_until(
+                lambda: api.beat_status()["phase"] == "Listening for the hits..."))
+            self.assertTrue(api.beat_status()["running"])
+
+            release.set()
+            self.assertTrue(_wait_until(lambda: not api.beat_status()["running"]))
+
+        final = api.beat_status()
+        self.assertFalse(final["error"])
+        self.assertEqual(final["result"]["bars"], 1)
+
+    def test_a_missing_stem_surfaces_as_an_error_rather_than_hanging(self):
+        api = gui.Api()
+        api.steal_beat_start(os.path.join(self.tmp_dir, "gone.wav"), 0.0, 4.0)
+
+        self.assertTrue(_wait_until(lambda: not api.beat_status()["running"]))
+        self.assertTrue(api.beat_status()["error"])
+
+    def test_a_second_build_while_one_is_running_is_ignored(self):
+        release = threading.Event()
+        calls = []
+
+        def slow_build(wav_path, tempo, start_sec, end_sec, name="Stolen Beat", on_phase=None):
+            calls.append(wav_path)
+            release.wait(timeout=2)
+            beat = beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0, 100),), bars=1)
+            return beat_loop.Loop(
+                beat=beat, bars=1, origin_sec=0.0, hits_used=1, hits_dropped=0,
+                hits_inferred=0, tempo=120.0, song_tempo=120.0,
+            )
+
+        with mock.patch("beat_loop.build", side_effect=slow_build), \
+             mock.patch("beat_loop.write", return_value=os.path.join(self.tmp_dir, "x.mid")), \
+             mock.patch("beat_loop.write_wav"):
+            api = gui.Api()
+            api.steal_beat_start(self.stem, 0.0, 4.0)
+            api.steal_beat_start(self.stem, 0.0, 4.0)
+            release.set()
+            self.assertTrue(_wait_until(lambda: not api.beat_status()["running"]))
+
+        self.assertEqual(len(calls), 1)
 
 
 class TestUiFile(unittest.TestCase):
