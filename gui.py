@@ -201,9 +201,18 @@ class Api:
             prepared["tempo"] = 0.0
         return prepared
 
-    def steal_beat(self, wav_path: str, start_sec: float, end_sec: float, on_phase=None) -> dict:
-        """Turn the marked section into a looping .mid (and a matching .wav,
-        see beat_loop.write_wav) next to the stem.
+    def steal_beat(self, wav_path: str, start_sec: float, end_sec: float,
+                    outputs: str = "both", on_phase=None) -> dict:
+        """Turn the marked section into a loop and save it next to the stem.
+
+        outputs picks what's kept: "wav" for just the trimmed loop audio,
+        "midi" for just the .mid, "both" for the pair (the default, so a
+        direct caller that doesn't care - the tests, a script - still gets
+        everything). The picker always asks for one or the other now, since
+        a click on "Beat" or "Midi" only ever means the one file its label
+        says; writing both and throwing one away is cheaper than a second
+        write path and keeps _free_path's " (2)" numbering in one place
+        (see beat_loop.write_wav's docstring).
 
         Two tempos come back and they're different things. "tempo" is the
         loop's, measured off the section that was marked, and it's the
@@ -224,8 +233,13 @@ class Api:
             loop = beat_loop.build(wav_path, tempo, float(start_sec), float(end_sec), on_phase=on_phase)
             if on_phase is not None:
                 on_phase("Saving the loop...")
-            path = beat_loop.write(loop, song_dir, title)
-            beat_loop.write_wav(loop, wav_path, path)
+            mid_path = beat_loop.write(loop, song_dir, title)
+            path = mid_path
+            if outputs != "midi":
+                wav_path_out = beat_loop.write_wav(loop, wav_path, mid_path)
+                if outputs == "wav":
+                    os.remove(mid_path)
+                    path = wav_path_out
         except Exception as e:
             return {"error": str(e) or e.__class__.__name__}
 
@@ -243,7 +257,8 @@ class Api:
             "pieces": sorted({hit.piece for hit in loop.beat.hits}),
         }
 
-    def steal_beat_start(self, wav_path: str, start_sec: float, end_sec: float) -> dict:
+    def steal_beat_start(self, wav_path: str, start_sec: float, end_sec: float,
+                          outputs: str = "both") -> dict:
         """Like steal_beat, but returns immediately and reports progress
         through beat_status() - the page polls it exactly the way it polls
         status() for a run.
@@ -253,15 +268,23 @@ class Api:
         shouldn't overwrite that run's status while it's still on screen."""
         with self._beat_lock:
             if self._beat_thread is not None and self._beat_thread.is_alive():
-                return dict(self._beat_state)
+                # A build already going wins - the lock only ever guards one
+                # thread at a time - but returning its state bare looked
+                # identical to a fresh snapshot, so a click swallowed here
+                # read as nothing having happened at all. Flagging it lets
+                # the page say so instead of staying silent.
+                busy = dict(self._beat_state)
+                busy["busy"] = True
+                return busy
             self._beat_state = {
                 "running": True, "phase": "Cutting the section...", "error": "", "result": None,
             }
             snapshot = dict(self._beat_state)
+            snapshot["busy"] = False
 
         self._beat_thread = threading.Thread(
             target=self._steal_beat_work,
-            args=(wav_path, start_sec, end_sec),
+            args=(wav_path, start_sec, end_sec, outputs),
             daemon=True,
         )
         self._beat_thread.start()
@@ -277,8 +300,8 @@ class Api:
         with self._beat_lock:
             self._beat_state["phase"] = phase
 
-    def _steal_beat_work(self, wav_path, start_sec, end_sec):
-        result = self.steal_beat(wav_path, start_sec, end_sec, on_phase=self._set_beat_phase)
+    def _steal_beat_work(self, wav_path, start_sec, end_sec, outputs="both"):
+        result = self.steal_beat(wav_path, start_sec, end_sec, outputs=outputs, on_phase=self._set_beat_phase)
         with self._beat_lock:
             self._beat_state["running"] = False
             if "error" in result:

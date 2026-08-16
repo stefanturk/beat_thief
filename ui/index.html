@@ -567,8 +567,8 @@
     <section>
       <p class="label">Take</p>
       <!--
-        Six things, in the order they're shown everywhere: Song, Drums,
-        Beat, Bass, Harmony, Vocals. Grey means not armed, purple means
+        Seven things, in the order they're shown everywhere: Song, Drums,
+        Beat, Midi, Bass, Harmony, Vocals. Grey means not armed, purple means
         armed for this run, green means it's already in the stash - and
         green can only be cleared by deleting the file, never by clicking.
       -->
@@ -576,6 +576,7 @@
         <button class="pad" id="pad-song" data-stem="song" aria-pressed="true">Song</button>
         <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="false">Drums</button>
         <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
+        <button class="pad" id="pad-midi" data-stem="midi" data-again="true" aria-pressed="false">Midi</button>
         <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
         <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
         <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
@@ -606,7 +607,7 @@
       <canvas id="wave" width="1000" height="156"></canvas>
       <div class="picker-controls">
         <button id="play" type="button">Play</button>
-        <button id="build" type="button" disabled>Build beat</button>
+        <button id="build" type="button" disabled>Build</button>
         <button id="picker-close" type="button">Close</button>
         <span id="marked"></span>
         <span id="clock">0:00</span>
@@ -758,29 +759,32 @@
 
   // --- what's armed, and what's already in the stash ---------------------
 
-  const STASH_ORDER = ["song", "drums", "beat", "bass", "harmony", "vocals"];
+  const STASH_ORDER = ["song", "drums", "beat", "midi", "bass", "harmony", "vocals"];
   const LABELS = {
-    song: "Song", drums: "Drums", beat: "Beat",
+    song: "Song", drums: "Drums", beat: "Beat", midi: "Midi",
     bass: "Bass", harmony: "Harmony", vocals: "Vocals",
   };
 
-  // What each thing needs before it can exist. A beat is cut out of the
-  // drum stem, and every stem is separated out of the song, so arming one
-  // arms what it's made from.
+  // What each thing needs before it can exist. A beat (the trimmed .wav)
+  // and its midi are both cut out of the drum stem, independently of one
+  // another - a steal writes whichever one you clicked, never both - and
+  // every stem is separated out of the song, so arming one arms what it's
+  // made from.
   const NEEDS = {
     song: [],
     drums: ["song"], bass: ["song"], harmony: ["song"], vocals: ["song"],
-    beat: ["song", "drums"],
+    beat: ["song", "drums"], midi: ["song", "drums"],
   };
 
   let selected = null;   // the song the Take section is pointed at, if any
 
-  // The one thing worth having more than one of. Every stem is a file the
+  // The two things worth having more than one of. Every stem is a file the
   // song either has or hasn't, and taking it again would only write the same
-  // file twice - but a beat is a phrase somebody picked by ear, and the verse
-  // and the chorus of the same drums are two different loops. So a green Beat
-  // can still be armed, and goes purple like anything else.
-  const MORE_THAN_ONE = new Set(["beat"]);
+  // file twice - but a beat (or its midi) is a phrase somebody picked by
+  // ear, and the verse and the chorus of the same drums are two different
+  // loops. So a green Beat or Midi can still be armed, and goes purple like
+  // anything else.
+  const MORE_THAN_ONE = new Set(["beat", "midi"]);
 
   function padFor(thing) { return el("pad-" + thing); }
   function isArmed(thing) { return padFor(thing).getAttribute("aria-pressed") === "true"; }
@@ -822,9 +826,17 @@
     }
     showLocks();
     describeTake();
+    // Beat/Midi can be flipped while the picker is open - the section is
+    // marked once, but what to keep from it is a choice you might change
+    // your mind on right up until you click Build.
+    refreshBuildEnabled();
   }
 
   function selectSong(song) {
+    // "Take more" always leaves the picker workflow behind, whether it was
+    // idle-marked or mid-build - it's pointed at whatever song was selected
+    // before, and that's no longer the one being taken from.
+    if (!el("picker").hidden) closePicker();
     selected = song;
     el("url").value = song.title;
     for (const thing of STASH_ORDER) {
@@ -1085,6 +1097,10 @@
     audio.pause();
     audio.removeAttribute("src");
     if (raf) { cancelAnimationFrame(raf); raf = null; }
+    // A build still in flight is left to finish on the Python side - its
+    // file still gets written - but nothing here should keep polling into a
+    // picker that's no longer on screen.
+    if (beatPolling) { clearInterval(beatPolling); beatPolling = null; }
     picker = null;
     el("picker").hidden = true;
     el("readout").hidden = false;
@@ -1113,7 +1129,7 @@
     picker.start = Math.max(0, Math.min(seconds, picker.duration));
     if (!keepEnd || picker.end <= picker.start) {
       picker.end = null;
-      el("build").disabled = true;
+      refreshBuildEnabled();
     }
     playFrom(picker.start);
     drawWave();
@@ -1171,7 +1187,7 @@
     if (end <= picker.start) { el("picker-hint").textContent = "That is before the start - click again and play on."; return; }
     picker.end = end;
     pausePlay();
-    el("build").disabled = false;
+    refreshBuildEnabled();
     sayWhatIsMarked();
     drawWave();
   }
@@ -1182,13 +1198,41 @@
   // way a run's status() is.
   let beatPolling = null;
 
+  // What to keep from the build is the Take section's Beat/Midi pads, not a
+  // choice made in the picker - and since the pads stay live while a section
+  // is marked, that choice can change right up until Build is clicked (see
+  // gui.Api.steal_beat's outputs param).
+  function outputsFromPads() {
+    const wav = isArmed("beat"), midi = isArmed("midi");
+    if (wav && midi) return "both";
+    if (wav) return "wav";
+    if (midi) return "midi";
+    return null;
+  }
+
+  function refreshBuildEnabled() {
+    if (!picker) return;
+    el("build").disabled = !(picker.start !== null && picker.end !== null && outputsFromPads());
+  }
+
   function buildBeat() {
-    if (!picker || picker.start === null || picker.end === null) return;
+    const outputs = outputsFromPads();
+    if (!picker || picker.start === null || picker.end === null || !outputs) return;
     const end = picker.end;
     pausePlay();
     el("build").disabled = true;
+    // Set before the call even returns, not after - a fast build can finish
+    // before the first 250ms poll fires, and without this the picker would
+    // jump straight from the click to the result with nothing shown between.
+    el("picker-hint").textContent = "Cutting the section...";
 
-    window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end).then(() => {
+    window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end, outputs).then((snapshot) => {
+      if (snapshot.busy) {
+        // A build was already running when this click landed - it's still
+        // that one's result on the way, not this click's, so say so rather
+        // than letting the click look like it did nothing.
+        el("picker-hint").textContent = "Still working on the last one...";
+      }
       if (beatPolling) clearInterval(beatPolling);
       beatPolling = setInterval(pollBeat, 250);
       pollBeat();
@@ -1203,17 +1247,23 @@
       }
       clearInterval(beatPolling);
       beatPolling = null;
-      el("build").disabled = false;
 
-      if (state.error) { el("picker-hint").textContent = state.error; return; }
+      if (state.error) {
+        refreshBuildEnabled();
+        el("picker-hint").textContent = state.error;
+        return;
+      }
       const loop = state.result;
-      el("picker-hint").textContent =
+      const summary =
         loop.bars + " bar" + (loop.bars === 1 ? "" : "s") + ", " + loop.hits + " hits" +
         // Notes worked out from the pattern rather than heard - say so.
         (loop.inferred ? " (" + loop.inferred + " put back)" : "") + ", " +
         loop.pieces.join(" / ") + " — set Ableton to " + loop.tempo + " BPM" +
         tempoQuibble(loop);
-      refreshLibrary();
+      refreshLibrary().then(() => {
+        closePicker();
+        el("message").textContent = summary;
+      });
     });
   }
 
@@ -1288,11 +1338,14 @@
     const options = {};
     for (const thing of STASH_ORDER) options[thing] = isArmed(thing);
 
-    // "Beat" isn't something a run can produce - it needs you to hear the
-    // phrase - so it's dropped from what's asked for and remembered as
-    // what to do once the drums exist.
-    const wantsBeat = options.beat;
+    // Neither Beat nor Midi is something a run can produce - both need you
+    // to hear the phrase - so they're dropped from what's asked for and
+    // remembered as what to do once the drums exist. Which of the two was
+    // armed doesn't matter from here: either way the picker opens, and it
+    // offers both buttons itself once you've marked a section.
+    const wantsBeat = options.beat || options.midi;
     delete options.beat;
+    delete options.midi;
 
     if (selected) {
       // "source", not "song": every other key here is an armed/not flag,
