@@ -315,9 +315,24 @@ def _instrument_outputs(mp3_path: str, label: str) -> list[str]:
 
 
 # The things a song can have, in the order they're shown. "song" is the
-# download itself and "beat" is a stolen loop; the middle four are the
-# stems. This order is the app's, top to bottom and left to right.
-STASH_ORDER = ("song", "drums", "beat", "bass", "harmony", "vocals")
+# download itself; "beat" is a stolen loop's trimmed .wav and "midi" is its
+# .mid - the same steal produces either or both, but as two separate files
+# now (see gui.Api.steal_beat's outputs param), so each gets its own square.
+# The middle four are the stems. This order is the app's, top to bottom and
+# left to right.
+STASH_ORDER = ("song", "drums", "beat", "midi", "bass", "harmony", "vocals")
+
+
+def _newest_stolen_beat(files: list[str], ext: str) -> str | None:
+    """The most recently made stolen-loop file with this extension, or None.
+
+    A song can have several beats stolen out of it, and the one worth
+    offering is the one just made - so the newest wins rather than whichever
+    sorted first. A file that went away between the listing and here sorts
+    last rather than raising: this is a description of a folder, and a
+    missing file is a thing to leave out, not to fail over."""
+    matches = [p for p in files if p.endswith(ext) and beat_writer.is_stolen_beat(os.path.basename(p))]
+    return max(matches, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0.0) if matches else None
 
 
 def _what_a_song_has(song_path: str, files: list[str]) -> dict:
@@ -330,14 +345,12 @@ def _what_a_song_has(song_path: str, files: list[str]) -> dict:
         match = next((p for p in files if label in os.path.basename(p) and p.endswith(".wav")), None)
         if match:
             have[name] = match
-    # A song can have several beats stolen out of it, and the one worth
-    # offering is the one just made - so the newest wins rather than
-    # whichever sorted first. A file that went away between the listing and
-    # here sorts last rather than raising: this is a description of a folder,
-    # and a missing file is a thing to leave out, not to fail over.
-    beats = [p for p in files if p.endswith(".mid") and beat_writer.is_stolen_beat(os.path.basename(p))]
-    if beats:
-        have["beat"] = max(beats, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0.0)
+    wav_beat = _newest_stolen_beat(files, ".wav")
+    if wav_beat:
+        have["beat"] = wav_beat
+    midi_beat = _newest_stolen_beat(files, ".mid")
+    if midi_beat:
+        have["midi"] = midi_beat
     return have
 
 

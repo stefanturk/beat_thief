@@ -606,23 +606,41 @@ class TestWhatASongHas(unittest.TestCase):
         self.assertEqual(set(have), {"song", "drums", "vocals"})
         self.assertTrue(have["drums"].endswith("Drums at 120.000 BPM).wav"))
 
-    def test_a_stolen_loop_counts_as_a_beat(self):
-        have = self._have("Song - Artist (Beat at 120 BPM).mid")
+    def test_a_stolen_wav_counts_as_a_beat(self):
+        have = self._have("Song - Artist (Beat at 120 BPM).wav")
 
         self.assertIn("beat", have)
+        self.assertNotIn("midi", have)
+
+    def test_a_stolen_mid_counts_as_midi(self):
+        have = self._have("Song - Artist (Beat at 120 BPM).mid")
+
+        self.assertIn("midi", have)
+        self.assertNotIn("beat", have)
 
     def test_a_loop_stolen_under_the_old_name_still_counts(self):
         # Beats written before the rename are sitting in people's folders,
-        # and a green Beat square going out is the same as losing the file.
+        # and a green square going out is the same as losing the file.
         have = self._have("Song - Artist (Stolen Beat, 2 bars) (120 BPM).mid")
 
-        self.assertIn("beat", have)
+        self.assertIn("midi", have)
 
     def test_the_newest_of_several_beats_is_the_one_offered(self):
         # A song can have several stolen out of it, and the one you want to
         # reach for is the one you just made - not whichever sorted first.
         older = os.path.join(self.tmp_dir, "Song - Artist (Stolen Beat, 2 bars) (120 BPM).mid")
         newer = os.path.join(self.tmp_dir, "Song - Artist (Stolen Beat, 4 bars) (98 BPM).mid")
+        for path in (older, newer):
+            open(path, "wb").close()
+        os.utime(older, (0, 0))
+
+        have = pipeline._what_a_song_has(self.song, [self.song, older, newer])
+
+        self.assertEqual(have["midi"], newer)
+
+    def test_the_newest_of_several_beat_wavs_is_the_one_offered(self):
+        older = os.path.join(self.tmp_dir, "Song - Artist (Beat at 98 BPM).wav")
+        newer = os.path.join(self.tmp_dir, "Song - Artist (Beat at 120 BPM).wav")
         for path in (older, newer):
             open(path, "wb").close()
         os.utime(older, (0, 0))
@@ -642,7 +660,7 @@ class TestWhatASongHas(unittest.TestCase):
         )
         written = beat_loop.write(loop, self.tmp_dir, "Song - Artist")
 
-        self.assertIn("beat", pipeline._what_a_song_has(self.song, [self.song, written]))
+        self.assertIn("midi", pipeline._what_a_song_has(self.song, [self.song, written]))
 
     def test_everything_it_can_report_is_a_name_the_app_shows(self):
         have = self._have(
@@ -650,7 +668,8 @@ class TestWhatASongHas(unittest.TestCase):
             "Song - Artist (Isolated Bass at 120.000 BPM).wav",
             "Song - Artist (Isolated Harmony).wav",
             "Song - Artist (Isolated Vocals).wav",
-            "Song - Artist (Stolen Beat, 2 bars) (120 BPM).mid",
+            "Song - Artist (Beat at 120 BPM).wav",
+            "Song - Artist (Beat at 120 BPM).mid",
         )
 
         self.assertEqual(set(have), set(pipeline.STASH_ORDER))

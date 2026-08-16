@@ -79,6 +79,17 @@ case "$DEST" in
         ;;
 esac
 
+# A second copy anywhere else is how the Dock silently goes stale: it's
+# pinned to whichever bundle it was dragged from, and only $APP ever gets
+# rebuilt. One drifted to /Applications once already and every rebuild after
+# that landed on the one nothing was pointing at. Sweep it away here so
+# there's only ever the one bundle to launch or pin.
+if [ "$DEST" != "/Applications" ] && [ -e "/Applications/Beat Thief.app" ]; then
+    echo "Removing a stray copy at /Applications/Beat Thief.app - the Dock" >&2
+    echo "should only ever point at $APP." >&2
+    rm -rf "/Applications/Beat Thief.app"
+fi
+
 mkdir -p "$DEST"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
