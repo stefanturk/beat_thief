@@ -6,6 +6,7 @@ transcription, so what's under test is the gridding, not ADTOF."""
 
 import contextlib
 import math
+import struct
 import os
 import shutil
 import subprocess
@@ -26,6 +27,36 @@ def _silent_wav(path: str, seconds: float, sample_rate: int = 44100) -> None:
         f.setsampwidth(2)
         f.setframerate(sample_rate)
         f.writeframes(b"\x00\x00" * int(seconds * sample_rate))
+
+
+def _click_wav(path: str, seconds: float, tempo: float, sample_rate: int = 44100) -> None:
+    """A low thump on every beat, at an exactly known tempo.
+
+    Silence was the only fixture here for a long time, and silence cannot
+    tell a cut that lands on the kick from one that lands anywhere else -
+    which is the whole thing these tests exist to check."""
+    import numpy as np
+    audio = np.zeros(int(seconds * sample_rate))
+    shape_t = np.arange(int(0.15 * sample_rate)) / sample_rate
+    shape = np.sin(2 * math.pi * 60.0 * shape_t) * np.exp(-shape_t * 25.0)
+    at = 0.0
+    while at < seconds - 0.2:
+        start = int(at * sample_rate)
+        end = min(audio.size, start + shape.size)
+        audio[start:end] += shape[: end - start]
+        at += 60.0 / tempo
+    with contextlib.closing(wave.open(path, "wb")) as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(sample_rate)
+        f.writeframes(b"".join(struct.pack("<h", int(v * 30000)) for v in np.clip(audio, -1, 1)))
+
+
+def _wav_samples(path: str):
+    import numpy as np
+    with contextlib.closing(wave.open(path, "rb")) as f:
+        raw = f.readframes(f.getnframes())
+        return np.frombuffer(raw, dtype="<i2").astype(float), f.getframerate()
 
 
 def _wav_duration(path: str) -> float:
@@ -385,18 +416,34 @@ class TestBuild(unittest.TestCase):
         # The last eighth of the last bar.
         self.assertEqual(last, loop.bars * beat_loop.STEPS_PER_BAR - BEAT // 2)
 
-    def test_where_you_clicked_within_the_bar_does_not_change_the_loop(self):
-        # The same drumming marked from three different places in the bar.
-        # Once each is moved on to its kick they are the same two bars, so
-        # they have to come out as the same loop - only origin_sec differs.
-        loops = [self._build(_straight(self.TEMPO, bars=4, offset=off), span=4.0)
-                 for off in (0.0, 0.5, 1.0)]
-        placed = [{(h.step, h.piece, h.velocity) for h in loop.beat.hits} for loop in loops]
+    def test_a_marking_that_missed_the_kick_is_moved_onto_one(self):
+        # Marked a beat early, on the snare. Nothing is there to keep, so it
+        # is moved on to the next kick and comes out as the same loop as a
+        # marking that was on time - only origin_sec differs.
+        on_time = self._build(_straight(self.TEMPO, bars=4, offset=0.0), span=4.0)
+        early = self._build(_straight(self.TEMPO, bars=4, offset=0.5), span=4.0)
 
-        self.assertEqual(placed[1], placed[0])
-        self.assertEqual(placed[2], placed[0])
-        self.assertAlmostEqual(loops[1].origin_sec - loops[0].origin_sec, 0.5, delta=0.02)
-        self.assertAlmostEqual(loops[2].origin_sec - loops[0].origin_sec, 1.0, delta=0.02)
+        def placed(loop):
+            return {(h.step, h.piece, h.velocity) for h in loop.beat.hits}
+
+        self.assertEqual(placed(early), placed(on_time))
+        self.assertAlmostEqual(early.origin_sec - on_time.origin_sec, 0.5, delta=0.02)
+
+    def test_a_marked_kick_is_kept_even_next_to_a_far_louder_one(self):
+        # The marked kick is quiet and the one on three is as hard as it
+        # gets - a gap the old margin rule would have turned the loop round
+        # for. It must not: the picker snaps a click onto a real kick and
+        # plays from exactly there, so moving the cut afterwards hands back
+        # a file that isn't the audio that was auditioned.
+        beat = 60.0 / self.TEMPO
+        notes = []
+        for bar in (0.0, 2.0):
+            notes += [_note(36, bar + 0.0, 60), _note(38, bar + beat, 100),
+                      _note(36, bar + 2 * beat, 127), _note(38, bar + 3 * beat, 100)]
+        loop = self._build(notes, span=4.0)
+
+        self.assertIn((0, "kick"), {(h.step, h.piece) for h in loop.beat.hits})
+        self.assertAlmostEqual(loop.origin_sec, 10.0, delta=0.02)
 
     def test_the_reported_origin_points_back_into_the_stem(self):
         notes = [_note(36, 0.0), _note(38, 0.5), _note(36, 1.0), _note(38, 1.5)]
@@ -506,6 +553,37 @@ class TestWriteWav(unittest.TestCase):
         out_path = beat_loop.write_wav(loop, wav_path, mid_path)
 
         self.assertAlmostEqual(_wav_duration(out_path), loop.beat.duration_sec, places=1)
+
+    def test_it_is_exactly_a_whole_number_of_bars_long(self):
+        # Not "about" - a loop dropped on the grid in Ableton either lines up
+        # or drifts a little further every pass, and a tenth of a second of
+        # slack is a whole sixteenth at this tempo. places=1 above is about
+        # ffmpeg's own rounding of a silent file; this is the real claim.
+        wav_path = os.path.join(self.tmp_dir, "stem.wav")
+        _click_wav(wav_path, seconds=20.0, tempo=120.0)
+        mid_path = os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).mid")
+        loop = self._loop(origin_sec=4.0, bars=2, tempo=120.0)
+
+        out_path = beat_loop.write_wav(loop, wav_path, mid_path)
+
+        expected = loop.bars * 4 * 60.0 / loop.tempo
+        self.assertAlmostEqual(_wav_duration(out_path), expected, delta=0.001)
+
+    def test_the_cut_starts_on_the_transient_not_beside_it(self):
+        # The exported file has to open on the hit you heard, with no
+        # lead-in silence in front of it - drop it on bar 1 in a DAW and
+        # anything at the front pushes the whole loop late.
+        import numpy as np
+        wav_path = os.path.join(self.tmp_dir, "stem.wav")
+        _click_wav(wav_path, seconds=20.0, tempo=120.0)
+        mid_path = os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).mid")
+        loop = self._loop(origin_sec=4.0, bars=2, tempo=120.0)   # 4.0s is a kick
+
+        out_path = beat_loop.write_wav(loop, wav_path, mid_path)
+
+        samples, rate = _wav_samples(out_path)
+        loudest = int(np.argmax(np.abs(samples[: int(0.2 * rate)])))
+        self.assertLess(loudest / rate, 0.015)
 
 
 if __name__ == "__main__":

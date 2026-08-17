@@ -503,6 +503,21 @@
     cursor: crosshair;
   }
 
+  /* The zoomed strip, where the grid actually fits. #wave draws the whole
+     song across about 900px, so at 105 BPM a six-minute stem gets 1.4px per
+     beat - lines there would be a grey wash, not a grid. This shows a few
+     bars either side of where you are, which is the only span at which "am
+     I on the one" is a question a drawing can answer. */
+  #detail {
+    display: block;
+    width: 100%;
+    height: 52px;
+    margin-top: 6px;
+    background: #0a0b0d;
+    border-radius: 4px;
+    cursor: crosshair;
+  }
+
   .picker-controls {
     display: flex;
     align-items: center;
@@ -605,6 +620,7 @@
         <span id="picker-hint">Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — space at the next 1.</span>
       </div>
       <canvas id="wave" width="1000" height="156"></canvas>
+      <canvas id="detail" width="1000" height="104"></canvas>
       <div class="picker-controls">
         <button id="play" type="button">Play</button>
         <button id="build" type="button" disabled>Build</button>
@@ -906,9 +922,43 @@
   // anything musical - it only collects two times and hands them over.
 
   const wave = el("wave");
-  const audio = new Audio();
-  let picker = null;     // { song, peaks, duration, start, end }
+  const detail = el("detail");
+  let picker = null;     // { song, peaks, duration, kicks, grid, buffer, start, end }
   let raf = null;
+
+  // Playback is Web Audio, not an <audio> element, and that is the whole
+  // reason the marks can be trusted.
+  //
+  // An <audio> playing an mp3 seeks to a frame boundary - 1152 samples, 52ms
+  // at the rate this preview is encoded at - and carries the encoder's own
+  // delay on top. So the position the page thought it was at and the
+  // position of the stem it was actually playing were tens of milliseconds
+  // apart, and every marking inherited that. It also had to pause, seek, and
+  // wait for the "seeked" event before resuming, which is where the delay
+  // between clicking and hearing anything came from.
+  //
+  // A decoded buffer has neither problem: start(when, offset) takes an exact
+  // offset in seconds and begins immediately, and the position is read off
+  // the audio clock rather than asked of an element.
+  let audioCtx = null;
+  let source = null;      // the live AudioBufferSourceNode, if any
+  let startedAt = 0;      // ctx.currentTime when this stretch of playback began
+  let startedFrom = 0;    // where in the stem it began
+  let playing = false;
+
+  function context() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+
+  // Where in the stem we are, to the sample. Paused, it is wherever we
+  // stopped; playing, it is the audio clock's own answer rather than a
+  // number counted up per frame.
+  function playhead() {
+    if (!picker) return 0;
+    if (!playing) return picker.at;
+    return Math.min(picker.duration, startedFrom + (context().currentTime - startedAt));
+  }
 
   function clock(seconds) {
     if (!isFinite(seconds)) return "0:00";
@@ -916,6 +966,55 @@
     const s = Math.floor(seconds % 60);
     return m + ":" + String(s).padStart(2, "0");
   }
+
+  // --- the grid ------------------------------------------------------------
+  //
+  // Python fits it (pulse.py) in local windows and hands over a run of them,
+  // because no single grid holds across a whole song - a whole-song tempo
+  // estimate a few tenths of a percent out drifts several sixteenths by the
+  // end. All this does is pick the one covering a moment.
+
+  function gridAt(when) {
+    if (!picker || !picker.grid.length) return null;
+    for (const grid of picker.grid) {
+      if (grid.start <= when && when < grid.end) return grid;
+    }
+    return when < picker.grid[0].start ? picker.grid[0] : picker.grid[picker.grid.length - 1];
+  }
+
+  // A sixteenth and a beat, measured off the drumming where that is known
+  // and off the filename's tempo where it isn't. This is what the arrow keys
+  // move by, so it being right is the difference between nudging onto the
+  // beat and nudging near it.
+  function stepAt(when) {
+    const grid = gridAt(when);
+    return grid ? grid.step : picker.nudge;
+  }
+
+  function beatAt(when) {
+    const grid = gridAt(when);
+    return grid ? grid.step * 4 : picker.beat;
+  }
+
+  // How far a click is allowed to be dragged onto a real kick. Half a
+  // sixteenth, so a click can never be pulled past the step it was aimed at,
+  // and never more than a shade over a tenth of a second whatever the tempo.
+  const SNAP_LIMIT_SEC = 0.12;
+
+  function snapToKick(when) {
+    if (!picker || !picker.kicks.length) return when;
+    const limit = Math.min(SNAP_LIMIT_SEC, stepAt(when) / 2);
+    let best = when, bestGap = limit;
+    for (const at of picker.kicks) {
+      if (at < when - limit) continue;
+      if (at > when + limit) break;
+      const gap = Math.abs(at - when);
+      if (gap < bestGap) { bestGap = gap; best = at; }
+    }
+    return best;
+  }
+
+  // --- drawing -------------------------------------------------------------
 
   function drawWave() {
     const ctx = wave.getContext("2d");
@@ -926,12 +1025,13 @@
     const peaks = picker.peaks;
     const mid = h / 2;
     const barW = w / peaks.length;
+    const at = playhead();
 
     // The marked region, painted behind the waveform so it reads as
     // highlight rather than as another wave.
     if (picker.start !== null) {
       const from = (picker.start / picker.duration) * w;
-      const to = ((picker.end === null ? audio.currentTime : picker.end) / picker.duration) * w;
+      const to = ((picker.end === null ? at : picker.end) / picker.duration) * w;
       ctx.fillStyle = "rgba(167, 139, 250, 0.16)";
       ctx.fillRect(Math.min(from, to), 0, Math.abs(to - from), h);
     }
@@ -949,8 +1049,8 @@
       ctx.fillRect(x - 1, 0, 2, h);
     }
 
-    if (!audio.paused) {
-      const x = (audio.currentTime / picker.duration) * w;
+    if (playing) {
+      const x = (at / picker.duration) * w;
       ctx.fillStyle = "#e9e7e2";
       ctx.fillRect(x - 0.5, 0, 1, h);
     }
@@ -962,19 +1062,108 @@
     }
   }
 
+  // How much of the song the zoomed strip shows. Four bars: enough that the
+  // pattern is recognisable, few enough that a sixteenth is still a visible
+  // distance rather than a hairline.
+  const DETAIL_BARS = 4;
+
+  function detailSpan() {
+    const grid = gridAt(detailCentre());
+    return (grid ? grid.step * 16 : picker.beat * 4) * DETAIL_BARS;
+  }
+
+  // Centred on the playhead while it moves, and on the start once it has
+  // stopped - the two moments you are asking "is this the one?".
+  function detailCentre() {
+    if (!picker) return 0;
+    if (playing) return playhead();
+    return picker.start === null ? playhead() : picker.start;
+  }
+
+  function drawDetail() {
+    const ctx = detail.getContext("2d");
+    const w = detail.width, h = detail.height;
+    ctx.clearRect(0, 0, w, h);
+    if (!picker) return;
+
+    const span = detailSpan();
+    const from = detailCentre() - span / 2;
+    const x = (when) => ((when - from) / span) * w;
+
+    // The waveform for this window, drawn off the decoded audio rather than
+    // the 900-bucket envelope - at this zoom a bucket is several bars wide
+    // and would draw as one flat block.
+    if (picker.buffer) {
+      const data = picker.buffer.getChannelData(0);
+      const rate = picker.buffer.sampleRate;
+      const mid = h / 2;
+      ctx.fillStyle = "#33373f";
+      const perPixel = (span * rate) / w;
+      const stride = Math.max(1, Math.floor(perPixel / 24));
+      for (let px = 0; px < w; px++) {
+        const first = Math.floor((from + picker.lead + (px / w) * span) * rate);
+        let loudest = 0;
+        for (let i = 0; i < perPixel; i += stride) {
+          const sample = data[first + i];
+          if (sample === undefined) break;
+          const level = sample < 0 ? -sample : sample;
+          if (level > loudest) loudest = level;
+        }
+        const bar = Math.max(1, loudest * h * 0.9);
+        ctx.fillRect(px, mid - bar / 2, 1, bar);
+      }
+    }
+
+    // The grid. Bars heaviest, beats next, sixteenths faint - so which line
+    // is which is readable at a glance instead of counting.
+    const grid = gridAt(detailCentre());
+    if (grid) {
+      const first = Math.floor((from - grid.downbeat) / grid.step) - 1;
+      const last = Math.ceil((from + span - grid.downbeat) / grid.step) + 1;
+      for (let n = first; n <= last; n++) {
+        const at = grid.downbeat + n * grid.step;
+        const bar = ((n % 16) + 16) % 16 === 0;
+        const beat = ((n % 4) + 4) % 4 === 0;
+        ctx.fillStyle = bar ? "rgba(233, 231, 226, 0.42)"
+                            : beat ? "rgba(233, 231, 226, 0.20)"
+                                   : "rgba(233, 231, 226, 0.07)";
+        ctx.fillRect(x(at), bar ? 0 : h * 0.12, 1, bar ? h : h * 0.76);
+      }
+    }
+
+    // The kicks a click snaps onto, so what will happen is visible before it
+    // happens.
+    ctx.fillStyle = "#5fd39a";
+    for (const at of picker.kicks) {
+      if (at < from) continue;
+      if (at > from + span) break;
+      ctx.fillRect(x(at) - 1, h - 5, 2, 5);
+    }
+
+    for (const [time, colour] of [[picker.start, "#a78bfa"], [picker.end, "#5fd39a"]]) {
+      if (time === null || time < from || time > from + span) continue;
+      ctx.fillStyle = colour;
+      ctx.fillRect(x(time) - 1, 0, 2, h);
+    }
+
+    if (playing) {
+      ctx.fillStyle = "#e9e7e2";
+      ctx.fillRect(x(playhead()) - 0.5, 0, 1, h);
+    }
+  }
+
   // Every bar, the whole waveform lights up on the one.
   //
   // This is the only way to check the thing the loop depends on and that
-  // nothing else shows you: whether the point you clicked really is a
-  // downbeat. The marker tells you where the start is, and the start is
-  // never in doubt - what's in doubt is whether the bars that follow from
-  // it land where the drummer's do. Blinking them past you at the song's
-  // tempo turns that from a calculation into something you either see
-  // agreeing with what you hear or you don't.
+  // nothing else shows you: whether the bars you are hearing land where the
+  // drummer's do. Blinking them past you turns that from a calculation into
+  // something you either see agreeing with what you hear or you don't.
   //
-  // Bars are counted from the start you set, not from zero: before there's
-  // a start there's no "one" to be right or wrong about, so nothing
-  // flashes.
+  // Anchored to the grid the drumming itself agrees on, not to wherever you
+  // last clicked. It used to be the latter, which meant it said nothing at
+  // all until you had clicked - and then flashed a bar grid built out of
+  // your click rather than out of the song, which is confidently wrong
+  // rather than merely absent.
   //
   // The light fades over its own length rather than blinking on and off,
   // because a flash that vanishes in one frame reads as a dropped frame.
@@ -983,17 +1172,18 @@
   const FLASH_STRENGTH = 0.14;
 
   function barFlash() {
-    if (!picker || audio.paused || picker.start === null) return 0;
-    const bar = picker.beat * BEATS_PER_BAR;
-    const since = audio.currentTime - picker.start;
-    if (!(bar > 0) || since < 0) return 0;
-    const into = since % bar;
+    if (!picker || !playing) return 0;
+    const grid = gridAt(playhead());
+    if (!grid || !(grid.step > 0)) return 0;
+    const bar = grid.step * 4 * BEATS_PER_BAR;
+    const since = playhead() - grid.downbeat;
+    const into = ((since % bar) + bar) % bar;
     return into < FLASH_SEC ? 1 - into / FLASH_SEC : 0;
   }
 
   function markedSoFar() {
     if (!picker || picker.start === null) return null;
-    const to = picker.end === null ? audio.currentTime : picker.end;
+    const to = picker.end === null ? playhead() : picker.end;
     return Math.max(0, to - picker.start);
   }
 
@@ -1005,54 +1195,94 @@
     if (!picker) return;
     const marked = markedSoFar();
     el("marked").textContent = marked === null ? "" : "marked " + marked.toFixed(1) + "s";
-    el("clock").textContent = clock(audio.currentTime) + " / " + clock(picker.duration);
+    el("clock").textContent = clock(playhead()) + " / " + clock(picker.duration);
   }
 
   function tick() {
     if (!picker) return;
     showClock();
     drawWave();
+    drawDetail();
     raf = requestAnimationFrame(tick);
   }
 
-  // Seek first, play once the seek has landed. Setting currentTime on a
-  // playing element and calling play() in the same breath leaves WebKit
-  // stuck in a seek that never resolves - measured in a real window, where
-  // playback simply stopped advancing while paused stayed false. Nudging
-  // does exactly that, several times a second, so it has to be the other
-  // way round: pause, seek, resume when the element says it's ready.
-  // Seek first, play once the seek has landed. Setting currentTime on a
-  // playing element and calling play() in the same breath leaves WebKit
-  // stuck in a seek that never resolves - measured in a real window, where
-  // playback stopped advancing while paused stayed false. Nudging does
-  // exactly that, potentially several times a second, so it has to be the
-  // other way round: pause, seek, resume when the element says it's ready.
-  //
-  // The intent is held in a variable rather than in a one-shot listener,
-  // because nudging again mid-seek would leave the old listener to resume
-  // playback after the new pause.
-  let wantPlaying = false;
-  audio.addEventListener("seeked", () => { if (wantPlaying) audio.play(); });
-  audio.addEventListener("timeupdate", showClock);
+  function stopSource() {
+    if (!source) return;
+    source.onended = null;
+    try { source.stop(); } catch (e) { /* already stopped */ }
+    source.disconnect();
+    source = null;
+  }
 
   function playFrom(seconds) {
-    if (!picker) return;
-    wantPlaying = true;
+    if (!picker || !picker.buffer) return;
+    const ctx = context();
+    // A page that has never made a sound starts its context suspended. The
+    // click that got us here is the gesture that lifts that.
+    if (ctx.state === "suspended") ctx.resume();
+
+    stopSource();
+    picker.at = Math.max(0, Math.min(seconds, picker.duration));
+
+    source = ctx.createBufferSource();
+    source.buffer = picker.buffer;
+    source.connect(ctx.destination);
+    source.onended = () => { if (source) pausePlay(); };
+    // picker.lead is how far into the decoded copy the stem's zero actually
+    // sits - see decoderLead. Everything outside this line is in stem time.
+    source.start(0, Math.min(picker.at + picker.lead, picker.buffer.duration));
+
+    startedAt = ctx.currentTime;
+    startedFrom = picker.at;
+    playing = true;
     el("play").textContent = "Pause";
     if (!raf) tick();
-    audio.pause();
-    audio.currentTime = seconds;
-    if (!audio.seeking) audio.play();
   }
 
   function pausePlay() {
-    wantPlaying = false;
-    audio.pause();
+    if (picker) picker.at = playhead();
+    stopSource();
+    playing = false;
     el("play").textContent = "Play";
     if (raf) { cancelAnimationFrame(raf); raf = null; }
     showClock();
     drawWave();
+    drawDetail();
   }
+
+  // --- lining the listening copy up with the stem --------------------------
+
+  // The page plays a small mp3 and the build cuts the real wav, so any
+  // offset between those two lands directly on every marking made by ear.
+  //
+  // Python measures that offset when it makes the preview and sends it as
+  // prepared.lead (see audition._preview_lead) - which settles the encoder's
+  // side of it exactly. What Python cannot know is what *this* decoder does
+  // with the gapless information in the file. So that half is checked here,
+  // from evidence rather than from assumption: if WebKit stripped the
+  // encoder's delay, the decoded copy is the same length as the stem, and
+  // if it did not, the copy is longer by that delay plus its padding.
+  //
+  // Only the second case needs a correction, and only then is the constant
+  // used at all.
+  const LAME_DELAY_SAMPLES = 1105;   // 576 of lookahead, 529 of decoder delay
+  const LENGTH_SLACK_SEC = 0.01;
+
+  function decoderLead(buffer, sourceDuration) {
+    if (!(sourceDuration > 0)) return 0;
+    const extra = buffer.duration - sourceDuration;
+    if (extra < LENGTH_SLACK_SEC) return 0;   // stripped it: nothing to undo
+    return LAME_DELAY_SAMPLES / buffer.sampleRate;
+  }
+
+  function decodeDataUri(uri) {
+    const binary = atob(uri.slice(uri.indexOf(",") + 1));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes.buffer;
+  }
+
+  // --- opening and closing -------------------------------------------------
 
   function openPicker(song) {
     closePicker();
@@ -1075,27 +1305,40 @@
       if (prepared.error) { el("picker-hint").textContent = prepared.error; return; }
       picker = {
         song, peaks: prepared.peaks, duration: prepared.duration,
+        kicks: prepared.kicks || [],
+        grid: prepared.grid || [],
+        buffer: null,
+        lead: 0,
+        at: 0,
         start: null, end: null,
-        // Only ever used as the size of a keystroke - nothing is drawn or
-        // quantized with it. A stem with no tempo in its name falls back to
-        // a round second.
+        // Fallbacks only. Where the grid reaches, stepAt/beatAt use what the
+        // drumming actually says instead - a filename tempo is a whole-song
+        // estimate and is routinely a fraction of a percent out.
         beat: prepared.tempo > 0 ? 60 / prepared.tempo : FALLBACK_BEAT_SEC,
         nudge: prepared.tempo > 0 ? 60 / prepared.tempo / 4 : FALLBACK_NUDGE_SEC,
       };
-      el("picker-hint").textContent = "Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — space at the next 1.";
-      audio.src = prepared.audio;
-      // An mp3 can't be seeked until it's playable, so a click before this
-      // fires would silently land at zero.
-      audio.addEventListener("canplay", () => { el("play").disabled = false; }, { once: true });
       el("play").disabled = true;
       drawWave();
+      drawDetail();
+
+      const opened = picker;
+      context().decodeAudioData(decodeDataUri(prepared.audio)).then((buffer) => {
+        if (picker !== opened) return;   // closed, or moved on, while decoding
+        picker.buffer = buffer;
+        picker.lead = (prepared.lead || 0) + decoderLead(buffer, prepared.duration);
+        el("play").disabled = false;
+        el("picker-hint").textContent =
+          "Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — space at the next 1.";
+        drawDetail();
+      }).catch((e) => {
+        el("picker-hint").textContent = "Could not read the audio: " + e;
+      });
     });
   }
 
   function closePicker() {
-    wantPlaying = false;
-    audio.pause();
-    audio.removeAttribute("src");
+    stopSource();
+    playing = false;
     if (raf) { cancelAnimationFrame(raf); raf = null; }
     // A build still in flight is left to finish on the Python side - its
     // file still gets written - but nothing here should keep polling into a
@@ -1114,11 +1357,20 @@
   // to set the point silently and leave you to go and find the Play button,
   // which is two actions for one thought and made every correction cost a
   // trip to the mouse. Clicking again mid-play is how you make a big move.
-  function seekFromClick(event) {
+  //
+  // The click is pulled onto the nearest kick, within half a sixteenth. A
+  // section is nearly always wanted starting on one, a mouse cannot land on
+  // one to the millisecond, and the build used to fix that up afterwards by
+  // moving the cut - which meant the file you got was not the audio you
+  // auditioned. Doing it here instead makes those the same thing.
+  function seekFromClick(event, canvas) {
     if (!picker || el("play").disabled) return;
-    const box = wave.getBoundingClientRect();
-    const at = ((event.clientX - box.left) / box.width) * picker.duration;
-    setStart(at);
+    const box = canvas.getBoundingClientRect();
+    const fraction = (event.clientX - box.left) / box.width;
+    const at = canvas === detail
+      ? detailCentre() - detailSpan() / 2 + fraction * detailSpan()
+      : fraction * picker.duration;
+    setStart(snapToKick(at));
   }
 
   // keepEnd is what separates the two ways of moving the start. A click is
@@ -1133,6 +1385,7 @@
     }
     playFrom(picker.start);
     drawWave();
+    drawDetail();
   }
 
   // Nudging re-seeks and keeps playing, so every press re-auditions the one
@@ -1147,9 +1400,9 @@
   const FALLBACK_NUDGE_SEC = 0.2;   // a stem with no tempo in its name
   const FALLBACK_BEAT_SEC = 1.0;
 
-  function nudgeStart(seconds) {
+  function nudgeStart(steps) {
     if (!picker || picker.start === null) return;
-    setStart(picker.start + seconds, true);
+    setStart(picker.start + steps * stepAt(picker.start), true);
     sayWhatIsMarked();
   }
 
@@ -1160,7 +1413,7 @@
   // rather than one guessed at from the drumming.
   function slideSection(beats) {
     if (!picker || picker.start === null) return;
-    const by = beats * picker.beat;
+    const by = beats * beatAt(picker.start);
     const span = picker.end === null ? 0 : picker.end - picker.start;
     const start = Math.max(0, Math.min(picker.start + by, picker.duration - span));
 
@@ -1168,6 +1421,7 @@
     if (picker.end !== null) picker.end = start + span;
     playFrom(picker.start);
     drawWave();
+    drawDetail();
     sayWhatIsMarked();
   }
 
@@ -1183,13 +1437,14 @@
   // export you haven't looked at yet.
   function markEnd() {
     if (!picker || picker.start === null) return;
-    const end = audio.currentTime;
+    const end = playhead();
     if (end <= picker.start) { el("picker-hint").textContent = "That is before the start - click again and play on."; return; }
     picker.end = end;
     pausePlay();
     refreshBuildEnabled();
     sayWhatIsMarked();
     drawWave();
+    drawDetail();
   }
 
   // Building a beat has no percentage of its own - one model pass with
@@ -1215,10 +1470,15 @@
     el("build").disabled = !(picker.start !== null && picker.end !== null && outputsFromPads());
   }
 
+  // Where the marking was when Build was clicked, kept because the picker
+  // closes itself on success and the result is reported after that.
+  let builtFrom = null;
+
   function buildBeat() {
     const outputs = outputsFromPads();
     if (!picker || picker.start === null || picker.end === null || !outputs) return;
     const end = picker.end;
+    builtFrom = picker.start;
     pausePlay();
     el("build").disabled = true;
     // Set before the call even returns, not after - a fast build can finish
@@ -1259,12 +1519,27 @@
         // Notes worked out from the pattern rather than heard - say so.
         (loop.inferred ? " (" + loop.inferred + " put back)" : "") + ", " +
         loop.pieces.join(" / ") + " — set Ableton to " + loop.tempo + " BPM" +
-        tempoQuibble(loop);
+        tempoQuibble(loop) + cutMoved(loop);
       refreshLibrary().then(() => {
         closePicker();
         el("message").textContent = summary;
       });
     });
+  }
+
+  // The build is still allowed to move the cut onto a kick when the marking
+  // landed on nothing (beat_loop._kick_downbeat), and a move nobody is told
+  // about is how a loop ends up starting somewhere you never heard it start.
+  // Normally this says nothing at all, because clicking snaps onto a kick and
+  // a marked kick is never moved off - so if it does speak up, it is telling
+  // you the marking missed.
+  const CUT_MOVED_SEC = 0.03;
+
+  function cutMoved(loop) {
+    if (builtFrom === null || loop.origin === undefined) return "";
+    const moved = loop.origin - builtFrom;
+    if (Math.abs(moved) < CUT_MOVED_SEC) return "";
+    return " (cut moved " + moved.toFixed(2) + "s onto a kick)";
   }
 
   // The loop is measured off the section you marked, so if you held it a bar
@@ -1294,10 +1569,17 @@
     start: picker.start,
     end: picker.end,
     duration: picker.duration,
-    beat: picker.beat,
-    nudge: picker.nudge,
-    playing: !audio.paused,
-    at: audio.currentTime,
+    beat: beatAt(picker.start === null ? playhead() : picker.start),
+    nudge: stepAt(picker.start === null ? playhead() : picker.start),
+    playing: playing,
+    at: playhead(),
+    // Measured, not assumed: how far into the decoded listening copy the
+    // stem's zero sits. A driver checking that what you hear is what gets
+    // cut needs to be able to see it.
+    lead: picker.lead,
+    kicks: picker.kicks.length,
+    grid: picker.grid.length,
+    decoded: picker.buffer !== null,
   };
 
   // --- talking to Python -------------------------------------------------
@@ -1432,7 +1714,8 @@
     window.pywebview.api.open_output_dir(el("destination").dataset.dir || "");
   });
 
-  wave.addEventListener("click", seekFromClick);
+  wave.addEventListener("click", (event) => seekFromClick(event, wave));
+  detail.addEventListener("click", (event) => seekFromClick(event, detail));
   el("picker-close").addEventListener("click", closePicker);
 
   // Play is for hearing the section you've marked, not for resuming where
@@ -1440,7 +1723,7 @@
   // to the top of the stem if you haven't set one yet.
   el("play").addEventListener("click", () => {
     if (!picker) return;
-    if (audio.paused) playFrom(picker.start === null ? 0 : picker.start);
+    if (!playing) playFrom(picker.start === null ? 0 : picker.start);
     else pausePlay();
   });
 
@@ -1471,13 +1754,13 @@
     // by ear.
     if (event.code === "Space") {
       if (el("play").disabled) return;
-      if (audio.paused) playFrom(picker.start === null ? 0 : picker.start);
+      if (!playing) playFrom(picker.start === null ? 0 : picker.start);
       else markEnd();
       return;
     }
     const direction = event.code === "ArrowLeft" ? -1 : 1;
     if (event.shiftKey) slideSection(direction);
-    else nudgeStart(direction * picker.nudge);
+    else nudgeStart(direction);
   });
 
   window.addEventListener("pywebviewready", () => {

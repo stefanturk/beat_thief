@@ -65,6 +65,7 @@ SOURCES=(
     groove_reader.py
     beat_writer.py
     beat_loop.py
+    pulse.py
     audition.py
     bass_isolator.py
     harmony_isolator.py

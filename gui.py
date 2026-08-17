@@ -27,6 +27,7 @@ import audition
 import beat_loop
 import instrument_isolator
 import pipeline
+import pulse
 
 UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
 
@@ -199,6 +200,17 @@ class Api:
             prepared["tempo"] = instrument_isolator.parse_tempo_from_basename(basename)
         except ValueError:
             prepared["tempo"] = 0.0
+
+        # The grid the kicks agree on, fitted in local windows rather than
+        # once across the song. Not a nicety: the filename's tempo is a rough
+        # whole-song estimate, and being a few tenths of a percent out puts
+        # the end of a three-minute stem several sixteenths away from where a
+        # single grid would say. Measured on real stems, one grid for a whole
+        # song agrees with the hits about as well as a random number does.
+        # Fitted here rather than in the page so the arithmetic lives in one
+        # place (pulse.py) that can be lifted out whole.
+        prepared["grid"] = [grid._asdict() for grid in
+                            pulse.grid_track(prepared.get("kicks") or [], prepared["tempo"])]
         return prepared
 
     def steal_beat(self, wav_path: str, start_sec: float, end_sec: float,
@@ -247,6 +259,13 @@ class Api:
             "path": path,
             "name": os.path.basename(path),
             "bars": loop.bars,
+            # Where the cut actually landed in the stem, and how long it
+            # runs. Reported because the picker marks a start and the build
+            # is still free to move it (see beat_loop._kick_downbeat), and a
+            # move nobody is told about is how a loop ends up starting
+            # somewhere you never heard it start.
+            "origin": round(loop.origin_sec, 4),
+            "duration": round(loop.beat.duration_sec, 4),
             "tempo": round(loop.tempo, 3),
             "song_tempo": round(loop.song_tempo, 3),
             "hits": loop.hits_used,

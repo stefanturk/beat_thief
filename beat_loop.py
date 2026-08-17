@@ -186,6 +186,16 @@ def _grid_origin(times: list[float], step_sec: float) -> float:
 # round - which is how the old downbeat guesser used to ruin a good marking.
 _KICK_MARGIN = 0.9
 
+# How much kick the marked start has to already have for the marking to be
+# left exactly where it is. Deliberately far below _KICK_MARGIN: this isn't
+# asking whether the marked kick is the best one in the bar, only whether
+# there is a real kick there rather than a whisper. If there is, the person
+# marking heard it and meant it, and moving the cut off it - by up to a
+# whole bar, which is what this function is otherwise free to do - hands
+# back a file that is not the audio they auditioned. A kick at a quarter of
+# the loudest one is a soft kick; a transcription artifact is quieter again.
+_KICK_ANCHOR = 0.25
+
 
 def _kick_downbeat(placed: dict, total_steps: int) -> int:
     """Which step of the marked section to call one, so the loop can start
@@ -204,6 +214,12 @@ def _kick_downbeat(placed: dict, total_steps: int) -> int:
     picker's shift-arrows are how you make it. This only does the part that
     isn't a judgement - don't start the loop on silence.
 
+    A marking that already lands on a kick is never moved at all, however
+    much louder some later kick is. The picker snaps a click onto a real
+    kick and plays from exactly there, so moving the cut afterwards would
+    hand back a file that isn't the audio that was auditioned - which is a
+    worse failure than starting on the second-best kick in the bar.
+
     Positions are folded across bars and searched within a single bar, since
     moving a repeating loop on by a whole bar changes nothing you can hear.
     Returns 0 when there are no kicks, which leaves the marking alone."""
@@ -216,6 +232,15 @@ def _kick_downbeat(placed: dict, total_steps: int) -> int:
     strongest = max(force)
     if strongest <= 0:
         return 0
+
+    # Asked of step 0 itself, not of the folded votes: a kick one bar later
+    # lands on 0 once folded, and that is a different claim entirely from
+    # there being a kick where the marking actually is.
+    marked = placed.get((0, "kick"), 0.0)
+    loudest = max(v for (step, piece), v in placed.items() if piece == "kick")
+    if marked >= loudest * _KICK_ANCHOR:
+        return 0
+
     return next(step for step, f in enumerate(force) if f >= strongest * _KICK_MARGIN)
 
 
