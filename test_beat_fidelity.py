@@ -104,3 +104,83 @@ class TestSeparation(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSeam(unittest.TestCase):
+    """Does the loop actually loop.
+
+    Each case builds a click track whose true tempo is known, then cuts it
+    right or wrong on purpose. A check that can't tell a deliberately broken
+    cut from a good one is worth nothing, so the broken cases matter more
+    than the clean one.
+    """
+
+    TEMPO = 120.0
+    BARS = 2
+
+    def _click_track(self, seconds=40.0, tempo=None):
+        """Kicks on every beat, forever, at an exactly known tempo."""
+        tempo = tempo or self.TEMPO
+        audio = np.zeros(int(seconds * SR), dtype=np.float32)
+        beat = 60.0 / tempo
+        at = 0.0
+        while at < seconds - 0.2:
+            audio += _burst(seconds, at, 60.0, decay_sec=0.03)
+            at += beat
+        return audio
+
+    def _cut(self, origin_sec, tempo=None, bars=None):
+        """A loop whose audio span is bars * 4 beats at `tempo`."""
+        tempo = tempo or self.TEMPO
+        bars = bars or self.BARS
+        return _loop("kick", [0], bars=bars, steps_per_bar=16,
+                     tempo=tempo, origin_sec=origin_sec)
+
+    def test_an_exact_cut_comes_round_where_the_drummer_does(self):
+        audio = self._click_track()
+        # 4.0s in is exactly two bars at 120, so this lands on a kick and
+        # runs for a whole number of bars.
+        result = bf.seam(self._cut(4.0), audio, SR)
+
+        self.assertIsNotNone(result.loop_ms)
+        self.assertLess(abs(result.head_ms), 15)
+        self.assertLess(abs(result.loop_ms), 15)
+        self.assertLess(result.grid_ms, 15)
+
+    def test_a_cut_that_is_too_short_comes_round_early(self):
+        # The loop claims 126 BPM for audio that is really 120, so its two
+        # bars come out about 190ms short. Repeated, it would run ahead of
+        # the song by that much every pass - and nothing inside the cut can
+        # see that, which is the whole reason this compares against the
+        # recording it came out of.
+        audio = self._click_track()
+        result = bf.seam(self._cut(4.0, tempo=126.0), audio, SR)
+
+        self.assertIsNotNone(result.loop_ms)
+        self.assertGreater(abs(result.loop_ms), 40)
+
+    def test_a_cut_whose_tempo_is_wrong_sits_off_its_own_grid(self):
+        audio = self._click_track()
+        honest = bf.seam(self._cut(4.0), audio, SR)
+        wrong = bf.seam(self._cut(4.0, tempo=126.0), audio, SR)
+
+        self.assertGreater(wrong.grid_ms, honest.grid_ms * 3 + 10)
+
+    def test_a_cut_that_missed_the_one_says_so_in_its_head(self):
+        # Started a sixteenth late, so the file opens partway past the kick
+        # and the first one does not arrive until nearly a whole sixteenth in.
+        audio = self._click_track()
+        late = self._cut(4.0 + 60.0 / self.TEMPO / 4)
+
+        self.assertGreater(abs(bf.seam(late, audio, SR).head_ms), 40)
+
+    def test_silence_has_nothing_to_say(self):
+        quiet = np.zeros(int(20.0 * SR), dtype=np.float32)
+        result = bf.seam(self._cut(4.0), quiet, SR)
+
+        self.assertIsNone(result.head_ms)
+        self.assertIn("not enough", str(result))
+
+    def test_a_cut_running_off_the_end_is_refused(self):
+        audio = self._click_track(seconds=6.0)
+        self.assertIsNone(bf.seam(self._cut(5.5), audio, SR).head_ms)

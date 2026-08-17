@@ -9,9 +9,15 @@ bug shared by both stages would pass its own check. This measures the
 directly: for each piece, does audio energy show up on the steps the MIDI
 says it played, and stay away from the steps it says it didn't?
 
+It also asks the other question a single loop can't answer on its own: put
+the cut next to itself four times over - does it still line up? (see seam).
+
 Dev tool only. Not imported by gui.py, beat_loop.py, or anything the app
-loads, and imports nothing from percussion_splitter or groove_reader - it
-must not share their blind spots.
+loads. It must not share the blind spots of the stages it is judging, so it
+takes nothing from groove_reader and nothing from percussion_splitter beyond
+one frequency range. pulse.py it does use, and that is fine: the app uses it
+to choose where to cut, never to decide what was played, so it has no stake
+in the answer being measured here.
 
 Run the seeded benchmark:
 
@@ -36,6 +42,7 @@ import beat_loop
 import beat_writer
 import drum_transcriber
 import percussion_splitter
+import pulse
 
 SAMPLE_RATE = drum_transcriber.SAMPLE_RATE
 
@@ -187,6 +194,114 @@ def _load_audio(wav_path: str) -> np.ndarray:
     return adtof.create_adtof_processor().load_audio(wav_path)
 
 
+# --- does the loop actually loop -----------------------------------------
+#
+# check() above asks whether the MIDI matches the audio. That can be perfect
+# while the loop is still unusable, because it says nothing about the two
+# ways a *cut* goes wrong:
+#
+#   - the start misses the one, so the file opens mid-phrase
+#   - the length isn't quite N bars, so every repeat slides further off
+#
+# The obvious test - tile the cut and look at the seam - cannot find the
+# second of those, and it is worth saying why, because it looks like it
+# should. A tiling repeats at exactly the length that was cut, so the cut's
+# own claimed grid always agrees with it perfectly. The error is invisible
+# from inside.
+#
+# What does find it is comparing the tiling against the recording it came
+# out of: cut A, and let the source play on into what would have been B.
+# If A really is N bars, the drummer's next hit after the loop point lands
+# exactly where A's first hit lands when it comes round again. If A is 20ms
+# short, it lands 20ms early, and by the fourth pass it is 80ms out.
+#
+# Everything is reported in milliseconds, which is the unit the mistake is
+# heard in.
+
+_SEAM_MIN_ONSETS = 4
+
+# How much of the recording either side of the cut to hand the detector as
+# context. A cut that opens partway through a ringing kick gives a detector
+# started cold nothing to judge that ringing against, and it reads as a hit
+# at time zero - which is exactly the reading "did this start on the one"
+# must not get wrong. Feeding it the real audio just before the cut and
+# subtracting the offset afterwards removes the question entirely.
+_SEAM_LEAD_SEC = 0.5
+_SEAM_EDGE_SEC = 0.02
+
+
+def _kicks_from(audio: np.ndarray, first: int, length: int, sample_rate: int) -> np.ndarray:
+    """Kick times inside audio[first:first + length], relative to `first`,
+    detected with whatever real audio precedes it as context."""
+    lead = min(int(_SEAM_LEAD_SEC * sample_rate), first)
+    window = audio[first - lead:first + length]
+    found = np.asarray(pulse.kicks(window, sample_rate)) - lead / sample_rate
+    # A hit sitting exactly on the boundary is reported a few milliseconds
+    # early - the detector walks back to the foot of the rise, and the foot
+    # of the very first hit is just outside. Dropping anything negative would
+    # throw away precisely the hit this is here to find, so a hair either
+    # side of the boundary counts as on it.
+    return np.maximum(found[found >= -_SEAM_EDGE_SEC], 0.0)
+
+
+class Seam(NamedTuple):
+    head_ms: float | None    # how far past the start of the file the first kick is
+    loop_ms: float | None    # how early (-) or late (+) the loop point comes round
+    grid_ms: float | None    # how far the playing sits off the loop's own grid
+
+    def __str__(self) -> str:
+        if self.head_ms is None:
+            return "loop: not enough kicks in the cut to say"
+        parts = [f"starts {self.head_ms:+.0f}ms off the one"]
+        if self.loop_ms is not None:
+            parts.append(f"loop point {self.loop_ms:+.0f}ms")
+        if self.grid_ms is not None:
+            parts.append(f"{self.grid_ms:.0f}ms off its own grid")
+        return "loop: " + ", ".join(parts)
+
+
+def _wrap(value: float, period: float) -> float:
+    """`value` folded into (-period/2, +period/2]."""
+    folded = value % period
+    return folded - period if folded > period / 2 else folded
+
+
+def seam(loop: beat_loop.Loop, audio: np.ndarray, sample_rate: int) -> Seam:
+    """Whether the cut starts where it should and comes round where it should."""
+    span = loop.beat.duration_sec
+    first = int(round(loop.origin_sec * sample_rate))
+    length = int(round(span * sample_rate))
+    piece = audio[first:first + length]
+    if length <= 0 or piece.size < length:
+        return Seam(None, None, None)
+
+    inside = _kicks_from(audio, first, length, sample_rate)
+    if inside.size < _SEAM_MIN_ONSETS:
+        return Seam(None, None, None)
+    head_ms = float(inside[0] * 1000)
+
+    # How well the playing agrees with the grid the loop claims. A cut whose
+    # tempo is wrong shows up here even before anything is repeated.
+    sixteenth = 60.0 / loop.tempo / 4 if loop.tempo > 0 else 0.0
+    grid_ms = None
+    if sixteenth > 0:
+        vector = np.exp(2j * np.pi * (inside % sixteenth) / sixteenth).mean()
+        phase = (np.angle(vector) / (2 * np.pi) % 1.0) * sixteenth
+        grid_ms = float(np.median([abs(_wrap(at - phase, sixteenth)) for at in inside]) * 1000)
+
+    # Where the loop point falls against where the drummer actually went.
+    # `inside[0] + span` is when the loop brings its first kick back round;
+    # the source's own next kick after the cut ends is where that should be.
+    if audio.size < first + length + length // 2:
+        return Seam(head_ms, None, grid_ms)
+    continued = _kicks_from(audio, first + length, length, sample_rate)
+    if continued.size == 0:
+        return Seam(head_ms, None, grid_ms)
+
+    expected = float(continued[0])          # relative to the end of the cut
+    return Seam(head_ms, (inside[0] - expected) * 1000, grid_ms)
+
+
 # One accepted scoreboard, checked in. Committed deliberately (--accept) so
 # that "did the pipeline get more faithful" is a line in `git log` rather
 # than a number that only ever lived in a terminal.
@@ -231,6 +346,7 @@ def main(argv: list[str]) -> int:
             case_baseline = {piece: value for (label, piece), value in baseline.items() if label == case.label}
             print(f"\n{case.label}")
             print(report(fidelities, case_baseline))
+            print(seam(loop, audio, SAMPLE_RATE))
             rows.extend((case.label, f.piece, f.separation_db) for f in fidelities)
             if not fidelity_cases.check_expectations(case, fidelities):
                 exit_code = 1
@@ -243,6 +359,7 @@ def main(argv: list[str]) -> int:
     loop = beat_loop.build(wav_path, float(tempo), float(start_sec), float(end_sec))
     audio = _load_audio(wav_path)
     print(report(check(loop, audio, SAMPLE_RATE)))
+    print(seam(loop, audio, SAMPLE_RATE))
     return 0
 
 

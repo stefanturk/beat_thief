@@ -468,6 +468,37 @@ class TestAudition(unittest.TestCase):
 
         self.assertNotIn("tempo", cached)
 
+    def test_the_grid_the_kicks_agree_on_comes_along(self):
+        # Four bars of kicks on the beat at exactly 120, so the fit has
+        # something to find. The page draws its grid and anchors its bar
+        # flash to this, and works out its own arrow-key step from it.
+        beat = 0.5
+        kicks = [round(n * beat, 4) for n in range(64)]
+        path = os.path.join(self.tmp_dir, "Song (Isolated Drums at 120.000 BPM).wav")
+        with open(path, "wb") as f:
+            f.write(b"x")
+        prepared = {"audio": "data:x", "peaks": [0.1], "duration": 40.0,
+                    "path": path, "kicks": kicks}
+        with mock.patch("audition.preview", return_value=prepared):
+            got = gui.Api().audition(path)
+
+        self.assertTrue(got["grid"])
+        for segment in got["grid"]:
+            self.assertAlmostEqual(segment["tempo"], 120.0, delta=0.5)
+            self.assertAlmostEqual(segment["step"], beat / 4, delta=0.005)
+
+    def test_a_stem_with_nothing_to_fit_a_grid_to_still_comes_back(self):
+        path = os.path.join(self.tmp_dir, "Song (Isolated Drums at 120.000 BPM).wav")
+        with open(path, "wb") as f:
+            f.write(b"x")
+        prepared = {"audio": "data:x", "peaks": [0.1], "duration": 9.0,
+                    "path": path, "kicks": []}
+        with mock.patch("audition.preview", return_value=prepared):
+            got = gui.Api().audition(path)
+
+        self.assertEqual(got["grid"], [])
+        self.assertNotIn("error", got)
+
 
 class TestStealBeat(unittest.TestCase):
     """What comes back from stealing a loop - specifically which of the two
@@ -496,6 +527,32 @@ class TestStealBeat(unittest.TestCase):
              mock.patch("drum_transcriber.transcribe", return_value=shifted), \
              mock.patch("beat_loop.write_wav") as self.mock_write_wav:
             return gui.Api().steal_beat(self.stem, start, end)
+
+    def test_it_says_where_the_cut_actually_landed(self):
+        # The build is still allowed to move the start onto a kick when the
+        # marking landed on nothing, so the page has to be able to say where
+        # the file really begins rather than assume it begins where you
+        # clicked. Marked a beat early, on a snare: the cut moves on to the
+        # kick, and says so.
+        beat = 0.5
+        played = []
+        for bar in range(4):
+            at = bar * 4 * beat
+            played += [(38, at), (36, at + beat), (38, at + 2 * beat), (36, at + 3 * beat)]
+        loop = self._steal(played, start=10.0, end=10.0 + 8 * beat)
+
+        self.assertAlmostEqual(loop["origin"], 10.0 + beat, delta=0.05)
+        self.assertAlmostEqual(loop["duration"], loop["bars"] * 4 * 60.0 / loop["tempo"], places=3)
+
+    def test_a_cut_that_did_not_move_says_the_marking_back(self):
+        beat = 0.5
+        played = []
+        for bar in range(4):
+            at = bar * 4 * beat
+            played += [(36, at), (38, at + beat), (36, at + 2 * beat), (38, at + 3 * beat)]
+        loop = self._steal(played, start=10.0, end=10.0 + 8 * beat)
+
+        self.assertAlmostEqual(loop["origin"], 10.0, delta=0.02)
 
     def test_the_tempo_it_reports_is_the_loops_not_the_songs(self):
         # This is the number the page tells you to set Ableton to, so it has
