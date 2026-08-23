@@ -589,8 +589,8 @@
       -->
       <div class="pads">
         <button class="pad" id="pad-song" data-stem="song" aria-pressed="true">Song</button>
-        <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="false">Drums</button>
-        <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
+        <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="true">Drums</button>
+        <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="true">Beat</button>
         <button class="pad" id="pad-midi" data-stem="midi" data-again="true" aria-pressed="false">Midi</button>
         <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
         <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
@@ -624,6 +624,8 @@
       <div class="picker-controls">
         <button id="play" type="button">Play</button>
         <button id="build" type="button" disabled>Build</button>
+        <button id="fade" type="button" hidden>Fade here</button>
+        <button id="keep" type="button" hidden>Leave it alone</button>
         <button id="picker-close" type="button">Close</button>
         <span id="marked"></span>
         <span id="clock">0:00</span>
@@ -802,6 +804,13 @@
   // anything else.
   const MORE_THAN_ONE = new Set(["beat", "midi"]);
 
+  // What a pasted link is armed for before you touch anything. Stealing a
+  // beat is what this is for, and it takes all three - the song to work
+  // from, the drums to hear on their own, and the phrase itself - so asking
+  // for the last of them is asking for the other two anyway (see NEEDS).
+  // Anything else is a square away.
+  const ARMED_TO_BEGIN_WITH = new Set(["song", "drums", "beat"]);
+
   function padFor(thing) { return el("pad-" + thing); }
   function isArmed(thing) { return padFor(thing).getAttribute("aria-pressed") === "true"; }
   function have(thing) { return padFor(thing).dataset.have === "true"; }
@@ -867,7 +876,7 @@
     selected = null;
     for (const thing of STASH_ORDER) {
       padFor(thing).dataset.have = "false";
-      setArmed(thing, thing === "song");
+      setArmed(thing, ARMED_TO_BEGIN_WITH.has(thing));
     }
     showLocks();
     describeTake();
@@ -940,16 +949,56 @@
   // A decoded buffer has neither problem: start(when, offset) takes an exact
   // offset in seconds and begins immediately, and the position is read off
   // the audio clock rather than asked of an element.
+  // The picker's error channel. Only speaks when the picker is on screen,
+  // so it is safe to call from anywhere that might be running behind it.
+  function sayInPicker(message) {
+    if (!el("picker").hidden) el("picker-hint").textContent = message;
+  }
+
   let audioCtx = null;
   let source = null;      // the live AudioBufferSourceNode, if any
   let startedAt = 0;      // ctx.currentTime when this stretch of playback began
   let startedFrom = 0;    // where in the stem it began
   let playing = false;
 
+  // A context built while no click or keystroke is on the stack does not come
+  // up running, and this one is built lazily - so which code path happened to
+  // ask for it first decided whether the picker could make a sound. Opening
+  // the picker by hand went through a click; opening it by itself at the end
+  // of a run went through a timer, and that context stayed stuck for the rest
+  // of the session, because nothing here ever replaced it. Quitting the app
+  // was the only cure, which is exactly what it looked like from the outside:
+  // "it works after a restart".
+  //
+  // So: it is built from the first real interaction with the page (below),
+  // woken on every use, and thrown away and rebuilt if it will not run.
+  function wake(ctx) {
+    // WebKit has "interrupted" as well as "suspended", and only ever tested
+    // for the latter - in the interrupted case resume() was never called at
+    // all. A refusal is said out loud rather than left as an unhandled
+    // rejection, which used to be written into a hidden element.
+    if (ctx.state === "running") return;
+    const resumed = ctx.resume();
+    if (resumed && resumed.catch) resumed.catch((e) => sayInPicker("Audio would not start: " + e));
+  }
+
   function context() {
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    wake(audioCtx);
     return audioCtx;
   }
+
+  // Built from the first click or keystroke anywhere on the page. There is
+  // always one before a run can start - a link gets pasted, a square gets
+  // armed, "Steal it" gets clicked - so by the time a finished run opens the
+  // picker on its own, the context is already awake.
+  function armAudio() {
+    document.removeEventListener("pointerdown", armAudio, true);
+    document.removeEventListener("keydown", armAudio, true);
+    try { context(); } catch (e) { /* no Web Audio here; playFrom will say so */ }
+  }
+  document.addEventListener("pointerdown", armAudio, true);
+  document.addEventListener("keydown", armAudio, true);
 
   // Where in the stem we are, to the sample. Paused, it is wherever we
   // stopped; playing, it is the audio clock's own answer rather than a
@@ -1001,7 +1050,17 @@
   // and never more than a shade over a tenth of a second whatever the tempo.
   const SNAP_LIMIT_SEC = 0.12;
 
+  // Which of the two jobs the picker is doing. Marking a phrase to steal is
+  // one thing; saying where a song starts or ends is another, and the parts
+  // that differ ask this rather than each keeping their own flag.
+  function trimming() {
+    return picker !== null && picker.mode === "trim";
+  }
+
   function snapToKick(when) {
+    // A fade point has nothing to do with the drummer, so it is left exactly
+    // where it was put.
+    if (trimming()) return when;
     if (!picker || !picker.kicks.length) return when;
     const limit = Math.min(SNAP_LIMIT_SEC, stepAt(when) / 2);
     let best = when, bestGap = limit;
@@ -1027,9 +1086,15 @@
     const barW = w / peaks.length;
     const at = playhead();
 
-    // The marked region, painted behind the waveform so it reads as
-    // highlight rather than as another wave.
-    if (picker.start !== null) {
+    // What the fade will cover, painted behind the waveform - warmer than
+    // the marking highlight, because it is audio about to be quietened
+    // rather than audio about to be taken.
+    if (trimming() && picker.start !== null) {
+      const edge = (picker.start / picker.duration) * w;
+      ctx.fillStyle = "rgba(250, 176, 139, 0.16)";
+      if (picker.which === "start") ctx.fillRect(0, 0, edge, h);
+      else ctx.fillRect(edge, 0, w - edge, h);
+    } else if (picker.start !== null) {
       const from = (picker.start / picker.duration) * w;
       const to = ((picker.end === null ? at : picker.end) / picker.duration) * w;
       ctx.fillStyle = "rgba(167, 139, 250, 0.16)";
@@ -1042,7 +1107,8 @@
       ctx.fillRect(i * barW, mid - bar / 2, Math.max(1, barW - 0.5), bar);
     }
 
-    for (const [time, colour] of [[picker.start, "#a78bfa"], [picker.end, "#5fd39a"]]) {
+    for (const [time, colour] of trimming() ? [[picker.start, "#fab08b"]]
+                                            : [[picker.start, "#a78bfa"], [picker.end, "#5fd39a"]]) {
       if (time === null) continue;
       const x = (time / picker.duration) * w;
       ctx.fillStyle = colour;
@@ -1116,7 +1182,7 @@
 
     // The grid. Bars heaviest, beats next, sixteenths faint - so which line
     // is which is readable at a glance instead of counting.
-    const grid = gridAt(detailCentre());
+    const grid = trimming() ? null : gridAt(detailCentre());
     if (grid) {
       const first = Math.floor((from - grid.downbeat) / grid.step) - 1;
       const last = Math.ceil((from + span - grid.downbeat) / grid.step) + 1;
@@ -1134,13 +1200,15 @@
     // The kicks a click snaps onto, so what will happen is visible before it
     // happens.
     ctx.fillStyle = "#5fd39a";
-    for (const at of picker.kicks) {
+    for (const at of trimming() ? [] : picker.kicks) {
       if (at < from) continue;
       if (at > from + span) break;
       ctx.fillRect(x(at) - 1, h - 5, 2, 5);
     }
 
-    for (const [time, colour] of [[picker.start, "#a78bfa"], [picker.end, "#5fd39a"]]) {
+    const marks = trimming() ? [[picker.start, "#fab08b"]]
+                             : [[picker.start, "#a78bfa"], [picker.end, "#5fd39a"]];
+    for (const [time, colour] of marks) {
       if (time === null || time < from || time > from + span) continue;
       ctx.fillStyle = colour;
       ctx.fillRect(x(time) - 1, 0, 2, h);
@@ -1172,6 +1240,9 @@
   const FLASH_STRENGTH = 0.14;
 
   function barFlash() {
+    // Nothing to flash against while trimming: no grid is fitted, and a bar
+    // line has no bearing on where a song fades in.
+    if (trimming()) return 0;
     if (!picker || !playing) return 0;
     const grid = gridAt(playhead());
     if (!grid || !(grid.step > 0)) return 0;
@@ -1214,12 +1285,26 @@
     source = null;
   }
 
+  // How long to give a context to actually start running before deciding it
+  // never will, and how far the clock has to have moved to count as running.
+  const WAKE_GRACE_MS = 250;
+  const CLOCK_MOVED_SEC = 0.01;
+
+  // A context that will not run is replaced rather than kept. Whatever built
+  // the broken one, the click that got us here is a real gesture, so the
+  // replacement comes up running - which is what makes this recover on the
+  // next click instead of lasting until the app is quit.
+  function usableContext() {
+    let ctx = context();
+    if (ctx.state === "running") return ctx;
+    try { ctx.close(); } catch (e) { /* already closed */ }
+    audioCtx = null;
+    return context();
+  }
+
   function playFrom(seconds) {
     if (!picker || !picker.buffer) return;
-    const ctx = context();
-    // A page that has never made a sound starts its context suspended. The
-    // click that got us here is the gesture that lifts that.
-    if (ctx.state === "suspended") ctx.resume();
+    const ctx = usableContext();
 
     stopSource();
     picker.at = Math.max(0, Math.min(seconds, picker.duration));
@@ -1237,6 +1322,17 @@
     playing = true;
     el("play").textContent = "Pause";
     if (!raf) tick();
+
+    // Saying "Pause" is not evidence of a sound. The clock is the evidence:
+    // if it has not moved a moment later, nothing is playing and the button
+    // is lying about it.
+    const began = ctx.currentTime;
+    setTimeout(() => {
+      if (!playing || source === null) return;
+      if (ctx.currentTime - began >= CLOCK_MOVED_SEC) return;
+      pausePlay();
+      sayInPicker("Audio did not start — click again.");
+    }, WAKE_GRACE_MS);
   }
 
   function pausePlay() {
@@ -1333,7 +1429,112 @@
       }).catch((e) => {
         el("picker-hint").textContent = "Could not read the audio: " + e;
       });
+    }).catch((e) => {
+      // Without this the whole chain above failed silently: an error here
+      // became an unhandled rejection, and the only place that reports one
+      // is hidden while the picker is open.
+      el("picker-hint").textContent = "Could not get the audio: " + e;
     });
+  }
+
+  // The other thing the picker does: saying where a song actually starts or
+  // ends, when the sanitizer found a stretch it is not sure about.
+  //
+  // The run is stopped on the worker thread waiting for this, and stays
+  // stopped until one of the two buttons is pressed - which is the point.
+  // Isolating a song whose intro is still in question means every stem,
+  // every tempo and every beat taken from it inherits the answer, and by
+  // then the answer is expensive to change.
+  //
+  // How far the fade point moves per key press. Round seconds rather than
+  // musical steps: nothing here is on a grid, and a fade is judged by how
+  // much of the noise it covers.
+  const TRIM_NUDGE_SEC = 0.1;
+  const TRIM_STRIDE_SEC = 1.0;
+
+  // How much of the run-up to an ending to play, matching what the terminal
+  // version plays for the same decision (song_sanitizer.extract_snippet).
+  const TRIM_RUN_UP_SEC = 5.0;
+
+  function openTrim(review) {
+    closePicker();
+    el("picker").hidden = false;
+    el("readout").hidden = true;
+    el("go").hidden = true;
+    el("url").blur();
+    el("build").hidden = true;
+    el("fade").hidden = false;
+    el("keep").hidden = false;
+    el("picker-title").textContent = review.filename;
+    el("picker-hint").textContent = "Getting the audio...";
+
+    window.pywebview.api.review_audio(review.path).then((prepared) => {
+      if (!prepared || prepared.error) {
+        el("picker-hint").textContent = (prepared && prepared.error) || "Could not read that song.";
+        return;
+      }
+      picker = {
+        song: null, mode: "trim", which: review.end,
+        peaks: prepared.peaks, duration: prepared.duration,
+        kicks: [], grid: [],
+        buffer: null, lead: 0, at: 0,
+        start: Math.max(0, Math.min(review.cut_sec, prepared.duration)),
+        end: null,
+        beat: FALLBACK_BEAT_SEC, nudge: TRIM_NUDGE_SEC,
+      };
+      el("play").disabled = true;
+      drawWave();
+      drawDetail();
+
+      const opened = picker;
+      context().decodeAudioData(decodeDataUri(prepared.audio)).then((buffer) => {
+        if (picker !== opened) return;
+        picker.buffer = buffer;
+        picker.lead = (prepared.lead || 0) + decoderLead(buffer, prepared.duration);
+        el("play").disabled = false;
+        sayWhereItWouldFade();
+        drawDetail();
+      }).catch((e) => {
+        el("picker-hint").textContent = "Could not read the audio: " + e;
+      });
+    }).catch((e) => {
+      el("picker-hint").textContent = "Could not get the audio: " + e;
+    });
+  }
+
+  function sayWhereItWouldFade() {
+    if (!trimming()) return;
+    const where = picker.start.toFixed(1) + "s";
+    el("picker-hint").textContent = picker.which === "start"
+      ? "This song looks like it really starts at " + where +
+        " — play it, ← → to move it, then fade in up to there or leave it alone."
+      : "This song looks like it really ends at " + where +
+        " — play it, ← → to move it, then fade out from there or leave it alone.";
+  }
+
+  // Play from where the fade point is, so what you hear is what the song
+  // would begin with - or, for an ending, the run-up into it, so you hear
+  // what it would finish on.
+  function auditionTrim() {
+    if (!trimming()) return;
+    playFrom(picker.which === "start" ? picker.start
+                                      : Math.max(0, picker.start - TRIM_RUN_UP_SEC));
+  }
+
+  function moveTrim(by) {
+    if (!trimming()) return;
+    picker.start = Math.max(0, Math.min(picker.start + by, picker.duration));
+    auditionTrim();
+    drawWave();
+    drawDetail();
+    sayWhereItWouldFade();
+  }
+
+  function answerTrim(action) {
+    if (!trimming()) return;
+    const cut = picker.start;
+    closePicker();
+    window.pywebview.api.resolve_trim(cut, action).then(render).catch(complain);
   }
 
   function closePicker() {
@@ -1350,6 +1551,9 @@
     el("go").hidden = false;
     el("play").textContent = "Play";
     el("build").disabled = true;
+    el("build").hidden = false;
+    el("fade").hidden = true;
+    el("keep").hidden = true;
     el("marked").textContent = "";
   }
 
@@ -1378,6 +1582,16 @@
   // to a section you've already marked out, so the end stays put - otherwise
   // nudging onto the one would cost you the end you just caught.
   function setStart(seconds, keepEnd) {
+    // Trimming has no end to keep and no build to enable - a click is just
+    // "the song starts here", and it plays from there so you can hear it.
+    if (trimming()) {
+      picker.start = Math.max(0, Math.min(seconds, picker.duration));
+      auditionTrim();
+      drawWave();
+      drawDetail();
+      sayWhereItWouldFade();
+      return;
+    }
     picker.start = Math.max(0, Math.min(seconds, picker.duration));
     if (!keepEnd || picker.end <= picker.start) {
       picker.end = null;
@@ -1566,6 +1780,7 @@
   // calling the handlers directly and proving nothing (which is exactly how
   // a dead spacebar survived a round of "verified").
   window.__picker = () => picker && {
+    mode: picker.mode || "beat",
     start: picker.start,
     end: picker.end,
     duration: picker.duration,
@@ -1580,6 +1795,10 @@
     kicks: picker.kicks.length,
     grid: picker.grid.length,
     decoded: picker.buffer !== null,
+    // Whether the audio clock is actually running. A picker that draws and
+    // clicks perfectly but makes no sound is this field and nothing else.
+    state: audioCtx && audioCtx.state,
+    currentTime: audioCtx && audioCtx.currentTime,
   };
 
   // --- talking to Python -------------------------------------------------
@@ -1591,9 +1810,21 @@
   // wasteful, so this only calls it again when the stage actually moves on.
   let lastStage = null;
 
+  // Which trim we last put on screen, so a review that is still pending
+  // across several polls is opened once rather than reopened four times a
+  // second.
+  let reviewing = null;
+
   function poll() {
     window.pywebview.api.status().then((state) => {
       render(state);
+      const review = state.review || null;
+      const key = review && (review.path + "@" + review.end);
+      if (key !== reviewing) {
+        reviewing = key;
+        if (review) openTrim(review);
+        else if (trimming()) closePicker();
+      }
       if (state.stage !== lastStage) {
         lastStage = state.stage;
         refreshLibrary();
@@ -1659,6 +1890,10 @@
     el("state-text").textContent = "Stopped";
     el("message").textContent = String(problem && problem.message || problem);
     setFigure("···", "Stopped", false);
+    // #message lives inside #readout, and the picker hides #readout while
+    // it is open - so every complaint made during picking went into an
+    // element nobody could see. Say it where the eyes are instead.
+    sayInPicker(String(problem && problem.message || problem));
   }
 
   window.addEventListener("unhandledrejection", (event) => complain(event.reason));
@@ -1716,18 +1951,27 @@
 
   wave.addEventListener("click", (event) => seekFromClick(event, wave));
   detail.addEventListener("click", (event) => seekFromClick(event, detail));
-  el("picker-close").addEventListener("click", closePicker);
+  // Closing while a run is parked on a trim decision has to be an answer,
+  // not an escape - the worker thread is sitting on it, and a picker that
+  // just vanishes would leave the run stopped with nothing to show for it.
+  el("picker-close").addEventListener("click", () => {
+    if (trimming()) answerTrim("keep");
+    else closePicker();
+  });
 
   // Play is for hearing the section you've marked, not for resuming where
   // you happened to stop - so it always goes back to the start you set, or
   // to the top of the stem if you haven't set one yet.
   el("play").addEventListener("click", () => {
     if (!picker) return;
-    if (!playing) playFrom(picker.start === null ? 0 : picker.start);
-    else pausePlay();
+    if (playing) { pausePlay(); return; }
+    if (trimming()) auditionTrim();
+    else playFrom(picker.start === null ? 0 : picker.start);
   });
 
   el("build").addEventListener("click", buildBeat);
+  el("fade").addEventListener("click", () => answerTrim("fade"));
+  el("keep").addEventListener("click", () => answerTrim("keep"));
 
   // The keyboard is the picker. Space marks the end and the arrows walk the
   // start onto the one - but only while the picker is open, and never while
@@ -1754,11 +1998,17 @@
     // by ear.
     if (event.code === "Space") {
       if (el("play").disabled) return;
+      // Trimming has no end to mark, so space is only ever play/pause.
+      if (trimming()) { if (playing) pausePlay(); else auditionTrim(); return; }
       if (!playing) playFrom(picker.start === null ? 0 : picker.start);
       else markEnd();
       return;
     }
     const direction = event.code === "ArrowLeft" ? -1 : 1;
+    if (trimming()) {
+      moveTrim(direction * (event.shiftKey ? TRIM_STRIDE_SEC : TRIM_NUDGE_SEC));
+      return;
+    }
     if (event.shiftKey) slideSection(direction);
     else nudgeStart(direction);
   });

@@ -70,7 +70,7 @@ class PipelineTestCase(unittest.TestCase):
         # orchestration, so the sanitizer is stood in for throughout.
         sanitize = mock.patch(
             "song_sanitizer.sanitize_new_downloads",
-            side_effect=lambda filenames, output_dir, interactive=True: list(filenames),
+            side_effect=lambda filenames, output_dir, interactive=True, review=None: list(filenames),
         )
         self.mock_sanitize = sanitize.start()
         self.addCleanup(sanitize.stop)
@@ -93,6 +93,23 @@ class PipelineTestCase(unittest.TestCase):
 
     def _stages(self):
         return [e["stage"] for e in self.events]
+
+
+class TestReviewingATrim(PipelineTestCase):
+    """An ambiguous intro or outro has somewhere to go for an answer."""
+
+    def test_a_reviewer_reaches_the_sanitizer(self):
+        def review(flag):
+            return {"action": "keep"}
+
+        self._run(on_review=review)
+
+        self.assertIs(self.mock_sanitize.call_args.kwargs["review"], review)
+
+    def test_without_one_the_sanitizer_is_left_to_decide_alone(self):
+        self._run()
+
+        self.assertIsNone(self.mock_sanitize.call_args.kwargs["review"])
 
 
 class TestSongOnlyRun(PipelineTestCase):

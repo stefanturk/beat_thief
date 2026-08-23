@@ -421,6 +421,7 @@ def run(
     on_event=None,
     should_cancel=None,
     interactive: bool | None = None,
+    on_review=None,
 ) -> dict:
     """Download url into output_dir, sanitize it, and isolate the requested
     instruments. Returns a result dict describing what happened.
@@ -430,7 +431,13 @@ def run(
     sanitizer and tempo detection would otherwise ask (see
     song_sanitizer.auto_resolve_flags and
     instrument_isolator.song_alignment) - what the GUI passes, since it has
-    no way to answer them.
+    no way to answer them in a terminal.
+
+    on_review is the exception to that: given one, an ambiguous intro or
+    outro is put to it rather than decided alone (see
+    song_sanitizer.review_flags), and the run waits on the answer. The GUI
+    passes one because it can ask - it just asks in a window. Nothing else
+    does, so every other caller is unchanged.
 
     Cancelling: should_cancel is polled between stages and during the slow
     demucs work. On cancel the run stops where it is and reports what it had
@@ -518,7 +525,9 @@ def run(
         on_event({"stage": "sanitizing"})
         try:
             sanitized = song_sanitizer.sanitize_new_downloads(
-                download.filenames, output_dir, interactive=(interactive is not False)
+                download.filenames, output_dir,
+                interactive=(interactive is not False),
+                review=on_review,
             )
         except Exception as e:
             on_event({"stage": "warning", "message": f"Sanitizing hit a snag, but your downloads are safe: {e}"})

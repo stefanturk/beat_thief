@@ -59,6 +59,10 @@ class Api:
         self._beat_lock = threading.Lock()
         self._beat_thread = None
         self._beat_state = self._idle_beat_state()
+        # A trim the run is waiting on somebody to answer. The worker thread
+        # blocks on the event; the page answers through resolve_trim.
+        self._review_answered = threading.Event()
+        self._review_decision = None
 
     @staticmethod
     def _idle_state() -> dict:
@@ -71,6 +75,8 @@ class Api:
             "error": "",
             "cancelled": False,
             "output_dir": DEFAULT_OUTPUT,
+            # The intro or outro currently waiting on a decision, if any.
+            "review": None,
         }
 
     @staticmethod
@@ -130,6 +136,11 @@ class Api:
         demucs, so this takes effect within a second or so rather than
         instantly - the page shows "Stopping..." in the meantime."""
         self._cancel.set()
+        # A run parked on a trim decision is blocked in _on_review, which
+        # polls this flag - without the nudge it would sit there for another
+        # fifth of a second doing nothing, and with a longer wait it would
+        # sit there for that.
+        self._review_answered.set()
         with self._lock:
             if self._state["running"]:
                 self._state["message"] = "Stopping..."
@@ -175,6 +186,41 @@ class Api:
 
     def default_output_dir(self) -> str:
         return DEFAULT_OUTPUT
+
+    # --- deciding where a song starts and ends ---------------------------
+
+    def review_audio(self, path: str) -> dict:
+        """The song itself, ready to play and draw - the same preparation the
+        beat picker gets, pointed at an mp3 instead of a drum stem.
+
+        audition.preview() is ffmpeg all the way down and never cared what
+        kind of file it was handed, so this is the whole of what a second
+        waveform needs. The kicks it works out along the way are simply not
+        used here; a fade point has nothing to do with the drummer."""
+        try:
+            return audition.preview(path)
+        except Exception as e:
+            return {"error": str(e)}
+
+    def resolve_trim(self, cut_sec: float, action: str = "fade") -> dict:
+        """Answer the intro or outro the run is waiting on.
+
+        Returns the state the page should show, which is the run carrying on
+        - answering is the thing that unblocks it."""
+        with self._lock:
+            pending = self._state.get("review")
+        if not pending:
+            # Nothing is waiting: a second click on the same button, or a
+            # decision that arrived after a cancel. Saying so beats
+            # unblocking something that isn't there.
+            return self.status()
+
+        self._review_decision = {
+            "action": "fade" if action == "fade" else "keep",
+            "cut_ms": int(round(max(0.0, float(cut_sec)) * 1000)),
+        }
+        self._review_answered.set()
+        return self.status()
 
     # --- stealing a beat out of a stem ----------------------------------
 
@@ -336,6 +382,42 @@ class Api:
             self._state["error"] = message
             return dict(self._state)
 
+    def _on_review(self, flag: dict) -> dict:
+        """Put one ambiguous intro or outro to the page and wait for it.
+
+        This runs on the worker thread and blocks it on purpose: the whole
+        point is that nothing gets isolated from a song whose start or end is
+        still in question, because every stem, tempo and beat taken from it
+        would inherit the answer.
+
+        A cancel releases it as "keep" - a run being stopped must never be
+        the thing that rewrites a file."""
+        self._review_decision = None
+        self._review_answered.clear()
+        with self._lock:
+            self._state["stage"] = "reviewing"
+            self._state["message"] = (
+                "Where does the song start?" if flag["end"] == "start"
+                else "Where does the song end?")
+            self._state["review"] = {
+                "path": flag.get("path", flag["filename"]),
+                "filename": flag["filename"],
+                "end": flag["end"],
+                "cut_sec": round(flag["cut_ms"] / 1000.0, 3),
+            }
+
+        # Polled rather than waited on outright, so a cancel gets us out of
+        # here even though it has no way to set this event itself.
+        while not self._review_answered.wait(0.2):
+            if self._cancel.is_set():
+                break
+
+        decision = self._review_decision or {"action": "keep"}
+        self._review_decision = None
+        with self._lock:
+            self._state["review"] = None
+        return decision
+
     def _work(self, url, output_dir, instruments, song=""):
         try:
             if song:
@@ -354,6 +436,7 @@ class Api:
                     on_event=self._on_event,
                     should_cancel=self._cancel.is_set,
                     interactive=False,
+                    on_review=self._on_review,
                 )
         except BaseException as e:
             # Includes Cancelled and anything a dependency throws: a worker
