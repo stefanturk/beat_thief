@@ -447,8 +447,11 @@ class TestSanitizeFile(unittest.TestCase):
         self.assertTrue(os.path.exists(copy_path))
         self.assertAlmostEqual(len(sanitizer.load_audio(copy_path)), original_len, delta=200)
 
-    @mock.patch("song_sanitizer._prompt_choice")
-    def test_auto_fades_ambiguous_outro_without_prompting(self, mock_prompt_choice):
+    def test_an_ambiguous_outro_is_held_for_review_like_an_intro(self):
+        # It used to be faded here and now, on the reasoning that only the
+        # start matters for beat-1 and BPM. But a song that trails off over
+        # its last bars is exactly where the fade wants moving, and being
+        # decided already left nowhere to move it from.
         filename = "Song - Artist.mp3"
         original_path = os.path.join(self.tmp_dir, filename)
         loud_body = _tone(5000, dbfs_gain=-3)
@@ -458,11 +461,13 @@ class TestSanitizeFile(unittest.TestCase):
 
         new_flags = sanitizer.sanitize_file(filename, self.tmp_dir)
 
-        self.assertEqual(new_flags, [])
-        mock_prompt_choice.assert_not_called()
+        self.assertEqual(len(new_flags), 1)
+        self.assertEqual(new_flags[0]["end"], "end")
+        self.assertAlmostEqual(new_flags[0]["cut_ms"], 5000, delta=600)
+
+        # Nothing has been done to the audio yet - that waits on the answer.
         copy_path = os.path.join(self.tmp_dir, filename)
         self.assertTrue(os.path.exists(copy_path))
-        # Faded in place, not trimmed away - length is essentially unchanged.
         self.assertAlmostEqual(len(sanitizer.load_audio(copy_path)), len(track), delta=200)
 
     def test_auto_trims_silent_intro_and_replaces_the_original(self):
@@ -772,6 +777,153 @@ class TestAutoResolveFlags(unittest.TestCase):
     def test_no_flags_does_nothing(self):
         sanitizer.auto_resolve_flags([], self.tmp_dir)
         self.assertEqual(os.listdir(self.tmp_dir), [])
+
+
+class TestReviewFlags(unittest.TestCase):
+    """Resolving flags by asking somebody who isn't at a terminal - the GUI's
+    path through the same decision resolve_flags() prompts for."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _flagged_song(self, filename="Song - Artist.mp3"):
+        path = os.path.join(self.tmp_dir, filename)
+        track = _tone(3000, dbfs_gain=-45) + _tone(5000, dbfs_gain=-3)
+        sanitizer.export_audio(track, path)
+        flags = sanitizer.sanitize_file(filename, self.tmp_dir)
+        self.assertEqual(len(flags), 1)  # guard: the fixture really is ambiguous
+        return path, flags, len(track)
+
+    def test_it_is_asked_once_per_flag_and_told_where_the_file_is(self):
+        path, flags, _ = self._flagged_song()
+        asked = []
+
+        sanitizer.review_flags(flags, self.tmp_dir, lambda flag: asked.append(flag) or {"action": "keep"})
+
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0]["end"], "start")
+        # The bare filename is enough to open a file from here and no use at
+        # all to a caller that has to draw it.
+        self.assertEqual(asked[0]["path"], path)
+
+    def test_the_point_it_answers_with_is_the_point_that_gets_faded(self):
+        # Not the point that was suggested. The whole reason to ask is that
+        # the suggestion might be in the wrong place.
+        path, flags, original_len = self._flagged_song()
+        moved = flags[0]["cut_ms"] + 1500
+        before = sanitizer.load_audio(path)
+        louder_half = sanitizer._region_dbfs(before, flags[0]["cut_ms"], moved)
+
+        sanitizer.review_flags(flags, self.tmp_dir, lambda flag: {"action": "fade", "cut_ms": moved})
+
+        after = sanitizer.load_audio(path)
+        self.assertAlmostEqual(len(after), original_len, delta=200)  # faded, not cut
+        self.assertLess(sanitizer._region_dbfs(after, flags[0]["cut_ms"], moved), louder_half)
+
+    def test_keeping_it_leaves_the_audio_exactly_as_it_was(self):
+        # The file is still written to - it gets marked so a later run never
+        # asks about this region again - but not a sample of it changes.
+        path, flags, _ = self._flagged_song()
+        before = sanitizer.load_audio(path)
+
+        sanitizer.review_flags(flags, self.tmp_dir, lambda flag: {"action": "keep"})
+
+        after = sanitizer.load_audio(path)
+        self.assertEqual(len(after), len(before))
+        self.assertEqual(after.raw_data, before.raw_data)
+
+    def test_it_never_cuts_however_it_is_answered(self):
+        # A fade can only soften audio that is already there, so a region
+        # flagged in error survives one. A wrong cut takes the opening of a
+        # song away for good, and nothing about a flagged region is
+        # confident enough to do that unasked.
+        path, flags, original_len = self._flagged_song()
+
+        sanitizer.review_flags(flags, self.tmp_dir, lambda flag: {"action": "cut"})
+
+        self.assertAlmostEqual(len(sanitizer.load_audio(path)), original_len, delta=200)
+
+    def test_an_answer_off_the_end_of_the_song_is_pulled_back_in(self):
+        path, flags, original_len = self._flagged_song()
+
+        sanitizer.review_flags(flags, self.tmp_dir, lambda flag: {"action": "fade", "cut_ms": 10 ** 9})
+
+        self.assertAlmostEqual(len(sanitizer.load_audio(path)), original_len, delta=200)
+
+    def test_it_marks_the_file_so_a_later_run_never_re_flags_it(self):
+        path, flags, _ = self._flagged_song()
+
+        sanitizer.review_flags(flags, self.tmp_dir, lambda flag: {"action": "keep"})
+
+        self.assertTrue(sanitizer._is_already_sanitized(path))
+
+    def test_it_preserves_id3_tags_across_the_re_export(self):
+        path, flags, _ = self._flagged_song()
+        sanitizer.write_id3_tags(path, "Real Title", "Real Artist")
+
+        sanitizer.review_flags(flags, self.tmp_dir, lambda flag: {"action": "fade"})
+
+        tags = EasyID3(path)
+        self.assertEqual(tags.get("title", [""])[0], "Real Title")
+        self.assertEqual(tags.get("artist", [""])[0], "Real Artist")
+
+    def test_a_reviewer_that_blows_up_does_not_take_the_run_with_it(self):
+        path, flags, original_len = self._flagged_song()
+
+        def explode(flag):
+            raise RuntimeError("boom")
+
+        sanitizer.review_flags(flags, self.tmp_dir, explode)
+
+        self.assertAlmostEqual(len(sanitizer.load_audio(path)), original_len, delta=200)
+
+    def test_a_missing_file_is_never_asked_about(self):
+        asked = []
+        sanitizer.review_flags(
+            [{"filename": "Gone.mp3", "end": "start", "cut_ms": 1000}],
+            self.tmp_dir,
+            lambda flag: asked.append(flag) or {"action": "fade"},
+        )
+        self.assertEqual(asked, [])
+
+
+class TestSanitizeNewDownloadsReview(unittest.TestCase):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _ambiguous_download(self, filename="Song - Artist.mp3"):
+        path = os.path.join(self.tmp_dir, filename)
+        sanitizer.export_audio(_tone(3000, dbfs_gain=-45) + _tone(5000, dbfs_gain=-3), path)
+        return filename
+
+    @mock.patch("song_sanitizer.resolve_flags")
+    @mock.patch("song_sanitizer.auto_resolve_flags")
+    def test_a_reviewer_is_used_in_place_of_both_other_paths(self, mock_auto, mock_resolve):
+        filename = self._ambiguous_download()
+        asked = []
+
+        sanitizer.sanitize_new_downloads(
+            [filename], self.tmp_dir, interactive=False,
+            review=lambda flag: asked.append(flag) or {"action": "keep"},
+        )
+
+        self.assertEqual(len(asked), 1)
+        mock_auto.assert_not_called()
+        mock_resolve.assert_not_called()
+
+    @mock.patch("song_sanitizer.auto_resolve_flags")
+    def test_without_one_a_non_interactive_run_still_decides_alone(self, mock_auto):
+        filename = self._ambiguous_download()
+
+        sanitizer.sanitize_new_downloads([filename], self.tmp_dir, interactive=False)
+
+        mock_auto.assert_called_once()
 
 
 class TestSanitizeFileReplace(unittest.TestCase):

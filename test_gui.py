@@ -760,6 +760,113 @@ class TestStealBeatAsync(unittest.TestCase):
         self.assertEqual(mock_steal.call_args.kwargs.get("outputs"), "wav")
 
 
+class TestReviewingATrim(unittest.TestCase):
+    """The run stops at an ambiguous intro or outro and waits to be told.
+
+    That waiting is the point: every stem, tempo and beat taken from a song
+    inherits where it was decided to start, and by the time those exist the
+    decision is expensive to change."""
+
+    def setUp(self):
+        self.api = gui.Api()
+
+    def _asking(self, end="start", cut_ms=3000):
+        """Run _on_review on a thread, as the pipeline would, and hand back
+        the thread plus somewhere its answer lands."""
+        answer = {}
+        flag = {"filename": "Song - Artist.mp3", "path": "/songs/Song - Artist.mp3",
+                "end": end, "cut_ms": cut_ms}
+        asking = threading.Thread(
+            target=lambda: answer.update(self.api._on_review(flag)), daemon=True)
+        asking.start()
+        self.assertTrue(_wait_until(lambda: self.api.status().get("review")))
+        return asking, answer
+
+    def test_it_waits_rather_than_deciding_for_itself(self):
+        asking, _ = self._asking()
+
+        self.assertTrue(asking.is_alive())
+        asking.join(0.1)
+        self.assertTrue(asking.is_alive())
+
+        self.api.resolve_trim(3.0, "keep")
+        asking.join(timeout=2)
+        self.assertFalse(asking.is_alive())
+
+    def test_the_page_is_told_what_is_being_decided(self):
+        self._asking(end="end", cut_ms=214500)
+
+        review = self.api.status()["review"]
+        self.assertEqual(review["path"], "/songs/Song - Artist.mp3")
+        self.assertEqual(review["end"], "end")
+        self.assertAlmostEqual(review["cut_sec"], 214.5)
+
+        self.api.resolve_trim(0, "keep")
+
+    def test_the_answer_is_the_one_that_was_given(self):
+        asking, answer = self._asking()
+
+        self.api.resolve_trim(12.75, "fade")
+        asking.join(timeout=2)
+
+        self.assertEqual(answer, {"action": "fade", "cut_ms": 12750})
+
+    def test_anything_that_is_not_a_fade_leaves_the_song_alone(self):
+        asking, answer = self._asking()
+
+        self.api.resolve_trim(4.0, "whatever the page sent")
+        asking.join(timeout=2)
+
+        self.assertEqual(answer["action"], "keep")
+
+    def test_the_question_is_taken_down_once_it_is_answered(self):
+        asking, _ = self._asking()
+
+        self.api.resolve_trim(1.0, "fade")
+        asking.join(timeout=2)
+
+        self.assertIsNone(self.api.status()["review"])
+
+    def test_cancelling_releases_it_without_touching_the_song(self):
+        # A run being stopped must never be the thing that rewrites a file.
+        asking, answer = self._asking()
+
+        self.api.cancel()
+        asking.join(timeout=2)
+
+        self.assertFalse(asking.is_alive())
+        self.assertEqual(answer["action"], "keep")
+
+    def test_answering_when_nothing_is_pending_is_refused(self):
+        # A second click on the same button, or a decision that arrived
+        # after a cancel. Unblocking something that isn't there would
+        # release the *next* question unanswered.
+        state = self.api.resolve_trim(5.0, "fade")
+
+        self.assertIsNone(state["review"])
+        self.assertIsNone(self.api._review_decision)
+        self.assertFalse(self.api._review_answered.is_set())
+
+    def test_an_idle_api_has_nothing_under_review(self):
+        self.assertIsNone(self.api.status()["review"])
+
+
+class TestReviewAudio(unittest.TestCase):
+    def test_it_hands_back_what_the_page_needs_to_draw_a_song(self):
+        prepared = {"peaks": [0.5], "duration": 12.0, "audio": "data:...", "lead": 0.0}
+        with mock.patch("audition.preview", return_value=prepared) as preview:
+            got = gui.Api().review_audio("/songs/Song - Artist.mp3")
+
+        self.assertEqual(got, prepared)
+        preview.assert_called_once_with("/songs/Song - Artist.mp3")
+
+    def test_a_song_it_cannot_read_says_so_instead_of_raising(self):
+        with mock.patch("audition.preview", side_effect=RuntimeError("no such codec")):
+            got = gui.Api().review_audio("/songs/Broken.mp3")
+
+        self.assertIn("no such codec", got["error"])
+
+
 class TestUiFile(unittest.TestCase):
     def test_the_page_the_window_loads_actually_exists(self):
         self.assertTrue(os.path.exists(gui.UI_FILE), gui.UI_FILE)

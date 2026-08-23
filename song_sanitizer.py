@@ -384,6 +384,77 @@ def _prompt_adjust_seconds() -> float:
             print("  Please enter a number.")
 
 
+def _existing_title_artist(path: str) -> tuple[str, str]:
+    """The title/artist already on a file, since re-exporting drops them."""
+    try:
+        tags = EasyID3(path)
+        return tags.get("title", [""])[0], tags.get("artist", [""])[0]
+    except Exception:
+        return "", ""
+
+
+def apply_review(path: str, end: str, cut_ms: int, action: str) -> None:
+    """Carry out one decision about one flagged region, in place.
+
+    The single place a reviewed cut or fade is actually performed, so the
+    terminal path and the window path cannot drift apart on what "fade the
+    outro at 3:12" means. "keep" (or anything unrecognised) does nothing at
+    all, deliberately: leaving the file untouched has to be a real answer."""
+    if action not in ("cut", "fade"):
+        return
+
+    audio = load_audio(path)
+    title, artist = _existing_title_artist(path)
+
+    if action == "cut":
+        result = trim(
+            audio,
+            cut_ms if end == "start" else None,
+            cut_ms if end == "end" else None,
+        )
+    else:
+        result = apply_fade(audio, end, cut_ms)
+
+    export_audio(result, path)
+    write_id3_tags(path, title, artist)
+
+
+def review_flags(flags: list[dict], output_dir: str, review) -> None:
+    """Resolve ambiguous cut flags by asking `review` — the counterpart to
+    resolve_flags() for a caller that can ask, but not through a terminal.
+
+    `review(flag)` is handed one flag at a time and returns
+    {"action": "fade" | "keep", "cut_ms": int}: where the region really
+    begins or ends, and whether to do anything about it. It is free to block
+    for as long as it takes somebody to listen.
+
+    It only ever fades. A fade can only soften audio that is already there,
+    so a region flagged in error survives being faded, where a wrong cut
+    takes the opening or the ending of a song away for good — and the whole
+    reason these are flagged rather than trimmed outright is that nothing is
+    confident about them."""
+    for flag in flags:
+        filename = flag["filename"]
+        path = os.path.join(output_dir, filename)
+        try:
+            if not os.path.exists(path):
+                continue
+
+            # The flag itself only ever knew a bare filename, which is
+            # enough to open it from here and no use at all to a caller that
+            # has to draw the thing. Hand over what it needs.
+            decision = review(dict(flag, path=path)) or {}
+            action = "fade" if decision.get("action") == "fade" else "keep"
+            cut_ms = int(decision.get("cut_ms", flag["cut_ms"]))
+            audio_ms = len(load_audio(path))
+            cut_ms = max(0, min(audio_ms, cut_ms))
+
+            apply_review(path, flag["end"], cut_ms, action)
+            _mark_as_sanitized(path)
+        except Exception as e:
+            print(f"  Could not review {filename}, leaving it as-is: {e}")
+
+
 def resolve_flags(flags: list[dict], output_dir: str) -> None:
     """Interactively resolve ambiguous cut flags, one at a time, modifying
     each flagged file in place. Purely in-memory — if interrupted partway
@@ -421,24 +492,9 @@ def resolve_flags(flags: list[dict], output_dir: str) -> None:
                 continue
 
             if choice in ("c", "f"):
-                # Re-exporting drops any existing ID3 tags, so preserve
-                # title/artist across the re-export.
-                try:
-                    existing_tags = EasyID3(path)
-                    title = existing_tags.get("title", [""])[0]
-                    artist = existing_tags.get("artist", [""])[0]
-                except Exception:
-                    title, artist = "", ""
+                apply_review(path, end, cut_ms, "cut" if choice == "c" else "fade")
 
             if choice == "c":
-                result_audio = trim(
-                    audio,
-                    cut_ms if end == "start" else None,
-                    cut_ms if end == "end" else None,
-                )
-                export_audio(result_audio, path)
-                write_id3_tags(path, title, artist)
-
                 # Cutting shortens the audio, which invalidates absolute
                 # cut_ms offsets stored by any other pending flag for this
                 # same file. A start-cut shifts everything earlier by cut_ms;
@@ -448,10 +504,6 @@ def resolve_flags(flags: list[dict], output_dir: str) -> None:
                     for other in remaining[1:]:
                         if other["filename"] == filename and other["end"] == "end":
                             other["cut_ms"] = max(0, other["cut_ms"] - cut_ms)
-            elif choice == "f":
-                result_audio = apply_fade(audio, end, cut_ms)
-                export_audio(result_audio, path)
-                write_id3_tags(path, title, artist)
 
             remaining.pop(0)
             if not any(f["filename"] == filename for f in remaining):
@@ -479,19 +531,7 @@ def auto_resolve_flags(flags: list[dict], output_dir: str) -> None:
             if not os.path.exists(path):
                 continue
 
-            audio = load_audio(path)
-
-            # Re-exporting drops any existing ID3 tags, so preserve
-            # title/artist across the re-export (same as resolve_flags).
-            try:
-                existing_tags = EasyID3(path)
-                title = existing_tags.get("title", [""])[0]
-                artist = existing_tags.get("artist", [""])[0]
-            except Exception:
-                title, artist = "", ""
-
-            export_audio(apply_fade(audio, flag["end"], flag["cut_ms"]), path)
-            write_id3_tags(path, title, artist)
+            apply_review(path, flag["end"], flag["cut_ms"], "fade")
             _mark_as_sanitized(path)
         except Exception as e:
             print(f"  Could not fade {filename}, leaving it as-is: {e}")
@@ -561,12 +601,12 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
                 trim_start_ms = candidate["cut_ms"]
             else:
                 trim_end_ms = candidate["cut_ms"]
-        elif end_key == "end":
-            # Only the start matters for beat-1/BPM accuracy, so an
-            # ambiguous ending is auto-faded rather than held for review —
-            # no snippet playback, no prompt.
-            audio = apply_fade(audio, "end", candidate["cut_ms"])
         else:
+            # Both ends are held for review. An ambiguous ending used to be
+            # faded on the spot, on the reasoning that only the start matters
+            # for beat-1 and BPM — but a song that fades out over its last
+            # bars is exactly the case where the fade wants moving, and there
+            # was nowhere to move it from.
             new_flags.append({"filename": filename, "end": end_key, "cut_ms": candidate["cut_ms"]})
 
     needs_trim = trim_start_ms is not None or trim_end_ms is not None
@@ -676,7 +716,8 @@ def sanitize_folder(output_dir: str) -> None:
         resolve_flags(all_flags, output_dir)
 
 
-def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: bool = True) -> list[str]:
+def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: bool = True,
+                           review=None) -> list[str]:
     """Sanitize exactly the given (just-downloaded) filenames, rather than
     rescanning every mp3 already in output_dir - reprocessing/reporting on
     songs this run never touched is just noise. Duplicate detection still
@@ -689,9 +730,11 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
     chain further per-song work (e.g. isolating drums/bass) onto exactly
     what this run downloaded - not the whole library.
 
-    interactive=False resolves any ambiguous cut points by fading them (see
-    auto_resolve_flags) instead of playing snippets and prompting - for the
-    GUI and other callers with no terminal to answer from."""
+    review, if given, is asked about each ambiguous cut point instead of
+    either prompting or deciding alone (see review_flags) - what the GUI
+    passes, since it can ask, just not through a terminal. Without it,
+    interactive=False fades every flag unasked (auto_resolve_flags), for a
+    piped run with nobody there at all."""
     all_flags = []
     final_filenames = []
     for filename in filenames:
@@ -719,7 +762,9 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
     final_filenames = [f for f in final_filenames if os.path.exists(os.path.join(output_dir, f))]
 
     if all_flags:
-        if interactive:
+        if review is not None:
+            review_flags(all_flags, output_dir, review)
+        elif interactive:
             print(f"\n{len(all_flags)} song section(s) need your input.")
             resolve_flags(all_flags, output_dir)
         else:
