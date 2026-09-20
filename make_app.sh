@@ -56,6 +56,8 @@ fi
 SOURCES=(
     gui.py
     pipeline.py
+    spotify.py
+    youtube_match.py
     history.py
     song_sanitizer.py
     instrument_isolator.py
@@ -167,7 +169,10 @@ echo "--- \$(date) ---" >> "\$LOG"
 export PATH="$FFMPEG_DIR:/opt/homebrew/bin:/usr/local/bin:\$PATH"
 
 cd "\$(dirname "\$0")/../Resources" || exit 1
-/usr/bin/arch -$ARCH "$PYTHON" gui.py >> "\$LOG" 2>&1
+# -u because the log is a file, not a terminal: without it Python buffers
+# everything and a crash (or a force-quit) takes the buffer with it, so the
+# log stops at startup and the one thing worth reading is never written.
+/usr/bin/arch -$ARCH "$PYTHON" -u gui.py >> "\$LOG" 2>&1
 status=\$?
 
 if [ \$status -ne 0 ]; then

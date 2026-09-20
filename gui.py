@@ -63,6 +63,10 @@ class Api:
         # blocks on the event; the page answers through resolve_trim.
         self._review_answered = threading.Event()
         self._review_decision = None
+        # The same arrangement for a Spotify link whose YouTube match isn't
+        # obvious: the worker blocks, the page answers through resolve_match.
+        self._choice_answered = threading.Event()
+        self._choice_decision = None
 
     @staticmethod
     def _idle_state() -> dict:
@@ -77,6 +81,8 @@ class Api:
             "output_dir": DEFAULT_OUTPUT,
             # The intro or outro currently waiting on a decision, if any.
             "review": None,
+            # The Spotify match currently waiting to be picked, if any.
+            "choice": None,
         }
 
     @staticmethod
@@ -104,6 +110,10 @@ class Api:
         if not song and not url:
             return self._fail("Paste a link first.")
 
+        # Checked unless the page says otherwise, so a caller that predates
+        # the switch - or a page that fails to send it - keeps tidying.
+        sanitize = options.get("sanitize", True) is not False
+
         instruments = [name for name in pipeline.INSTRUMENT_ORDER if options.get(name)]
         if song and not instruments:
             return self._fail("Nothing armed - pick what to take.")
@@ -120,7 +130,7 @@ class Api:
 
         self._thread = threading.Thread(
             target=self._work,
-            args=(url, output_dir, instruments, song),
+            args=(url, output_dir, instruments, song, sanitize),
             daemon=True,
         )
         self._thread.start()
@@ -141,6 +151,9 @@ class Api:
         # fifth of a second doing nothing, and with a longer wait it would
         # sit there for that.
         self._review_answered.set()
+        # Same again for a run parked on a Spotify match - forgetting this
+        # one is how a cancel turns into a wedged window.
+        self._choice_answered.set()
         with self._lock:
             if self._state["running"]:
                 self._state["message"] = "Stopping..."
@@ -220,6 +233,32 @@ class Api:
             "cut_ms": int(round(max(0.0, float(cut_sec)) * 1000)),
         }
         self._review_answered.set()
+        return self.status()
+
+    def skip_match(self) -> dict:
+        """Leave this song out and carry on with the rest.
+
+        Separate from cancel, which stops everything: in a playlist "none of
+        these" is about one song, and the other thirty-nine are still
+        wanted. For a single link the two come to the same thing, because
+        skipping the only song leaves nothing to do."""
+        return self.resolve_match("")
+
+    def resolve_match(self, url: str = "") -> dict:
+        """Answer the Spotify match the run is waiting on.
+
+        An empty url means "none of these", which skips that song. For a
+        single link that ends the run, since there's nothing else to go
+        on with."""
+        with self._lock:
+            pending = self._state.get("choice")
+        if not pending:
+            # Nothing is waiting: a double click, or an answer that arrived
+            # after a cancel.
+            return self.status()
+
+        self._choice_decision = {"url": url or None}
+        self._choice_answered.set()
         return self.status()
 
     # --- stealing a beat out of a stem ----------------------------------
@@ -418,7 +457,44 @@ class Api:
             self._state["review"] = None
         return decision
 
-    def _work(self, url, output_dir, instruments, song=""):
+    def _on_choose(self, request: dict) -> dict:
+        """Put the YouTube candidates for a Spotify track to the page and
+        wait for one to be picked.
+
+        Blocks the worker thread deliberately, for the same reason the trim
+        review does: the wrong recording here - a remaster, a live take - has
+        its own tempo and its own beat 1, and every grid made from it further
+        down would be built on that.
+
+        A cancel releases it with nothing picked, which stops the run."""
+        self._choice_decision = None
+        self._choice_answered.clear()
+        with self._lock:
+            self._state["stage"] = "choosing"
+            self._state["message"] = "Which one is it?"
+            self._state["choice"] = {
+                "query": request.get("query", ""),
+                "title": request.get("title", ""),
+                "artist": request.get("artist", ""),
+                "want_sec": request.get("want_sec"),
+                "candidates": list(request.get("candidates") or []),
+                # Which song of how many, when it's a playlist - so the card
+                # can say what it's asking about rather than just asking.
+                "index": request.get("index"),
+                "total": request.get("total"),
+            }
+
+        while not self._choice_answered.wait(0.2):
+            if self._cancel.is_set():
+                break
+
+        decision = self._choice_decision or {"url": None}
+        self._choice_decision = None
+        with self._lock:
+            self._state["choice"] = None
+        return decision
+
+    def _work(self, url, output_dir, instruments, song="", sanitize=True):
         try:
             if song:
                 result = self._isolate_pipeline(
@@ -436,7 +512,9 @@ class Api:
                     on_event=self._on_event,
                     should_cancel=self._cancel.is_set,
                     interactive=False,
-                    on_review=self._on_review,
+                    on_review=self._on_review if sanitize else None,
+                    on_choose=self._on_choose,
+                    sanitize=sanitize,
                 )
         except BaseException as e:
             # Includes Cancelled and anything a dependency throws: a worker
@@ -494,6 +572,10 @@ class Api:
 
         if stage == "looking-up":
             return "Looking up that link...", None
+        if stage == "resolving":
+            # A playlist is looked up one song at a time and that takes a
+            # while, so it says which song rather than sitting on one line.
+            return f"Matching {event['index']} of {event['total']} — {event['song']}", None
         if stage == "found":
             song = event.get("song")
             return (f"Found {song}" if song else "Downloading..."), None
