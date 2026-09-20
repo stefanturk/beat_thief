@@ -128,6 +128,29 @@ class TestApiStart(unittest.TestCase):
         self.assertEqual(calls["url"], "https://example.com/song")
         self.assertEqual(calls["instruments"], ["drums"])
 
+    def test_the_sanitize_switch_reaches_the_pipeline(self):
+        calls = {}
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+        api.start("https://example.com/song", {"song": True, "sanitize": False})
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertIs(calls["sanitize"], False)
+        # Nothing tidies, so nothing can ask about a trim - offering a
+        # reviewer anyway would hand the sanitizer a way to stop the run
+        # for a question the page has just said it doesn't want.
+        self.assertIsNone(calls["on_review"])
+
+    def test_tidying_is_what_happens_unless_the_page_says_otherwise(self):
+        """An older page, or one that failed to send the key, still gets the
+        behaviour it has always had."""
+        calls = {}
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+        api.start("https://example.com/song", {"song": True})
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertIs(calls["sanitize"], True)
+        self.assertIsNotNone(calls["on_review"])
+
     def test_a_song_flag_is_not_mistaken_for_a_song_path(self):
         # Same shape, but pointed at something already in the stash: the
         # path comes from "source", and the Song square's flag alongside it
@@ -214,6 +237,13 @@ class TestApiStatus(unittest.TestCase):
     def test_found_says_the_songs_name_when_it_knows_it(self):
         message, _ = gui.Api._describe({"stage": "found", "total": 1, "song": "Redbone"})
         self.assertIn("Redbone", message)
+
+    def test_matching_a_playlist_says_which_song_it_is_on(self):
+        """Resolving forty tracks is a minute of nothing to look at, so it
+        counts rather than sitting on one line."""
+        message, _ = gui.Api._describe(
+            {"stage": "resolving", "index": 3, "total": 8, "song": "Them Changes"})
+        self.assertEqual(message, "Matching 3 of 8 — Them Changes")
 
     def test_found_falls_back_when_it_is_a_playlist(self):
         message, _ = gui.Api._describe({"stage": "found", "total": 12, "song": None})
@@ -850,6 +880,22 @@ class TestReviewingATrim(unittest.TestCase):
     def test_an_idle_api_has_nothing_under_review(self):
         self.assertIsNone(self.api.status()["review"])
 
+    def test_a_song_whose_audio_will_not_load_can_still_be_answered(self):
+        # The page draws the waveform by calling review_audio, and that can
+        # fail - a codec, a path, a file that moved. When it did, the picker
+        # never opened, every button was inert, and the run stayed stopped
+        # for good with only an error to look at. Answering must not depend
+        # on the audio having loaded.
+        asking, answer = self._asking()
+        with mock.patch("audition.preview", side_effect=RuntimeError("no such file")):
+            self.assertIn("no such file", self.api.review_audio("/gone.mp3")["error"])
+
+        self.api.resolve_trim(3.0, "fade")
+        asking.join(timeout=2)
+
+        self.assertFalse(asking.is_alive())
+        self.assertEqual(answer, {"action": "fade", "cut_ms": 3000})
+
 
 class TestReviewAudio(unittest.TestCase):
     def test_it_hands_back_what_the_page_needs_to_draw_a_song(self):
@@ -882,6 +928,146 @@ class TestUiFile(unittest.TestCase):
         for name in sorted(called):
             with self.subTest(method=name):
                 self.assertTrue(callable(getattr(gui.Api, name, None)))
+
+    def test_leaving_a_song_out_skips_it_rather_than_cancelling(self):
+        # The button used to end the run. With a playlist behind it that
+        # would throw away every song after the one being asked about, and
+        # nothing in Python would notice - the page decides which call it
+        # makes.
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        self.assertIn("pywebview.api.skip_match()", html)
+        self.assertNotIn('resolve_match("")', html)
+
+    def test_the_sanitize_switch_is_on_the_page_and_starts_checked(self):
+        # start() defaults a missing key to on, so a checkbox that lost its
+        # "checked" would quietly do nothing - the box would look off and
+        # the run would tidy anyway.
+        with open(gui.UI_FILE) as page:
+            markup = page.read()
+        box = re.search(r'<input[^>]*id="sanitize"[^>]*>', markup)
+        self.assertIsNotNone(box, "the page has no Sanitize checkbox")
+        self.assertIn("checked", box.group(0))
+        self.assertIn('options.sanitize = el("sanitize").checked', markup)
+
+
+class TestChoosingAMatch(unittest.TestCase):
+    """A Spotify link names a song; several YouTube uploads answer to that
+    name. When it isn't obvious which is the right recording the run stops
+    and asks, for the same reason a trim does: a remaster or a live take has
+    its own tempo and its own beat 1, and everything made downstream is
+    built on whichever one was taken."""
+
+    def setUp(self):
+        self.api = gui.Api()
+
+    def _asking(self, titles=("Official Video", "2022 Remaster"), index=None, total=None):
+        """Run _on_choose on a thread, as the pipeline would."""
+        answer = {}
+        request = {
+            "query": "Rick Astley Never Gonna Give You Up",
+            "title": "Never Gonna Give You Up",
+            "artist": "Rick Astley",
+            "want_sec": 213.573,
+            "candidates": [
+                {"url": "https://www.youtube.com/watch?v=" + str(i), "title": title,
+                 "channel": "Rick Astley", "duration": 213.4, "offset": 0.2}
+                for i, title in enumerate(titles)
+            ],
+            "index": index,
+            "total": total,
+        }
+        asking = threading.Thread(
+            target=lambda: answer.update(self.api._on_choose(request)), daemon=True)
+        asking.start()
+        self.assertTrue(_wait_until(lambda: self.api.status().get("choice")))
+        return asking, answer
+
+    def test_it_waits_rather_than_guessing(self):
+        asking, _ = self._asking()
+
+        self.assertTrue(asking.is_alive())
+        asking.join(0.1)
+        self.assertTrue(asking.is_alive())
+
+        self.api.resolve_match("https://www.youtube.com/watch?v=0")
+        asking.join(timeout=2)
+        self.assertFalse(asking.is_alive())
+
+    def test_the_page_is_given_everything_it_needs_to_draw_the_list(self):
+        self._asking()
+
+        choice = self.api.status()["choice"]
+        self.assertEqual(choice["artist"], "Rick Astley")
+        self.assertEqual(choice["title"], "Never Gonna Give You Up")
+        self.assertAlmostEqual(choice["want_sec"], 213.573, places=2)
+        self.assertEqual(len(choice["candidates"]), 2)
+        self.assertEqual(choice["candidates"][0]["channel"], "Rick Astley")
+        self.assertEqual(self.api.status()["stage"], "choosing")
+
+    def test_the_answer_is_the_url_that_was_picked(self):
+        asking, answer = self._asking()
+        self.api.resolve_match("https://www.youtube.com/watch?v=1")
+        asking.join(timeout=2)
+        self.assertEqual(answer, {"url": "https://www.youtube.com/watch?v=1"})
+
+    def test_none_of_these_comes_back_with_nothing_picked(self):
+        asking, answer = self._asking()
+        self.api.resolve_match("")
+        asking.join(timeout=2)
+        self.assertEqual(answer, {"url": None})
+
+    def test_the_list_comes_off_the_page_once_it_is_answered(self):
+        asking, _ = self._asking()
+        self.api.resolve_match("https://www.youtube.com/watch?v=0")
+        asking.join(timeout=2)
+        self.assertIsNone(self.api.status()["choice"])
+
+    def test_cancelling_releases_it_rather_than_wedging_the_window(self):
+        """The same hang that had to be fixed once for trim reviews: without
+        cancel setting this event, stopping a run parked on the list leaves
+        the worker thread blocked forever and the app unusable."""
+        asking, answer = self._asking()
+
+        self.api.cancel()
+        asking.join(timeout=2)
+        self.assertFalse(asking.is_alive())
+        self.assertEqual(answer, {"url": None})
+
+    def test_answering_when_nothing_is_waiting_does_nothing(self):
+        """A second click on a row, or an answer that arrives after a
+        cancel. Saying so beats unblocking something that isn't there."""
+        state = self.api.resolve_match("https://www.youtube.com/watch?v=0")
+        self.assertIsNone(state["choice"])
+        self.assertIsNone(self.api._choice_decision)
+
+    def test_an_idle_window_has_no_choice_pending(self):
+        self.assertIsNone(self.api.status()["choice"])
+
+    def test_skipping_is_a_separate_answer_from_cancelling(self):
+        """In a playlist "none of these" is about one song; the other
+        thirty-nine are still wanted. So skip releases the run with nothing
+        picked, and leaves the cancel flag alone."""
+        asking, answer = self._asking()
+        self.api.skip_match()
+        asking.join(timeout=2)
+        self.assertEqual(answer, {"url": None})
+        self.assertFalse(self.api._cancel.is_set())
+
+    def test_the_card_is_told_which_song_of_how_many(self):
+        """Asked about song 3 of 8, it should say so rather than asking the
+        same question eight times with no way to tell them apart."""
+        asking, _ = self._asking(index=3, total=8)
+        choice = self.api.status()["choice"]
+        self.assertEqual((choice["index"], choice["total"]), (3, 8))
+        self.api.skip_match()
+        asking.join(timeout=2)
+
+    def test_a_single_link_carries_no_position(self):
+        self._asking()
+        choice = self.api.status()["choice"]
+        self.assertIsNone(choice["index"])
+        self.assertIsNone(choice["total"])
 
 
 if __name__ == "__main__":

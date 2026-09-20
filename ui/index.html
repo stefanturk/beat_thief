@@ -200,6 +200,7 @@
   .extras label { display: flex; align-items: center; gap: 7px; cursor: pointer; }
   .extras input { accent-color: var(--violet); margin: 0; }
   .extras .aside { color: #5b5d64; }
+  .extras label[data-off="true"] { opacity: 0.4; cursor: default; }
 
   /* The readout: progress while working, tempo when finished. */
   .readout {
@@ -518,6 +519,42 @@
     cursor: crosshair;
   }
 
+  .choice {
+    margin-top: 10px;
+    padding: 12px;
+    background: #0d0e11;
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+  }
+  .choice[hidden] { display: none; }
+  #choice-hint { color: #5b5d64; letter-spacing: 0.04em; text-transform: none; font-size: 11px; }
+
+  #choice-list { list-style: none; margin: 0; padding: 0; }
+  #choice-list button {
+    display: block;
+    width: 100%;
+    margin-bottom: 6px;
+    padding: 9px 11px;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    color: var(--ink);
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+  #choice-list button:hover { border-color: var(--violet); }
+  .choice-name { display: block; font-size: 13px; }
+  /* Channel, length, and how far that is from what Spotify says - the three
+     things that actually separate the right recording from a remaster. */
+  .choice-meta {
+    display: block;
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--dim);
+  }
+  .choice-off { color: #5b5d64; }
+
   .picker-controls {
     display: flex;
     align-items: center;
@@ -596,7 +633,17 @@
         <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
         <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
       </div>
+      <!--
+        Sanitize belongs with Song rather than with the run as a whole: it's
+        what happens to the song file after it lands - trimmed, renamed,
+        checked against the stash for duplicates - and it's the only part of
+        a run that stops to ask you anything. Off, a long playlist goes
+        through without a single question.
+      -->
       <div class="extras">
+        <label id="sanitize-wrap" title="Trim, tidy and de-duplicate what lands. Off: keep it exactly as downloaded.">
+          <input type="checkbox" id="sanitize" checked> Sanitize
+        </label>
         <span class="aside" id="take-note">All four stems rebuild the song.</span>
       </div>
     </section>
@@ -617,7 +664,7 @@
     <section class="picker" id="picker" hidden>
       <div class="picker-head">
         <span id="picker-title">Steal a beat</span>
-        <span id="picker-hint">Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — space at the next 1.</span>
+        <span id="picker-hint">Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — stop at the next 1 to end it.</span>
       </div>
       <canvas id="wave" width="1000" height="156"></canvas>
       <canvas id="detail" width="1000" height="104"></canvas>
@@ -629,6 +676,28 @@
         <button id="picker-close" type="button">Close</button>
         <span id="marked"></span>
         <span id="clock">0:00</span>
+      </div>
+    </section>
+
+    <!--
+      Spotify links land here. Deliberately a plain list and not the
+      waveform picker: there is no audio yet to draw, and the question is
+      "which of these recordings" rather than "where in this one".
+    -->
+    <section class="choice" id="choice" hidden>
+      <div class="picker-head">
+        <span id="choice-title">Which one is it?</span>
+        <span id="choice-hint">Spotify says what the song is; the audio comes from YouTube.</span>
+      </div>
+      <ul id="choice-list"></ul>
+      <div class="picker-controls">
+        <!--
+          Skip, not cancel: a playlist asks this question once per song it
+          isn't sure about, and leaving one out shouldn't throw the rest
+          away. For a single link there is nothing else to go on with, so
+          skipping it ends the run anyway.
+        -->
+        <button id="choice-none" type="button">Skip this song</button>
       </div>
     </section>
 
@@ -884,6 +953,15 @@
 
   function describeTake() {
     const armed = STASH_ORDER.filter(isArmed);
+    // A song taken from the stash is already downloaded and already tidied -
+    // there is nothing left to sanitize, so the switch says so rather than
+    // sitting there looking like it still does something.
+    const wrap = el("sanitize-wrap");
+    el("sanitize").disabled = !!selected;
+    wrap.dataset.off = selected ? "true" : "false";
+    wrap.title = selected
+      ? "Already in the stash — nothing left to tidy."
+      : "Trim, tidy and de-duplicate what lands. Off: keep it exactly as downloaded.";
     el("take-note").textContent = selected
       ? (armed.length ? "Taking " + armed.map((t) => (have(t) ? "another " : "") + LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
                       : "Nothing armed — click a square to take something from " + selected.title + ".")
@@ -1424,7 +1502,7 @@
         picker.lead = (prepared.lead || 0) + decoderLead(buffer, prepared.duration);
         el("play").disabled = false;
         el("picker-hint").textContent =
-          "Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — space at the next 1.";
+          "Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — stop at the next 1 to end it.";
         drawDetail();
       }).catch((e) => {
         el("picker-hint").textContent = "Could not read the audio: " + e;
@@ -1456,8 +1534,16 @@
   // version plays for the same decision (song_sanitizer.extract_snippet).
   const TRIM_RUN_UP_SEC = 5.0;
 
+  // The review the run is parked on, held separately from `picker` on
+  // purpose. The run is blocked on the worker thread until one of the
+  // buttons answers, so the ability to answer must not depend on the audio
+  // having loaded - a picker that failed to open used to leave every button
+  // inert and the run stopped for good, with only the error to look at.
+  let pendingTrim = null;
+
   function openTrim(review) {
     closePicker();
+    pendingTrim = review;
     el("picker").hidden = false;
     el("readout").hidden = true;
     el("go").hidden = true;
@@ -1468,9 +1554,24 @@
     el("picker-title").textContent = review.filename;
     el("picker-hint").textContent = "Getting the audio...";
 
+    // Enough of a picker to answer with, before any audio exists. If the
+    // audio never arrives this is what stays: the point the sanitizer
+    // suggested, and both buttons live.
+    picker = {
+      song: null, mode: "trim", which: review.end,
+      peaks: [], duration: Math.max(review.cut_sec, 1),
+      kicks: [], grid: [],
+      buffer: null, lead: 0, at: 0,
+      start: Math.max(0, review.cut_sec), end: null,
+      beat: FALLBACK_BEAT_SEC, nudge: TRIM_NUDGE_SEC,
+    };
+    el("play").disabled = true;
+
     window.pywebview.api.review_audio(review.path).then((prepared) => {
+      if (picker === null || picker.mode !== "trim") return;
       if (!prepared || prepared.error) {
-        el("picker-hint").textContent = (prepared && prepared.error) || "Could not read that song.";
+        el("picker-hint").textContent = ((prepared && prepared.error) || "Could not read that song.") +
+          " — you can still fade at " + picker.start.toFixed(1) + "s or leave it alone.";
         return;
       }
       picker = {
@@ -1482,7 +1583,6 @@
         end: null,
         beat: FALLBACK_BEAT_SEC, nudge: TRIM_NUDGE_SEC,
       };
-      el("play").disabled = true;
       drawWave();
       drawDetail();
 
@@ -1495,10 +1595,12 @@
         sayWhereItWouldFade();
         drawDetail();
       }).catch((e) => {
-        el("picker-hint").textContent = "Could not read the audio: " + e;
+        el("picker-hint").textContent = "Could not read the audio: " + e +
+          " — you can still fade or leave it alone.";
       });
     }).catch((e) => {
-      el("picker-hint").textContent = "Could not get the audio: " + e;
+      el("picker-hint").textContent = "Could not get the audio: " + e +
+        " — you can still fade or leave it alone.";
     });
   }
 
@@ -1530,9 +1632,13 @@
     sayWhereItWouldFade();
   }
 
+  // Answers off pendingTrim rather than off the picker, so it works even if
+  // the picker never managed to open. Not being able to answer is the one
+  // outcome that must not exist: the run is stopped until this returns.
   function answerTrim(action) {
-    if (!trimming()) return;
-    const cut = picker.start;
+    if (!pendingTrim) return;
+    const cut = picker && picker.mode === "trim" ? picker.start : pendingTrim.cut_sec;
+    pendingTrim = null;
     closePicker();
     window.pywebview.api.resolve_trim(cut, action).then(render).catch(complain);
   }
@@ -1642,23 +1748,62 @@
   function sayWhatIsMarked() {
     if (picker.end === null) return;
     el("picker-hint").textContent = (picker.end - picker.start).toFixed(1) +
-      "s marked — build the beat, ⇧← ⇧→ to slide it a beat, or space to play it again and space at the next 1.";
+      "s marked — build the beat, ⇧← ⇧→ to slide it a beat, or play it again and stop at a different 1 to move the end.";
   }
 
   // Space only says where the phrase ends. Building the .mid is a separate
   // press, because the two are separate decisions - marking is something you
   // do by reflex, on the beat, and it shouldn't be able to commit you to an
   // export you haven't looked at yet.
+  // Stopping is how you say where the phrase ends - whether you stop with
+  // the spacebar or with the Pause button, because they are the same
+  // gesture and having them mean two different things is how you end up
+  // stopping to think and losing the end you had just heard.
+  //
+  // Nothing is committed by it. The end is left where you stopped, Build
+  // lights up, and playing on and stopping again simply moves it - the
+  // export is still a separate press.
   function markEnd() {
-    if (!picker || picker.start === null) return;
+    if (!picker) return;
     const end = playhead();
-    if (end <= picker.start) { el("picker-hint").textContent = "That is before the start - click again and play on."; return; }
-    picker.end = end;
+    // Trimming has no phrase and no end to mark, and neither does a picker
+    // with no start set yet - both just stop.
+    if (trimming() || picker.start === null) { pausePlay(); return; }
     pausePlay();
+    if (end <= picker.start) {
+      el("picker-hint").textContent = "That is before the start - click again and play on.";
+      return;
+    }
+    picker.end = end;
     refreshBuildEnabled();
     sayWhatIsMarked();
     drawWave();
     drawDetail();
+  }
+
+  // The one definition of what the button and the spacebar both do, because
+  // they are the same gesture and having two copies of it is how they came
+  // to disagree: the key marked the end of the phrase and the button only
+  // stopped the sound, so stopping to think lost the end you had just
+  // heard. Everything that can be done by ear goes through here, and
+  // committing - Build, Fade, Leave it alone - is deliberately not in it.
+  // Those are decisions rather than reflexes, and a reflex should not be
+  // able to press them.
+  //
+  // Play is for hearing the section you've marked, not for resuming where
+  // you happened to stop - so it always goes back to the start you set, or
+  // to the top of the stem if you haven't set one yet.
+  function togglePlay() {
+    if (!picker) return;
+    if (el("play").disabled) {
+      // Silence here is what made a picker that could not load its audio
+      // look like a picker that was simply ignoring you.
+      sayInPicker("The audio is not ready yet.");
+      return;
+    }
+    if (playing) { markEnd(); return; }
+    if (trimming()) auditionTrim();
+    else playFrom(picker.start === null ? 0 : picker.start);
   }
 
   // Building a beat has no percentage of its own - one model pass with
@@ -1810,10 +1955,76 @@
   // wasteful, so this only calls it again when the stage actually moves on.
   let lastStage = null;
 
+  function clock(sec) {
+    if (sec === null || sec === undefined) return "—";
+    const whole = Math.round(sec);
+    return Math.floor(whole / 60) + ":" + String(whole % 60).padStart(2, "0");
+  }
+
+  function openChoice(choice) {
+    const list = el("choice-list");
+    list.textContent = "";
+    const which = choice.total > 1 ? "Song " + choice.index + " of " + choice.total + " — " : "";
+    el("choice-title").textContent = which + (choice.artist
+      ? choice.artist + " — " + choice.title : (choice.query || "Which one is it?"));
+    el("choice-hint").textContent = choice.want_sec
+      ? "Spotify says " + clock(choice.want_sec) + ". Pick the matching recording."
+      : "Spotify says what the song is; the audio comes from YouTube.";
+
+    (choice.candidates || []).forEach((c) => {
+      const row = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+
+      const name = document.createElement("span");
+      name.className = "choice-name";
+      name.textContent = c.title;
+      button.appendChild(name);
+
+      const meta = document.createElement("span");
+      meta.className = "choice-meta";
+      // Built as nodes rather than innerHTML: these strings come off
+      // YouTube, and a video title is allowed to contain anything at all.
+      meta.textContent = (c.channel || "unknown") + " · " + clock(c.duration);
+      if (c.offset !== null && c.offset !== undefined) {
+        const off = document.createElement("span");
+        off.className = "choice-off";
+        off.textContent = "  (" + (c.offset < 1 ? "spot on" : "±" + Math.round(c.offset) + "s") + ")";
+        meta.appendChild(off);
+      }
+      button.appendChild(meta);
+
+      button.addEventListener("click", () => {
+        el("choice").hidden = true;
+        window.pywebview.api.resolve_match(c.url).then(render);
+      });
+      row.appendChild(button);
+      list.appendChild(row);
+    });
+
+    el("readout").hidden = true;
+    el("choice").hidden = false;
+  }
+
+  function closeChoice() {
+    el("choice").hidden = true;
+    el("readout").hidden = false;
+  }
+
+  el("choice-none").addEventListener("click", () => {
+    closeChoice();
+    // Leaves this song out and carries on with the rest of the playlist.
+    // Cancel, which stops everything, is its own button above.
+    window.pywebview.api.skip_match().then(render);
+  });
+
   // Which trim we last put on screen, so a review that is still pending
   // across several polls is opened once rather than reopened four times a
   // second.
   let reviewing = null;
+
+  // The same, for a Spotify match waiting to be picked.
+  let choosing = null;
 
   function poll() {
     window.pywebview.api.status().then((state) => {
@@ -1823,7 +2034,14 @@
       if (key !== reviewing) {
         reviewing = key;
         if (review) openTrim(review);
-        else if (trimming()) closePicker();
+        else if (pendingTrim) { pendingTrim = null; closePicker(); }
+      }
+      const choice = state.choice || null;
+      const choiceKey = choice && (choice.index + "/" + choice.query + "@" + (choice.candidates || []).length);
+      if (choiceKey !== choosing) {
+        choosing = choiceKey;
+        if (choice) openChoice(choice);
+        else closeChoice();
       }
       if (state.stage !== lastStage) {
         lastStage = state.stage;
@@ -1850,6 +2068,7 @@
   function start() {
     const options = {};
     for (const thing of STASH_ORDER) options[thing] = isArmed(thing);
+    options.sanitize = el("sanitize").checked;
 
     // Neither Beat nor Midi is something a run can produce - both need you
     // to hear the phrase - so they're dropped from what's asked for and
@@ -1955,27 +2174,19 @@
   // not an escape - the worker thread is sitting on it, and a picker that
   // just vanishes would leave the run stopped with nothing to show for it.
   el("picker-close").addEventListener("click", () => {
-    if (trimming()) answerTrim("keep");
+    if (pendingTrim) answerTrim("keep");
     else closePicker();
   });
 
-  // Play is for hearing the section you've marked, not for resuming where
-  // you happened to stop - so it always goes back to the start you set, or
-  // to the top of the stem if you haven't set one yet.
-  el("play").addEventListener("click", () => {
-    if (!picker) return;
-    if (playing) { pausePlay(); return; }
-    if (trimming()) auditionTrim();
-    else playFrom(picker.start === null ? 0 : picker.start);
-  });
+  el("play").addEventListener("click", togglePlay);
 
   el("build").addEventListener("click", buildBeat);
   el("fade").addEventListener("click", () => answerTrim("fade"));
   el("keep").addEventListener("click", () => answerTrim("keep"));
 
-  // The keyboard is the picker. Space marks the end and the arrows walk the
-  // start onto the one - but only while the picker is open, and never while
-  // a link is being typed into the box.
+  // The keyboard is the picker. Space is the Play/Pause button and the
+  // arrows walk the start onto the one - but only while the picker is open,
+  // and never while a link is being typed into the box.
   document.addEventListener("keydown", (event) => {
     if (el("picker").hidden) return;
     const keyed = event.code === "Space" || event.code === "ArrowLeft" || event.code === "ArrowRight";
@@ -1989,19 +2200,15 @@
     // arrows scrolling the window out from under the waveform.
     event.preventDefault();
 
-    // Space does whichever of the two things the moment calls for. Stopped,
-    // it starts the stem playing - the same thing the Play button does, and
-    // the thing your hand is already on the key for. Playing, it marks the
-    // end. There's no ambiguity to resolve: you can't mark the end of a
-    // phrase that isn't running past you, and pressing Play was a trip to
-    // the mouse in the middle of an interaction that is otherwise entirely
-    // by ear.
+    // Space is the Play/Pause button, down to the same function - so it
+    // does whatever that does, in whichever of the two jobs the picker is
+    // doing, and cannot drift away from it. Stopped, it plays; playing, it
+    // stops, and in the beat picker stopping is also how you say where the
+    // phrase ends (see markEnd). Reaching for the mouse in the middle of an
+    // interaction that is otherwise entirely by ear is the thing this
+    // avoids.
     if (event.code === "Space") {
-      if (el("play").disabled) return;
-      // Trimming has no end to mark, so space is only ever play/pause.
-      if (trimming()) { if (playing) pausePlay(); else auditionTrim(); return; }
-      if (!playing) playFrom(picker.start === null ? 0 : picker.start);
-      else markEnd();
+      togglePlay();
       return;
     }
     const direction = event.code === "ArrowLeft" ? -1 : 1;

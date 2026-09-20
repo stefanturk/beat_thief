@@ -8,6 +8,7 @@ import beat_writer
 import history
 import instrument_isolator
 import pipeline
+import spotify
 
 
 class _FakeYoutubeDL:
@@ -16,7 +17,15 @@ class _FakeYoutubeDL:
     like it resolves to."""
 
     entries = [{"title": "Some Song"}]
+    # What a particular url resolves to, for tests with a queue of them -
+    # a playlist downloads one url at a time and each has to be its own
+    # song, or every track would arrive under the same filename.
+    by_url = {}
     downloads = []
+
+    @classmethod
+    def _entries_for(cls, url):
+        return list(cls.by_url.get(url, cls.entries))
 
     def __init__(self, opts):
         self.opts = opts
@@ -28,7 +37,7 @@ class _FakeYoutubeDL:
         return False
 
     def extract_info(self, url, download=False):
-        return {"entries": list(self.entries)}
+        return {"entries": self._entries_for(url)}
 
     def prepare_filename(self, entry):
         return os.path.join(
@@ -37,7 +46,7 @@ class _FakeYoutubeDL:
 
     def download(self, urls):
         output_dir = os.path.dirname(self.opts["outtmpl"])
-        for entry in self.entries:
+        for entry in self._entries_for(urls[0] if urls else None):
             filename = f"{entry['title']} - Artist.mp3"
             path = os.path.join(output_dir, filename)
             with open(path, "wb") as f:
@@ -62,6 +71,7 @@ class PipelineTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         _FakeYoutubeDL.downloads = []
+        _FakeYoutubeDL.by_url = {}
         self.events = []
         patcher = mock.patch("yt_dlp.YoutubeDL", _FakeYoutubeDL)
         patcher.start()
@@ -364,6 +374,35 @@ class TestTheNameHandedToTheSanitizer(PipelineTestCase):
         self.assertEqual(
             self.mock_sanitize.call_args.args[0], ["Some Song - Artist.mp3"]
         )
+
+
+class TestSkippingTheTidyUp(PipelineTestCase):
+    """Sanitizing is the only part of a run that stops to ask anything, and
+    a long playlist is a lot of small questions. Turned off, the download is
+    kept exactly as it landed and nothing is asked."""
+
+    def test_the_sanitizer_is_never_called(self):
+        self._run(sanitize=False)
+        self.mock_sanitize.assert_not_called()
+        self.assertNotIn("sanitizing", self._stages())
+
+    def test_the_song_is_still_filed_and_still_isolated(self):
+        """Skipping the tidy-up must not mean losing track of the download:
+        what yt-dlp wrote is what the rest of the run chains onto."""
+        with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
+            result = self._run(sanitize=False, instruments=["drums"])
+        self.assertEqual(len(result["songs"]), 1)
+        self.assertIn("Some Song - Artist.mp3", result["songs"][0])
+        mock_drums.assert_called_once()
+
+    def test_the_run_still_finishes(self):
+        result = self._run(sanitize=False)
+        self.assertEqual(self._stages()[-1], "done")
+        self.assertFalse(result.get("error"))
+
+    def test_sanitizing_is_what_happens_when_nobody_says_otherwise(self):
+        self._run()
+        self.mock_sanitize.assert_called_once()
 
 
 class TestCancelling(PipelineTestCase):
@@ -791,6 +830,362 @@ class TestFailures(PipelineTestCase):
         # The song is still on disk and still gets isolated.
         mock_drums.assert_called_once()
         self.assertEqual(result["downloaded"], 1)
+
+
+class TestSpotifyLinks(PipelineTestCase):
+    """A Spotify link is swapped for the YouTube link of the same recording
+    at the top of the run. Everything below that point never learns Spotify
+    was involved - which is the whole reason the integration is one line."""
+
+    SPOTIFY = "https://open.spotify.com/track/4PTG3Z6ehGkBFwjybzWkR8"
+    SONG = {"title": "Never Gonna Give You Up", "artist": "Rick Astley",
+            "duration_sec": 213.573, "query": "Rick Astley Never Gonna Give You Up"}
+    MATCH = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def _found(self, *titles, offset=0.2):
+        return [
+            {"url": self.MATCH + str(i), "title": title, "channel": "Rick Astley",
+             "duration": 213.573 + offset, "offset": offset}
+            for i, title in enumerate(titles)
+        ]
+
+    def _unsure(self):
+        """Two results, both a few seconds out - nothing here is obviously the
+        recording asked for, so the run has to put it to somebody."""
+        return self._found("Official Video", "2022 Remaster", offset=3.0)
+
+    def test_what_gets_downloaded_is_the_youtube_link(self):
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates", return_value=self._found("Official Video")):
+            pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir, on_event=self.events.append)
+        self.assertEqual(_FakeYoutubeDL.downloads, [[self.MATCH + "0"]])
+
+    def test_the_wait_is_announced_before_it_starts(self):
+        """Looking a track up is a couple of seconds of nothing, so the page
+        gets told what's happening rather than sitting blank."""
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates", return_value=self._found("Official Video")):
+            pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir, on_event=self.events.append)
+        self.assertEqual(self._stages()[0], "looking-up")
+
+    def test_an_ordinary_link_never_touches_spotify(self):
+        with mock.patch("spotify.track") as looked_up:
+            self._run()
+        looked_up.assert_not_called()
+        self.assertEqual(_FakeYoutubeDL.downloads, [["https://example.com/song"]])
+
+    def test_a_clear_match_is_not_put_to_anybody(self):
+        """Several results for a famous song are usually the same recording
+        uploaded three times. Asking which copy to take is a question with no
+        wrong answer, so the run doesn't stop to ask it."""
+        asked = []
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates",
+                        return_value=self._found("Official Video", "Lyric Video",
+                                                 "Rick Astley - Topic")):
+            pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir,
+                         on_event=self.events.append,
+                         on_choose=lambda request: asked.append(request) or {"url": None})
+        self.assertEqual(asked, [])
+        self.assertEqual(_FakeYoutubeDL.downloads, [[self.MATCH + "0"]])
+        self.assertNotIn("choosing", self._stages())
+
+    def test_an_uncertain_match_is_put_to_whoever_can_answer(self):
+        asked = []
+
+        def choose(request):
+            asked.append(request)
+            return {"url": self.MATCH + "1"}
+
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates", return_value=self._unsure()):
+            pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir,
+                         on_event=self.events.append, on_choose=choose)
+
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0]["title"], "Never Gonna Give You Up")
+        self.assertEqual(len(asked[0]["candidates"]), 2)
+        # The one that was picked is the one that gets downloaded, not the
+        # one that happened to sort first.
+        self.assertEqual(_FakeYoutubeDL.downloads, [[self.MATCH + "1"]])
+
+    def test_with_nobody_to_ask_it_takes_the_best_and_says_which(self):
+        """The CLI has no way to put a list on screen, so it carries on -
+        but it has to name what it assumed, or a wrong recording arrives
+        with no explanation."""
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates", return_value=self._unsure()):
+            pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir, on_event=self.events.append)
+        warnings = [e for e in self.events if e["stage"] == "warning"]
+        self.assertTrue(warnings)
+        self.assertIn("Official Video", warnings[0]["message"])
+        self.assertEqual(_FakeYoutubeDL.downloads, [[self.MATCH + "0"]])
+
+    def test_picking_none_of_them_stops_the_run(self):
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates", return_value=self._unsure()):
+            result = pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir,
+                                  on_event=self.events.append,
+                                  on_choose=lambda request: {"url": None})
+        self.assertEqual(_FakeYoutubeDL.downloads, [])
+        self.assertTrue(result.get("error"))
+
+    def test_cancelling_while_being_asked_is_a_cancel_not_an_error(self):
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates", return_value=self._unsure()):
+            result = pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir,
+                                  on_event=self.events.append,
+                                  should_cancel=lambda: True,
+                                  on_choose=lambda request: {"url": None})
+        self.assertTrue(result["cancelled"])
+        self.assertFalse(result.get("error"))
+        self.assertEqual(_FakeYoutubeDL.downloads, [])
+
+    def test_a_spotify_link_that_cannot_be_read_says_so_plainly(self):
+        import spotify as spotify_module
+
+        with mock.patch("spotify.track",
+                        side_effect=spotify_module.SpotifyUnavailable("Spotify changed their page.")):
+            result = pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir, on_event=self.events.append)
+        errors = [e for e in self.events if e["stage"] == "error"]
+        self.assertEqual(errors[0]["message"], "Spotify changed their page.")
+        self.assertTrue(result.get("error"))
+        self.assertEqual(_FakeYoutubeDL.downloads, [])
+
+    def test_a_song_youtube_simply_does_not_have(self):
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates", return_value=[]):
+            result = pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir, on_event=self.events.append)
+        errors = [e for e in self.events if e["stage"] == "error"]
+        self.assertIn("Rick Astley Never Gonna Give You Up", errors[0]["message"])
+        self.assertTrue(result.get("error"))
+
+    def test_history_remembers_the_link_that_can_be_used_again(self):
+        """The Spotify link can't be re-downloaded from; the YouTube one can."""
+        with mock.patch("spotify.track", return_value=self.SONG), \
+             mock.patch("youtube_match.candidates", return_value=self._found("Official Video")), \
+             mock.patch("history.remember") as remembered:
+            pipeline.run(self.SPOTIFY, output_dir=self.tmp_dir, on_event=self.events.append)
+        self.assertEqual(remembered.call_args[0][0], self.MATCH + "0")
+
+
+class TestSpotifyPlaylists(PipelineTestCase):
+    """A playlist is a queue of ordinary songs. Everything that already
+    worked per song keeps working per song - history, the stale-archive
+    retry, a failure - because the queue is downloaded one url at a time
+    rather than handed to yt-dlp as a list."""
+
+    PLAYLIST = "https://open.spotify.com/playlist/4jFldPjGeA3jiOj6U6PaIW"
+
+    @staticmethod
+    def _songs(*titles):
+        return [{"title": title, "artist": "Someone", "duration_sec": 200.0,
+                 "query": f"Someone {title}"} for title in titles]
+
+    @staticmethod
+    def _youtube(title):
+        return "https://www.youtube.com/watch?v=" + title.replace(" ", "")
+
+    def _matching(self, missing=()):
+        """A YouTube result per song, exactly the right length so nothing
+        has to be asked about - except the titles named in `missing`, which
+        YouTube simply doesn't have."""
+        def candidates(query, want_sec):
+            title = query.split(" ", 1)[1]
+            if title in missing:
+                return []
+            return [{"url": self._youtube(title), "title": title, "channel": "Someone",
+                     "duration": want_sec, "offset": 0.0}]
+        return candidates
+
+    def _collection(self, name, *titles):
+        _FakeYoutubeDL.by_url = {
+            self._youtube(title): [{"title": title}] for title in titles
+        }
+        return {"name": name, "songs": self._songs(*titles)}
+
+    def _play(self, name="Misco", titles=("Them Changes", "Bad Bad News"),
+              missing=(), **kwargs):
+        collection = self._collection(name, *titles)
+        kwargs.setdefault("output_dir", self.tmp_dir)
+        kwargs.setdefault("on_event", self.events.append)
+        with mock.patch("spotify.collection", return_value=collection), \
+             mock.patch("youtube_match.candidates", side_effect=self._matching(missing)):
+            return pipeline.run(self.PLAYLIST, **kwargs)
+
+    def test_every_song_is_downloaded_one_url_at_a_time(self):
+        """One url per download, not one download of a list: that's what
+        keeps history, retries and failures attached to the right song."""
+        result = self._play()
+        self.assertEqual(_FakeYoutubeDL.downloads,
+                         [[self._youtube("Them Changes")], [self._youtube("Bad Bad News")]])
+        self.assertEqual(result["downloaded"], 2)
+
+    def test_songs_alone_land_in_one_folder_named_after_the_playlist(self):
+        """A playlist arrives as one thing and should land as one thing.
+        Nobody asked for stems, so nothing needs a folder of its own -
+        burying each song in one would only make them harder to use."""
+        result = self._play(name="Misco")
+        folder = os.path.join(self.tmp_dir, "Misco")
+        self.assertEqual(result["output_dir"], folder)
+        self.assertEqual(sorted(os.path.basename(p) for p in result["songs"]),
+                         ["Bad Bad News - Artist.mp3", "Them Changes - Artist.mp3"])
+        for path in result["songs"]:
+            self.assertEqual(os.path.dirname(path), folder)
+
+    def test_asking_for_a_stem_gives_each_song_its_own_folder_again(self):
+        """Stems and MIDI need somewhere to live, so the per-song folders
+        come back - inside the playlist's folder, not scattered."""
+        with mock.patch("drum_isolator.isolate_drums_for_single_file"):
+            result = self._play(instruments=["drums"])
+        folder = os.path.join(self.tmp_dir, "Misco")
+        for path in result["songs"]:
+            title = os.path.splitext(os.path.basename(path))[0]
+            self.assertEqual(os.path.dirname(path), os.path.join(folder, title))
+
+    def test_a_single_track_link_still_lands_where_it_always_did(self):
+        """One song is not a playlist, whatever its album is called."""
+        with mock.patch("spotify.collection",
+                        return_value={"name": "", "songs": self._songs("Them Changes")}), \
+             mock.patch("youtube_match.candidates", side_effect=self._matching()):
+            _FakeYoutubeDL.by_url = {self._youtube("Them Changes"): [{"title": "Them Changes"}]}
+            result = pipeline.run("https://open.spotify.com/track/abc",
+                                  output_dir=self.tmp_dir, on_event=self.events.append)
+        self.assertEqual(result["output_dir"], self.tmp_dir)
+        self.assertEqual(os.path.dirname(result["songs"][0]),
+                         os.path.join(self.tmp_dir, "Them Changes - Artist"))
+
+    def test_a_song_youtube_does_not_have_is_skipped_not_fatal(self):
+        result = self._play(titles=("Them Changes", "Obscure B-Side", "Bad Bad News"),
+                            missing=("Obscure B-Side",))
+        self.assertEqual(result["downloaded"], 2)
+        self.assertFalse(result.get("error"))
+        warnings = [e["message"] for e in self.events if e["stage"] == "warning"]
+        self.assertTrue(any("Obscure B-Side" in m for m in warnings))
+
+    def test_a_song_left_out_by_hand_is_skipped_not_a_cancelled_run(self):
+        """"None of these" is about one song. The other thirty-nine are
+        still wanted, which is what makes it Skip rather than Cancel."""
+        asked = []
+
+        def choose(request):
+            asked.append(request["title"])
+            return {"url": None}
+
+        def candidates(query, want_sec):
+            title = query.split(" ", 1)[1]
+            if title == "Them Changes":
+                # Two results, both a few seconds out: nothing obvious.
+                return [{"url": self._youtube(title), "title": title, "channel": "Someone",
+                         "duration": want_sec + 3.0, "offset": 3.0},
+                        {"url": self._youtube(title) + "b", "title": title + " (Live)",
+                         "channel": "Someone", "duration": want_sec + 4.0, "offset": 4.0}]
+            return self._matching()(query, want_sec)
+
+        collection = self._collection("Misco", "Them Changes", "Bad Bad News")
+        with mock.patch("spotify.collection", return_value=collection), \
+             mock.patch("youtube_match.candidates", side_effect=candidates):
+            result = pipeline.run(self.PLAYLIST, output_dir=self.tmp_dir,
+                                  on_event=self.events.append, on_choose=choose)
+
+        self.assertEqual(asked, ["Them Changes"])
+        self.assertEqual(_FakeYoutubeDL.downloads, [[self._youtube("Bad Bad News")]])
+        self.assertFalse(result.get("error"))
+        self.assertFalse(result["cancelled"])
+
+    def test_the_card_says_which_song_it_is_asking_about(self):
+        asked = []
+
+        def choose(request):
+            asked.append((request["index"], request["total"]))
+            return {"url": None}
+
+        def candidates(query, want_sec):
+            return [{"url": "https://youtu.be/a", "title": "A", "channel": "C",
+                     "duration": want_sec + 3.0, "offset": 3.0},
+                    {"url": "https://youtu.be/b", "title": "B", "channel": "C",
+                     "duration": want_sec + 4.0, "offset": 4.0}]
+
+        collection = self._collection("Misco", "One", "Two")
+        with mock.patch("spotify.collection", return_value=collection), \
+             mock.patch("youtube_match.candidates", side_effect=candidates):
+            pipeline.run(self.PLAYLIST, output_dir=self.tmp_dir,
+                         on_event=self.events.append, on_choose=choose)
+        self.assertEqual(asked, [(1, 2), (2, 2)])
+
+    def test_matching_reports_which_song_it_is_on(self):
+        """Resolving forty tracks is a minute of nothing to look at."""
+        self._play(titles=("Them Changes", "Bad Bad News"))
+        resolving = [e for e in self.events if e["stage"] == "resolving"]
+        self.assertEqual([(e["index"], e["total"], e["song"]) for e in resolving],
+                         [(1, 2, "Them Changes"), (2, 2, "Bad Bad News")])
+
+    def test_history_remembers_each_song_against_its_own_link(self):
+        """Coming back later for a stem has to work for every song in the
+        playlist, not just whichever one happened to be first."""
+        with mock.patch("history.remember") as remembered:
+            self._play()
+        remembered_urls = [call.args[0] for call in remembered.call_args_list]
+        self.assertEqual(remembered_urls,
+                         [self._youtube("Them Changes"), self._youtube("Bad Bad News")])
+        for call in remembered.call_args_list:
+            self.assertEqual(len(call.args[1]), 1)
+
+    def test_a_download_that_blows_up_does_not_take_the_rest_with_it(self):
+        import yt_dlp
+
+        real_download = _FakeYoutubeDL.download
+
+        def explode(self, urls):
+            if urls == [TestSpotifyPlaylists._youtube("Them Changes")]:
+                raise yt_dlp.utils.DownloadError("video unavailable")
+            return real_download(self, urls)
+
+        with mock.patch.object(_FakeYoutubeDL, "download", explode):
+            result = self._play()
+        self.assertEqual(_FakeYoutubeDL.downloads, [[self._youtube("Bad Bad News")]])
+        self.assertEqual(result["downloaded"], 1)
+        self.assertFalse(result.get("error"))
+
+    def test_cancelling_partway_keeps_what_already_finished(self):
+        stop = []
+
+        def should_cancel():
+            return bool(stop)
+
+        collection = self._collection("Misco", "Them Changes", "Bad Bad News")
+        real_download = _FakeYoutubeDL.download
+
+        def one_then_stop(self, urls):
+            outcome = real_download(self, urls)
+            stop.append(True)
+            return outcome
+
+        with mock.patch("spotify.collection", return_value=collection), \
+             mock.patch("youtube_match.candidates", side_effect=self._matching()), \
+             mock.patch.object(_FakeYoutubeDL, "download", one_then_stop):
+            result = pipeline.run(self.PLAYLIST, output_dir=self.tmp_dir,
+                                  on_event=self.events.append, should_cancel=should_cancel)
+
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(_FakeYoutubeDL.downloads, [[self._youtube("Them Changes")]])
+
+    def test_a_full_page_of_songs_says_it_might_not_be_all_of_them(self):
+        """The embed page carries no total, so a truncated playlist looks
+        exactly like a complete one. Saying so beats pretending to know."""
+        titles = tuple(f"Song {i}" for i in range(spotify.EMBED_ROW_LIMIT))
+        self._play(titles=titles)
+        warnings = [e["message"] for e in self.events if e["stage"] == "warning"]
+        self.assertTrue(any(str(spotify.EMBED_ROW_LIMIT) in m for m in warnings))
+
+    def test_an_ordinary_link_is_downloaded_exactly_as_it_always_was(self):
+        """The regression that matters most: a YouTube link is a queue of
+        one and takes the same path it took before any of this existed."""
+        result = self._run()
+        self.assertEqual(_FakeYoutubeDL.downloads, [["https://example.com/song"]])
+        self.assertEqual(result["output_dir"], self.tmp_dir)
+        self.assertEqual(os.path.dirname(result["songs"][0]),
+                         os.path.join(self.tmp_dir, "Some Song - Artist"))
 
 
 if __name__ == "__main__":

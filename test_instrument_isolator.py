@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -255,15 +256,27 @@ class TestRunDemucsProgress(unittest.TestCase):
     """run_demucs parses demucs' own output for a percentage; where that
     percentage goes is what these cover."""
 
-    def _run_with_output(self, raw_output, on_percent=None):
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        # run_demucs checks demucs actually wrote where it was told to, so
+        # the fixture has to have written there too.
+        os.makedirs(os.path.join(self.tmp_dir, "htdemucs", "Some Song"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _run_with_output(self, raw_output, on_percent=None, should_cancel=None):
         fake_proc = mock.MagicMock()
         chunks = [raw_output.encode(), b""]
-        fake_proc.stdout.read.side_effect = chunks
+        # read1, not read: read() waits for the whole 4096 bytes it was
+        # asked for, which is dozens of demucs' progress frames.
+        fake_proc.stdout.read1.side_effect = chunks
         fake_proc.returncode = 0
         with mock.patch("subprocess.Popen", return_value=fake_proc):
             with mock.patch("sys.stdout.write") as mock_write:
                 stem_dir = instrument_isolator.run_demucs(
-                    "/tmp/Some Song.mp3", "/tmp/out", "htdemucs", on_percent=on_percent
+                    "/tmp/Some Song.mp3", self.tmp_dir, "htdemucs",
+                    on_percent=on_percent, should_cancel=should_cancel,
                 )
         return stem_dir, mock_write
 
@@ -285,7 +298,67 @@ class TestRunDemucsProgress(unittest.TestCase):
     def test_returns_the_stem_directory_for_the_track(self):
         stem_dir, _ = self._run_with_output(" 100%|#|\r", on_percent=lambda p: None)
 
-        self.assertEqual(stem_dir, os.path.join("/tmp/out", "htdemucs", "Some Song"))
+        self.assertEqual(stem_dir, os.path.join(self.tmp_dir, "htdemucs", "Some Song"))
+
+    def test_finishing_without_writing_anything_says_so(self):
+        # Demucs can exit 0 and leave nothing behind. Letting that through
+        # meant the caller opened drums.wav inside a directory that was
+        # never created, and all anybody saw was "no such file".
+        shutil.rmtree(os.path.join(self.tmp_dir, "htdemucs", "Some Song"))
+
+        with self.assertRaises(RuntimeError) as caught:
+            self._run_with_output(" 100%|#|\r", on_percent=lambda p: None)
+
+        self.assertIn("no stems", str(caught.exception))
+
+
+class TestRunDemucsCancel(unittest.TestCase):
+    """Stopping has to stop it, including in the minute where demucs is
+    loading its model and saying nothing at all."""
+
+    def test_a_cancel_while_it_is_silent_still_kills_it(self):
+        # The read loop only comes round when demucs says something, and it
+        # says nothing for its first minute - so a cancel in that minute
+        # used to sit there for the whole of it. This is that minute: no
+        # output ever arrives until the process is killed.
+        killed = threading.Event()
+        fake_proc = mock.MagicMock()
+        fake_proc.returncode = -9
+
+        def read1(_n):
+            # Blocks like a real pipe with nothing in it, and comes back
+            # empty once somebody kills the process.
+            killed.wait(timeout=5)
+            return b""
+
+        fake_proc.stdout.read1.side_effect = read1
+        fake_proc.kill.side_effect = killed.set
+
+        with mock.patch("subprocess.Popen", return_value=fake_proc):
+            with self.assertRaises(instrument_isolator.Cancelled):
+                instrument_isolator.run_demucs(
+                    "/tmp/Some Song.mp3", "/tmp/out", "htdemucs",
+                    on_percent=lambda p: None, should_cancel=lambda: True,
+                )
+
+        self.assertTrue(killed.is_set())
+        fake_proc.kill.assert_called()
+
+    def test_a_run_nobody_cancels_is_left_alone(self):
+        fake_proc = mock.MagicMock()
+        fake_proc.stdout.read1.side_effect = [b" 100%|#|\r", b""]
+        fake_proc.returncode = 0
+        tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp_dir, True)
+        os.makedirs(os.path.join(tmp_dir, "htdemucs", "Some Song"))
+
+        with mock.patch("subprocess.Popen", return_value=fake_proc):
+            instrument_isolator.run_demucs(
+                "/tmp/Some Song.mp3", tmp_dir, "htdemucs",
+                on_percent=lambda p: None, should_cancel=lambda: False,
+            )
+
+        fake_proc.kill.assert_not_called()
 
 
 class TestSeparatedStems(unittest.TestCase):

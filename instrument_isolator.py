@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 from typing import NamedTuple
 
 import librosa
@@ -93,9 +94,16 @@ def run_demucs(
     than stdout (see gui.py). Only the sink changes; the parsing is identical
     either way.
 
-    should_cancel, if given, is polled as output arrives; once it returns True
-    the demucs subprocess is killed and Cancelled is raised, so a cancel
-    actually stops the work rather than just abandoning the wait for it."""
+    should_cancel, if given, is polled on a thread of its own; once it
+    returns True the demucs subprocess is killed and Cancelled is raised, so
+    a cancel actually stops the work rather than just abandoning the wait
+    for it.
+
+    On a thread rather than in the read loop below, because that loop only
+    comes round when demucs says something. Demucs' first minute is spent
+    importing torch and loading the model and it says nothing at all in it -
+    so a cancel in that minute did nothing for the whole of it, which is
+    exactly the part of a run somebody changes their mind during."""
     cmd = [sys.executable, "-m", "demucs", "-n", model_name, "-o", out_dir]
     if two_stems:
         cmd += ["--two-stems", two_stems]
@@ -103,14 +111,27 @@ def run_demucs(
 
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
+    killed = threading.Event()
+    finished = threading.Event()
+    watcher = None
+    if should_cancel is not None:
+        def watch():
+            while not finished.wait(_CANCEL_POLL_SEC):
+                if should_cancel():
+                    killed.set()
+                    proc.kill()
+                    return
+        watcher = threading.Thread(target=watch, daemon=True)
+        watcher.start()
+
     buf = ""
     last_percent = None
-    for chunk in iter(lambda: proc.stdout.read(4096), b""):
-        if should_cancel is not None and should_cancel():
-            proc.kill()
-            proc.stdout.close()
-            proc.wait()
-            raise Cancelled()
+    # read1 rather than read: read() waits for the full 4096 bytes, which at
+    # demucs' rate of output is dozens of progress frames - so the bar moved
+    # in jumps and lagged what was actually happening.
+    for chunk in iter(lambda: proc.stdout.read1(4096), b""):
+        if killed.is_set():
+            break
         buf += chunk.decode(errors="ignore")
         # Process one complete \r/\n-terminated frame at a time (rather
         # than scanning the raw growing buffer) so a still-arriving frame
@@ -142,6 +163,11 @@ def run_demucs(
             sys.stdout.flush()
     proc.stdout.close()
     proc.wait()
+    finished.set()
+    if watcher is not None:
+        watcher.join(timeout=1)
+    if killed.is_set():
+        raise Cancelled()
     if last_percent is not None and on_percent is None:
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -150,8 +176,21 @@ def run_demucs(
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
     track_name = os.path.splitext(os.path.basename(input_path))[0]
-    return os.path.join(out_dir, model_name, track_name)
+    stem_dir = os.path.join(out_dir, model_name, track_name)
+    # Demucs can exit 0 and still not have written where we expect - a name
+    # it transformed, a model that laid its output out differently. Saying so
+    # here beats letting the caller open drums.wav inside a directory that
+    # was never created and report a bare "no such file".
+    if not os.path.isdir(stem_dir):
+        raise RuntimeError(
+            f"demucs finished but wrote no stems for {track_name!r} "
+            f"(expected them in {stem_dir})")
+    return stem_dir
 
+
+# How often the cancel watcher looks. Fast enough that stopping feels like
+# stopping, slow enough to be nothing next to a run measured in minutes.
+_CANCEL_POLL_SEC = 0.2
 
 _stem_cache: dict[tuple[str, float, str], str] = {}
 _stem_temp_dirs: list[str] = []
