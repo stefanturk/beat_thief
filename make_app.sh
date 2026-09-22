@@ -28,7 +28,11 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${1:-$HOME/Applications}"
 APP="$DEST/Beat Thief.app"
-PYTHON="$(command -v python3)"
+# Which Python the app will run. Overridable because setup.sh installs the
+# packages into /usr/bin/python3 specifically, and a Homebrew python arriving
+# later would take over `command -v` while having none of them - an app built
+# against it starts and immediately can't import yt_dlp.
+PYTHON="${PYTHON:-$(command -v python3)}"
 
 # /usr/bin/python3 is a universal binary, and launched from an app bundle
 # macOS picks its x86_64 slice - which then can't load this machine's arm64

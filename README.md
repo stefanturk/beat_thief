@@ -13,6 +13,29 @@ Download all songs from a YouTube Music (or YouTube) playlist as MP3s.
    pip install -r requirements.txt
    ```
 
+### Giving it to someone else
+
+Send the whole folder, not `Beat Thief.app`. The app is a 5MB launcher —
+yt-dlp, demucs, torch and the window itself live in your Python's packages
+folder, and ffmpeg is a separate program — so on a Mac that has none of
+that, the app opens a dialog saying it couldn't start and nothing else.
+
+Zip this folder (or share the repo), and have them run:
+
+```
+./setup.sh
+```
+
+It checks Python, installs ffmpeg via Homebrew, installs the requirements,
+confirms each one imports, and builds the app into their `~/Applications`.
+Ten minutes, most of it downloading torch. It's safe to run again — every
+step checks whether it's already done — and it clears the quarantine flag
+macOS puts on anything that arrived by Drive or AirDrop, which otherwise
+refuses to run the script at all.
+
+They keep the folder: the app is a snapshot of the code in it, so a newer
+version means replacing the folder and running `setup.sh` again.
+
 ## Beat Thief, the app
 
 For the everyday job — one link, get its drums — there's a window:
