@@ -118,5 +118,5 @@ note
 note "Songs land in ~/Music/Beat Thief."
 note "If it ever won't start, the reason is in ~/Library/Logs/beat_thief.log."
 note
-note "Keep this folder. The app is a snapshot of the code in it, so a newer"
-note "version means replacing this folder and running setup.sh again."
+note "Keep this folder. The app is a snapshot of the code in it, so when"
+note "there's a new version, run ./update.sh here and open the app again."

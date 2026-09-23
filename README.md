@@ -20,11 +20,16 @@ yt-dlp, demucs, torch and the window itself live in your Python's packages
 folder, and ffmpeg is a separate program — so on a Mac that has none of
 that, the app opens a dialog saying it couldn't start and nothing else.
 
-Zip this folder (or share the repo), and have them run:
+Have them paste this one line into Terminal:
 
 ```
-./setup.sh
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/stefanturk/beat_thief/main/install.sh)"
 ```
+
+`install.sh` clones the repo to `~/beat_thief` and hands over to `setup.sh`.
+It goes first because on a Mac that has never built anything there is no
+`git` either — that arrives with the Xcode command line tools, which the
+script prompts for and then asks them to run the line again.
 
 It checks Python, installs ffmpeg via Homebrew, installs the requirements,
 confirms each one imports, and builds the app into their `~/Applications`.
@@ -33,8 +38,14 @@ step checks whether it's already done — and it clears the quarantine flag
 macOS puts on anything that arrived by Drive or AirDrop, which otherwise
 refuses to run the script at all.
 
-They keep the folder: the app is a snapshot of the code in it, so a newer
-version means replacing the folder and running `setup.sh` again.
+They keep the folder: the app is a snapshot of the code in it. When there's
+a new version they run `./update.sh`, which pulls and rebuilds in seconds —
+the packages and ffmpeg are already there, so nothing is downloaded twice.
+
+A zip works too (`git archive --format=zip --prefix=beat_thief/ -o \
+~/Desktop/beat_thief.zip HEAD`), but an unzipped copy has no git to pull
+from, so every update means another full download. Cloning is the reason
+`update.sh` exists.
 
 ## Beat Thief, the app
 

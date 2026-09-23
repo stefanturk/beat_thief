@@ -626,8 +626,8 @@
       -->
       <div class="pads">
         <button class="pad" id="pad-song" data-stem="song" aria-pressed="true">Song</button>
-        <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="true">Drums</button>
-        <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="true">Beat</button>
+        <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="false">Drums</button>
+        <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
         <button class="pad" id="pad-midi" data-stem="midi" data-again="true" aria-pressed="false">Midi</button>
         <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
         <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
@@ -873,12 +873,14 @@
   // anything else.
   const MORE_THAN_ONE = new Set(["beat", "midi"]);
 
-  // What a pasted link is armed for before you touch anything. Stealing a
-  // beat is what this is for, and it takes all three - the song to work
-  // from, the drums to hear on their own, and the phrase itself - so asking
-  // for the last of them is asking for the other two anyway (see NEEDS).
-  // Anything else is a square away.
-  const ARMED_TO_BEGIN_WITH = new Set(["song", "drums", "beat"]);
+  // What a pasted link is armed for before you touch anything: the song and
+  // nothing else. Arming the beat as well would be the faster route to a
+  // stolen loop, but it drags in the drums (see NEEDS) and then stops the
+  // run to ask where the phrase is - so a link pasted by somebody who only
+  // wanted the mp3 turns into a separation and a question. Starting at the
+  // song makes the quick thing quick; Beat is one click away, and clicking
+  // it arms what it needs.
+  const ARMED_TO_BEGIN_WITH = new Set(["song"]);
 
   function padFor(thing) { return el("pad-" + thing); }
   function isArmed(thing) { return padFor(thing).getAttribute("aria-pressed") === "true"; }
