@@ -637,12 +637,17 @@
         Sanitize belongs with Song rather than with the run as a whole: it's
         what happens to the song file after it lands - trimmed, renamed,
         checked against the stash for duplicates - and it's the only part of
-        a run that stops to ask you anything. Off, a long playlist goes
-        through without a single question.
+        a run that stops to ask you anything.
+
+        Off to begin with, for that last reason: on, a pasted link can stop
+        halfway and wait to be told where the song starts, which is a lot to
+        spring on somebody who asked for an mp3. Switch it on when tidying
+        is the point. (The Python side still defaults it on for a caller
+        that sends no opinion at all - see Api.start.)
       -->
       <div class="extras">
         <label id="sanitize-wrap" title="Trim, tidy and de-duplicate what lands. Off: keep it exactly as downloaded.">
-          <input type="checkbox" id="sanitize" checked> Sanitize
+          <input type="checkbox" id="sanitize"> Sanitize
         </label>
         <span class="aside" id="take-note">All four stems rebuild the song.</span>
       </div>

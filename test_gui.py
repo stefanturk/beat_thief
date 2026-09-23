@@ -939,15 +939,17 @@ class TestUiFile(unittest.TestCase):
         self.assertIn("pywebview.api.skip_match()", html)
         self.assertNotIn('resolve_match("")', html)
 
-    def test_the_sanitize_switch_is_on_the_page_and_starts_checked(self):
-        # start() defaults a missing key to on, so a checkbox that lost its
-        # "checked" would quietly do nothing - the box would look off and
-        # the run would tidy anyway.
+    def test_the_sanitize_switch_is_on_the_page_and_starts_off(self):
+        # start() defaults a *missing* key to on, for callers that predate
+        # the switch. So the page has to send its answer every time: an
+        # unchecked box whose value never left the page would read as no
+        # opinion, and the run would tidy anyway - stopping to ask about a
+        # trim nobody armed.
         with open(gui.UI_FILE) as page:
             markup = page.read()
         box = re.search(r'<input[^>]*id="sanitize"[^>]*>', markup)
         self.assertIsNotNone(box, "the page has no Sanitize checkbox")
-        self.assertIn("checked", box.group(0))
+        self.assertNotIn("checked", box.group(0))
         self.assertIn('options.sanitize = el("sanitize").checked', markup)
 
     def test_the_pads_start_armed_for_what_the_script_says_they_do(self):
