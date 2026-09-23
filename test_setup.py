@@ -13,11 +13,17 @@ import unittest
 
 REPO = os.path.dirname(os.path.abspath(__file__))
 SETUP = os.path.join(REPO, "setup.sh")
+UPDATE = os.path.join(REPO, "update.sh")
+INSTALL = os.path.join(REPO, "install.sh")
+
+
+def _read(path: str) -> str:
+    with open(path) as f:
+        return f.read()
 
 
 def _setup() -> str:
-    with open(SETUP) as f:
-        return f.read()
+    return _read(SETUP)
 
 
 def _required_packages() -> set[str]:
@@ -66,15 +72,76 @@ class TestSetupAndTheBuildAgreeOnPython(unittest.TestCase):
 
 
 class TestSetupIsRunnable(unittest.TestCase):
-    def test_it_is_executable(self):
+    def test_all_three_scripts_are_executable(self):
         # Double-clicking a script that isn't executable opens it in a text
-        # editor, which is a confusing first thing to happen.
-        self.assertTrue(os.access(SETUP, os.X_OK))
+        # editor, which is a confusing first thing to happen. install.sh is
+        # fetched over https and exec'd, where a lost bit is worse still: it
+        # runs as somebody's one-line introduction to the whole thing.
+        for script in (SETUP, UPDATE, INSTALL):
+            with self.subTest(script=os.path.basename(script)):
+                self.assertTrue(os.access(script, os.X_OK))
 
-    def test_it_stops_on_the_first_failure(self):
+    def test_they_all_stop_on_the_first_failure(self):
         # Without this, a failed pip install would be followed by a build
         # and a cheerful "Done."
-        self.assertIn("set -euo pipefail", _setup())
+        for script in (SETUP, UPDATE, INSTALL):
+            with self.subTest(script=os.path.basename(script)):
+                self.assertIn("set -euo pipefail", _read(script))
+
+
+class TestTheOneLineInstallerPointsSomewhereReal(unittest.TestCase):
+    """install.sh is the only file anyone is asked to run by URL, and it is
+    fetched from this repo's own main branch. So its idea of where the repo
+    is has to match where the repo actually is - a stale URL here is a
+    clone that 404s in front of somebody who has done nothing wrong yet."""
+
+    def _origin(self) -> str:
+        import subprocess
+        return subprocess.run(
+            ["git", "-C", REPO, "remote", "get-url", "origin"],
+            capture_output=True, text=True, check=True).stdout.strip()
+
+    def test_it_clones_the_repo_it_ships_in(self):
+        url = re.search(r'REPO_URL="([^"]+)"', _read(INSTALL)).group(1)
+
+        self.assertEqual(url.removesuffix(".git"),
+                         self._origin().removesuffix(".git"))
+
+    def test_the_line_in_its_comment_fetches_itself(self):
+        # The curl line is documentation that is also the product. If the
+        # path in it drifts from the filename, the instructions Stefan
+        # copies out of here stop working.
+        install = _read(INSTALL)
+        curl = re.search(r"https://raw\.githubusercontent\.com/[^\s\"')]+",
+                         install).group(0)
+
+        self.assertTrue(curl.endswith("/main/install.sh"), curl)
+        owner_repo = re.search(
+            r"github\.com/([^/]+/[^/.]+)", self._origin()).group(1)
+        self.assertIn(owner_repo, curl)
+
+    def test_it_hands_over_to_the_scripts_in_the_clone(self):
+        # install.sh deliberately does nothing itself beyond getting the
+        # repo down; both halves of the work live in the repo where they
+        # can be tested. If either handover is renamed away, the one-liner
+        # ends after the clone with nothing built.
+        install = _read(INSTALL)
+
+        self.assertIn('exec "$DEST/setup.sh"', install)
+        self.assertIn('exec "$DEST/update.sh"', install)
+
+
+class TestUpdateRebuildsTheSameWaySetupDid(unittest.TestCase):
+    def test_it_builds_against_the_python_setup_installed_into(self):
+        # Same trap as setup.sh's: a Homebrew python3 that arrived with
+        # ffmpeg would win `command -v` and have none of the packages.
+        self.assertIn("PYTHON=/usr/bin/python3", _read(UPDATE))
+
+    def test_it_refuses_to_merge(self):
+        # A plain `git pull` on a copy somebody has edited either stops in a
+        # conflict or writes a merge commit - both in front of a person who
+        # only wanted the new version. --ff-only turns that into a sentence.
+        self.assertIn("git pull --ff-only", _read(UPDATE))
 
 
 if __name__ == "__main__":

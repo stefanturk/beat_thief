@@ -950,6 +950,26 @@ class TestUiFile(unittest.TestCase):
         self.assertIn("checked", box.group(0))
         self.assertIn('options.sanitize = el("sanitize").checked', markup)
 
+    def test_the_pads_start_armed_for_what_the_script_says_they_do(self):
+        # The starting arm state is written twice: once as aria-pressed in
+        # the markup, once as ARMED_TO_BEGIN_WITH for clearSelection() to
+        # restore. Nothing reconciles them, so if they drift the pads come
+        # up one way and go back to another the first time a selection is
+        # cleared - and the run takes something nobody asked for.
+        with open(gui.UI_FILE) as page:
+            markup = page.read()
+
+        armed_in_markup = {
+            stem for stem, pressed in re.findall(
+                r'class="pad"[^>]*data-stem="(\w+)"[^>]*aria-pressed="(\w+)"', markup)
+            if pressed == "true"}
+        listed = re.search(r"ARMED_TO_BEGIN_WITH = new Set\(\[(.*?)\]\)", markup).group(1)
+        armed_in_script = set(re.findall(r'"(\w+)"', listed))
+
+        self.assertEqual(armed_in_markup, armed_in_script)
+        self.assertEqual(armed_in_markup, {"song"},
+                         "a pasted link should start armed for the song alone")
+
 
 class TestChoosingAMatch(unittest.TestCase):
     """A Spotify link names a song; several YouTube uploads answer to that
