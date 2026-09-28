@@ -58,7 +58,7 @@ def isolate_harmony(mp3_path: str, context: instrument_isolator.RunContext | Non
     existing output whose marker is missing or doesn't match is treated as
     stale and reprocessed rather than trusted."""
     context = context or instrument_isolator.DEFAULT_CONTEXT
-    title = os.path.splitext(os.path.basename(mp3_path))[0]
+    title = instrument_isolator.song_title(mp3_path)
     song_dir = instrument_isolator.song_output_dir(mp3_path)
     marker_matches = instrument_isolator.source_marker_matches(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
 

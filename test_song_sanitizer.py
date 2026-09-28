@@ -658,6 +658,24 @@ class TestSanitizeFolder(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, ".originals")))
 
 
+class TestDuplicatesIgnoreTempoAndNumber(unittest.TestCase):
+    """A tempo on the end and a playlist number in front are ours, not the
+    song's - and every song has them, so leaving them in makes any two
+    songs look more alike than they are."""
+
+    def test_two_different_songs_with_the_same_tempo_are_not_duplicates(self):
+        self.assertEqual(sanitizer.find_duplicate_pairs(
+            ["One - Artist (98 BPM).mp3", "Two - Artist (98 BPM).mp3"]), [])
+
+    def test_two_numbered_songs_are_not_duplicates(self):
+        self.assertEqual(sanitizer.find_duplicate_pairs(
+            ["001 - One - Artist.mp3", "002 - Two - Artist.mp3"]), [])
+
+    def test_the_same_song_with_and_without_its_tempo_still_is(self):
+        self.assertEqual(len(sanitizer.find_duplicate_pairs(
+            ["Song Name - Artist.mp3", "Song Name - Artist (104.5 BPM).mp3"])), 1)
+
+
 class TestSanitizeNewDownloads(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
@@ -697,6 +715,13 @@ class TestSanitizeNewDownloads(unittest.TestCase):
         self.assertEqual(len(remaining), 1)
         duplicates_dir = os.path.join(self.tmp_dir, sanitizer.DUPLICATES_DIR_NAME)
         self.assertTrue(os.path.isdir(duplicates_dir))
+
+    def test_says_which_download_became_which_name(self):
+        downloaded = "New Song (Official Video) - Artist.mp3"
+        sanitizer.export_audio(_tone(1000, dbfs_gain=-3), os.path.join(self.tmp_dir, downloaded))
+        renamed = {}
+        sanitizer.sanitize_new_downloads([downloaded], self.tmp_dir, renamed=renamed)
+        self.assertEqual(renamed, {downloaded: "New Song - Artist.mp3"})
 
     def test_missing_filename_is_skipped_without_raising(self):
         final_filenames = sanitizer.sanitize_new_downloads(["Nonexistent.mp3"], self.tmp_dir)

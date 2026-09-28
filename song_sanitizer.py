@@ -129,6 +129,18 @@ def write_id3_tags(path: str, title: str, artist: str) -> None:
     id3_tags.save()
 
 
+def write_tempo_tag(path: str, bpm: str) -> None:
+    """The song's tempo in its BPM tag, where Live and most players look."""
+    try:
+        id3_tags = EasyID3(path)
+    except ID3NoHeaderError:
+        id3_tags = EasyID3()
+        id3_tags.save(path)
+        id3_tags = EasyID3(path)
+    id3_tags["bpm"] = bpm
+    id3_tags.save()
+
+
 _SANITIZED_TAG_DESC = "song_sanitizer"
 
 
@@ -155,7 +167,17 @@ def _is_already_sanitized(path: str) -> bool:
 
 # --- Duplicate detection -----------------------------------------------------
 
+# What Beat Thief itself adds to a song's name - a playlist number in front
+# and the tempo on the end - so not part of what the song is called.
+_OUR_PREFIX_RE = re.compile(r"^\d{3} - ")
+_OUR_SUFFIX_RE = re.compile(r" \([\d.]+ BPM\)$")
+
+
 def normalize_for_compare(stem: str) -> str:
+    # Every song has a number and a tempo once named for them, so leaving
+    # them in makes any two look more alike than they are - and the same
+    # song with and without its tempo look less alike than it is.
+    stem = _OUR_SUFFIX_RE.sub("", _OUR_PREFIX_RE.sub("", stem))
     lowered = stem.lower()
     stripped = re.sub(r"[^a-z0-9]+", " ", lowered)
     return re.sub(r"\s+", " ", stripped).strip()
@@ -717,7 +739,7 @@ def sanitize_folder(output_dir: str) -> None:
 
 
 def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: bool = True,
-                           review=None) -> list[str]:
+                           review=None, renamed: dict | None = None) -> list[str]:
     """Sanitize exactly the given (just-downloaded) filenames, rather than
     rescanning every mp3 already in output_dir - reprocessing/reporting on
     songs this run never touched is just noise. Duplicate detection still
@@ -734,7 +756,11 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
     either prompting or deciding alone (see review_flags) - what the GUI
     passes, since it can ask, just not through a terminal. Without it,
     interactive=False fades every flag unasked (auto_resolve_flags), for a
-    piped run with nobody there at all."""
+    piped run with nobody there at all.
+
+    renamed, if given, is filled in with which download became which of
+    the returned names - for a caller that knows something about a
+    download by the name yt-dlp gave it (its place in a playlist, say)."""
     all_flags = []
     final_filenames = []
     for filename in filenames:
@@ -753,8 +779,12 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
         added_mp3s = [f for f in (after - before) if f.lower().endswith(".mp3")]
         if added_mp3s:
             final_filenames.append(added_mp3s[0])
+            if renamed is not None:
+                renamed[filename] = added_mp3s[0]
         elif os.path.exists(path):
             final_filenames.append(filename)
+            if renamed is not None:
+                renamed[filename] = filename
         # else: sanitize_file left the original in place under a name that
         # collided with an unrelated existing song - nothing to chain onto.
 

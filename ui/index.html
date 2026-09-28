@@ -141,7 +141,32 @@
   }
 
   /* Armed pads: on or off at a glance, no hunting for a tick mark. */
-  .pads { display: flex; gap: 8px; }
+  .pads { display: flex; flex-direction: column; gap: 8px; }
+  .song-row { display: flex; align-items: center; gap: 18px; }
+  .song-row .pad { flex: 0 0 calc((100% - 24px) / 4); }
+  .song-row label {
+    display: flex; align-items: center; gap: 7px; cursor: pointer;
+    font-size: 12.5px; color: var(--dim);
+  }
+  .song-row input { accent-color: var(--violet); margin: 0; }
+  .song-row label[data-off="true"] { opacity: 0.4; cursor: default; }
+  .song-row label[hidden] { display: none; }
+  .text-button {
+    margin-left: auto;
+    padding: 0;
+    background: none;
+    border: none;
+    color: var(--dim);
+    font: inherit;
+    font-size: 12.5px;
+    cursor: pointer;
+  }
+  .text-button:hover { color: var(--violet); }
+  .text-button:disabled { opacity: 0.4; cursor: default; }
+  .text-button:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+  .stem-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  /* Each stem's loop goes under the stem it's cut from. */
+  #pad-beat { grid-column: 1; grid-row: 2; }
 
   .pad {
     flex: 1;
@@ -620,44 +645,66 @@
     <section>
       <p class="label">Take</p>
       <!--
-        Seven things, in the order they're shown everywhere: Song, Drums,
-        Beat, Midi (hidden, see below), Bass, Harmony, Vocals. Grey means not armed, purple means
-        armed for this run, green means it's already in the stash - and
-        green can only be cleared by deleting the file, never by clicking.
+        Song on its own row, with what happens to the song file beside it.
+        Under it the stems as columns, each one's loop underneath it: Beat
+        is made out of Drums, so it sits under Drums, and the empty slots
+        under Bass, Harmony and Vocals are where their loops will go. Midi
+        is hidden (see below). Grey means not armed, purple means armed for
+        this run, green means it's already in the stash - and green can
+        only be cleared by deleting the file, never by clicking.
       -->
       <div class="pads">
-        <button class="pad" id="pad-song" data-stem="song" aria-pressed="true">Song</button>
-        <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="false">Drums</button>
-        <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
-        <!--
-          Midi is hidden, not gone: Ableton's own drums-to-MIDI does the job
-          better for now, and a square that makes a worse copy of something
-          you already have is only in the way. Never shown means never armed,
-          so a steal writes the .wav loop alone. Deleting "hidden" brings it
-          back - everything behind it (steal_beat's outputs, the transcriber)
-          is still there.
-        -->
-        <button class="pad" id="pad-midi" data-stem="midi" data-again="true" aria-pressed="false" hidden>Midi</button>
-        <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
-        <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
-        <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
-      </div>
-      <!--
-        Sanitize belongs with Song rather than with the run as a whole: it's
-        what happens to the song file after it lands - trimmed, renamed,
-        checked against the stash for duplicates - and it's the only part of
-        a run that stops to ask you anything.
+        <div class="song-row">
+          <button class="pad" id="pad-song" data-stem="song" aria-pressed="true">Song</button>
+          <!--
+            Sanitize belongs with Song rather than with the run as a whole:
+            it's what happens to the song file after it lands - trimmed,
+            renamed, checked against the stash for duplicates - and it's the
+            only part of a run that stops to ask you anything.
 
-        Off to begin with, for that last reason: on, a pasted link can stop
-        halfway and wait to be told where the song starts, which is a lot to
-        spring on somebody who asked for an mp3. Switch it on when tidying
-        is the point. (The Python side still defaults it on for a caller
-        that sends no opinion at all - see Api.start.)
-      -->
+            Off to begin with, for that last reason: on, a pasted link can
+            stop halfway and wait to be told where the song starts, which is
+            a lot to spring on somebody who asked for an mp3. Switch it on
+            when tidying is the point. (The Python side still defaults it on
+            for a caller that sends no opinion at all - see Api.start.)
+          -->
+          <label id="sanitize-wrap" title="Trim, tidy and de-duplicate what lands. Off: keep it exactly as downloaded.">
+            <input type="checkbox" id="sanitize"> Sanitize
+          </label>
+          <!--
+            Only for a playlist - a single song has no place in anything to
+            number it by - so hidden until the link is one (see
+            showNumbering). Off to begin with, like Sanitize.
+          -->
+          <label id="number-wrap" title="Put each song's place in the playlist in front of its name: 001 - Song - Artist." hidden>
+            <input type="checkbox" id="number"> Number in order
+          </label>
+          <!--
+            Songs you already have, tidied where they sit: any folder, and
+            the folders in it. Pushed to the end of the row - it's not part
+            of what the next run takes.
+          -->
+          <button class="text-button" id="tidy-folder" type="button"
+                  title="Sanitize songs you already have, and put their tempo in their names.">Sanitize a folder…</button>
+        </div>
+        <div class="stem-grid">
+          <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="false">Drums</button>
+          <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
+          <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
+          <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
+          <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
+          <!--
+            Midi is hidden, not gone: Ableton's own drums-to-MIDI does the job
+            better for now, and a square that makes a worse copy of something
+            you already have is only in the way. Never shown means never armed,
+            so a steal writes the .wav loop alone. Deleting "hidden" brings it
+            back - everything behind it (steal_beat's outputs, the transcriber)
+            is still there.
+          -->
+          <button class="pad" id="pad-midi" data-stem="midi" data-again="true" aria-pressed="false" hidden>Midi</button>
+        </div>
+      </div>
       <div class="extras">
-        <label id="sanitize-wrap" title="Trim, tidy and de-duplicate what lands. Off: keep it exactly as downloaded.">
-          <input type="checkbox" id="sanitize"> Sanitize
-        </label>
         <span class="aside" id="take-note">All four stems rebuild the song.</span>
       </div>
     </section>
@@ -747,10 +794,18 @@
   // where the pipeline puts it. Pulling it back out is what lets the readout
   // finish on the number worth knowing rather than a bare "100%".
   const TEMPO = /at ([\d.]+) BPM\)/;
+  // A sanitized song says its own tempo too ("Song - Artist (104.5 BPM).mp3"),
+  // so a song-only run can finish on it - but only when it was one song: the
+  // first of a playlist's tempos is no more the answer than any other.
+  const SONG_TEMPO = /\(([\d.]+) BPM\)\.mp3$/;
 
   function tempoOf(paths) {
     for (const path of paths) {
       const found = path.match(TEMPO);
+      if (found) return found[1];
+    }
+    if (paths.length === 1) {
+      const found = paths[0].match(SONG_TEMPO);
       if (found) return found[1];
     }
     return null;
@@ -949,6 +1004,7 @@
     if (!el("picker").hidden) closePicker();
     selected = song;
     el("url").value = song.title;
+    el("number-wrap").hidden = true;   // a song from the stash is one song
     for (const thing of STASH_ORDER) {
       padFor(thing).dataset.have = (song.have || {})[thing] ? "true" : "false";
       setArmed(thing, false);
@@ -2085,6 +2141,7 @@
     const options = {};
     for (const thing of STASH_ORDER) options[thing] = isArmed(thing);
     options.sanitize = el("sanitize").checked;
+    options.number = !el("number-wrap").hidden && el("number").checked;
 
     // Neither Beat nor Midi is something a run can produce - both need you
     // to hear the phrase - so they're dropped from what's asked for and
@@ -2155,7 +2212,29 @@
 
   // Typing a link is starting over on a new song, so the stash colours from
   // whatever was selected before don't apply any more.
-  el("url").addEventListener("input", () => { if (selected) clearSelection(); });
+  el("url").addEventListener("input", () => {
+    if (selected) clearSelection();
+    showNumbering();
+  });
+
+  // Numbering only means something for a playlist, so the box is only
+  // there when the link is one. Python decides, from the link's shape.
+  function showNumbering() {
+    const url = el("url").value;
+    window.pywebview.api.is_playlist(url).then((playlist) => {
+      if (el("url").value === url) el("number-wrap").hidden = !playlist;
+    });
+  }
+
+  el("tidy-folder").addEventListener("click", () => {
+    if (running) return;
+    lastStage = null;
+    pendingBeatFor = null;
+    window.pywebview.api.tidy_folder().then((state) => {
+      render(state);
+      if (state.running && !polling) polling = setInterval(poll, 250);
+    }).catch(complain);
+  });
 
   el("go").addEventListener("click", () => {
     if (running) window.pywebview.api.cancel().then(render);

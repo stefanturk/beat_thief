@@ -50,7 +50,8 @@ class _FakeYoutubeDL:
 
     def download(self, urls):
         output_dir = os.path.dirname(self.opts["outtmpl"])
-        for entry in self._entries_for(urls[0] if urls else None):
+        entries = self._entries_for(urls[0] if urls else None)
+        for number, entry in enumerate(entries, start=1):
             filename = f"{entry['title']} - Artist.mp3"
             path = os.path.join(output_dir, filename)
             with open(path, "wb") as f:
@@ -61,6 +62,8 @@ class _FakeYoutubeDL:
             # hook fires. Faking the mp3 here hid a real bug for months:
             # the sanitizer was being handed a filename that wasn't there.
             info = {"title": entry["title"], "filepath": os.path.splitext(path)[0] + ".webm"}
+            if len(entries) > 1:
+                info["playlist_index"] = number
             for hook in self.opts.get("progress_hooks", []):
                 hook({"status": "downloading", "info_dict": info,
                       "total_bytes": 100, "downloaded_bytes": 50})
@@ -84,7 +87,7 @@ class PipelineTestCase(unittest.TestCase):
         # orchestration, so the sanitizer is stood in for throughout.
         sanitize = mock.patch(
             "song_sanitizer.sanitize_new_downloads",
-            side_effect=lambda filenames, output_dir, interactive=True, review=None: list(filenames),
+            side_effect=lambda filenames, output_dir, interactive=True, review=None, renamed=None: list(filenames),
         )
         self.mock_sanitize = sanitize.start()
         self.addCleanup(sanitize.stop)
@@ -102,6 +105,12 @@ class PipelineTestCase(unittest.TestCase):
         released = mock.patch("youtube_match.music_match", return_value=None)
         self.mock_released = released.start()
         self.addCleanup(released.stop)
+        # Reading a tempo needs real audio too, so by default there isn't
+        # one and names stay as the sanitizer left them. The tests about
+        # the tempo in the name patch this back.
+        tempo = mock.patch("pipeline._read_alignment", return_value=None)
+        self.mock_tempo = tempo.start()
+        self.addCleanup(tempo.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -415,6 +424,69 @@ class TestSkippingTheTidyUp(PipelineTestCase):
         self.mock_sanitize.assert_called_once()
 
 
+class TestTheTempoGoesInTheName(PipelineTestCase):
+    """A sanitized song says its tempo in its filename and its BPM tag, so
+    it can be dropped into Live or sorted in Finder without isolating
+    anything first."""
+
+    def test_a_sanitized_song_is_named_and_tagged_with_its_tempo(self):
+        self.mock_tempo.return_value = (0, 104.46)
+        result = self._run()
+
+        expected = os.path.join(self.tmp_dir, "Some Song - Artist (104.5 BPM)",
+                                "Some Song - Artist (104.5 BPM).mp3")
+        self.assertEqual(result["songs"], [expected])
+        from mutagen.easyid3 import EasyID3
+        self.assertEqual(EasyID3(expected)["bpm"], ["104.5"])
+        self.assertIn("tempo", self._stages())
+
+    def test_the_tempo_read_is_kept_for_the_isolators(self):
+        # Reading a tempo takes seconds and the renamed file is a new key
+        # to song_alignment's cache, so without this the isolators would
+        # read it all over again - and could land on a different answer.
+        self.mock_tempo.return_value = (250, 104.46)
+        result = self._run()
+        self.assertEqual(instrument_isolator.song_alignment(result["songs"][0], interactive=False),
+                         (250, 104.46))
+        instrument_isolator._alignment_cache.clear()
+
+    def test_a_whole_number_tempo_has_no_decimal(self):
+        self.mock_tempo.return_value = (0, 120.0)
+        result = self._run()
+        self.assertTrue(result["songs"][0].endswith("Some Song - Artist (120 BPM).mp3"))
+
+    def test_left_alone_when_sanitize_is_off(self):
+        result = self._run(sanitize=False)
+        self.mock_tempo.assert_not_called()
+        self.assertTrue(result["songs"][0].endswith("Some Song - Artist.mp3"))
+
+    def test_a_tempo_that_cannot_be_read_leaves_the_name_as_it_was(self):
+        result = self._run()
+        self.assertTrue(result["songs"][0].endswith("Some Song - Artist.mp3"))
+        self.assertEqual(self._stages()[-1], "done")
+
+    def test_pasting_the_link_again_finds_the_renamed_song(self):
+        # yt-dlp only knows the name it gave the file. The song on disk now
+        # has its tempo in the name, and a re-paste still has to find it
+        # rather than download it all over again.
+        class SkippingYoutubeDL(_FakeYoutubeDL):
+            def download(self, urls):
+                _FakeYoutubeDL.downloads.append(urls)
+                return 0
+
+        existing = os.path.join(self.tmp_dir, "Some Song - Artist (104.5 BPM)",
+                                "Some Song - Artist (104.5 BPM).mp3")
+        os.makedirs(os.path.dirname(existing))
+        with open(existing, "wb") as f:
+            f.write(b"already here")
+
+        with mock.patch("yt_dlp.YoutubeDL", SkippingYoutubeDL):
+            result = self._run()
+
+        self.assertEqual(result["songs"], [existing])
+        self.assertEqual(len(_FakeYoutubeDL.downloads), 1, "downloaded again without the archive")
+
+
 class TestCancelling(PipelineTestCase):
     def test_cancelling_before_isolation_stops_the_run(self):
         with mock.patch("drum_isolator.isolate_drums_for_single_file") as mock_drums:
@@ -643,6 +715,40 @@ class TestOneFolderPerSong(unittest.TestCase):
 
         filed = pipeline.file_into_own_folder(flat)
         self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), filed)
+
+    def test_a_song_is_found_under_its_tempo_name(self):
+        folder = os.path.join(self.tmp_dir, "Song - Artist (98 BPM)")
+        os.makedirs(folder)
+        renamed = os.path.join(folder, "Song - Artist (98 BPM).mp3")
+        with open(renamed, "wb") as f:
+            f.write(b"x")
+        self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), renamed)
+
+    def test_a_song_is_found_under_the_name_the_sanitizer_gave_it(self):
+        # yt-dlp's "Song - Artist (Official Video)" is tidied to
+        # "Song - Artist" - the same derivation finds it again.
+        folder = os.path.join(self.tmp_dir, "Song - Artist (98 BPM)")
+        os.makedirs(folder)
+        renamed = os.path.join(folder, "Song - Artist (98 BPM).mp3")
+        with open(renamed, "wb") as f:
+            f.write(b"x")
+        self.assertEqual(
+            pipeline.existing_song(self.tmp_dir, "Song - Artist (Official Video).mp3"), renamed)
+
+    def test_a_numbered_song_is_found_under_its_number(self):
+        folder = os.path.join(self.tmp_dir, "004 - Song - Artist (98 BPM)")
+        os.makedirs(folder)
+        renamed = os.path.join(folder, "004 - Song - Artist (98 BPM).mp3")
+        with open(renamed, "wb") as f:
+            f.write(b"x")
+        self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), renamed)
+
+    def test_a_different_song_with_a_tempo_is_not_mistaken_for_this_one(self):
+        folder = os.path.join(self.tmp_dir, "Song - Artist Two (98 BPM)")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "Song - Artist Two (98 BPM).mp3"), "wb") as f:
+            f.write(b"x")
+        self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), "")
 
     def test_a_song_that_is_not_there_is_reported_as_missing(self):
         self.assertEqual(pipeline.existing_song(self.tmp_dir, "Nothing.mp3"), "")
@@ -1031,6 +1137,20 @@ class TestSpotifyPlaylists(PipelineTestCase):
                          [[self._youtube("Them Changes")], [self._youtube("Bad Bad News")]])
         self.assertEqual(result["downloaded"], 2)
 
+    def test_numbered_songs_keep_their_place_in_the_spotify_list(self):
+        # Numbered by where the song sits on Spotify, not by what YouTube
+        # happened to have: a song that couldn't be found leaves a gap
+        # rather than shuffling everything after it up one.
+        result = self._play(titles=("Them Changes", "Missing One", "Bad Bad News"),
+                            missing=("Missing One",), number=True)
+        self.assertEqual(sorted(os.path.basename(p) for p in result["songs"]),
+                         ["001 - Them Changes - Artist.mp3", "003 - Bad Bad News - Artist.mp3"])
+
+    def test_a_single_song_is_never_numbered(self):
+        _FakeYoutubeDL.by_url = {}
+        result = self._run(number=True)
+        self.assertTrue(os.path.basename(result["songs"][0]).startswith("Some Song"))
+
     def test_songs_alone_land_in_one_folder_named_after_the_playlist(self):
         """A playlist arrives as one thing and should land as one thing.
         Nobody asked for stems, so nothing needs a folder of its own -
@@ -1223,6 +1343,111 @@ class TestSpotifyPlaylists(PipelineTestCase):
                          os.path.join(self.tmp_dir, "Some Song - Artist"))
 
 
+class TestSanitizingSongsAlreadyOnDisk(PipelineTestCase):
+    """Songs downloaded before sanitizing was on - or before it read the
+    tempo - tidied where they sit, in any folder."""
+
+    def _put(self, *parts):
+        path = os.path.join(self.tmp_dir, *parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"x")
+        return path
+
+    def _tidy(self, **kwargs):
+        kwargs.setdefault("on_event", self.events.append)
+        return pipeline.sanitize_existing(self.tmp_dir, **kwargs)
+
+    def test_every_song_is_found_flat_in_its_own_folder_or_in_a_playlist(self):
+        self._put("Flat - Artist.mp3")
+        self._put("Filed - Artist", "Filed - Artist.mp3")
+        self._put("Misco", "One - Artist.mp3")
+        self._put("Misco", "Two - Artist.mp3")
+        self._tidy()
+        tidied = sorted(call.args[0][0] for call in self.mock_sanitize.call_args_list)
+        self.assertEqual(tidied, ["Filed - Artist.mp3", "Flat - Artist.mp3",
+                                  "One - Artist.mp3", "Two - Artist.mp3"])
+
+    def test_duplicates_and_hidden_folders_are_left_alone(self):
+        self._put("Duplicates", "Old - Artist.mp3")
+        self._put(".stash", "Hidden - Artist.mp3")
+        result = self._tidy()
+        self.mock_sanitize.assert_not_called()
+        self.assertEqual(result["songs"], [])
+
+    def test_a_song_gets_its_tempo_and_its_folder_follows(self):
+        self.mock_tempo.return_value = (0, 98.0)
+        self._put("Filed - Artist", "Filed - Artist.mp3")
+        stem = self._put("Filed - Artist", "Filed - Artist (Isolated Drums at 98 BPM).wav")
+        result = self._tidy()
+        folder = os.path.join(self.tmp_dir, "Filed - Artist (98 BPM)")
+        self.assertEqual(result["songs"], [os.path.join(folder, "Filed - Artist (98 BPM).mp3")])
+        self.assertTrue(os.path.exists(os.path.join(folder, os.path.basename(stem))),
+                        "the stems moved with the song")
+
+    def test_a_playlist_folder_is_not_renamed_after_one_of_its_songs(self):
+        self.mock_tempo.return_value = (0, 98.0)
+        self._put("Misco", "Misco.mp3")
+        self._put("Misco", "Two - Artist.mp3")
+        result = self._tidy()
+        self.assertTrue(all(os.path.dirname(p) == os.path.join(self.tmp_dir, "Misco")
+                            for p in result["songs"]))
+
+    def test_a_song_that_already_has_its_tempo_is_not_read_again(self):
+        self._put("Song - Artist (98 BPM)", "Song - Artist (98 BPM).mp3")
+        self._tidy()
+        self.mock_tempo.assert_not_called()
+
+    def test_the_stash_keeps_track_of_a_renamed_song(self):
+        self.mock_tempo.return_value = (0, 98.0)
+        old = self._put("Filed - Artist", "Filed - Artist.mp3")
+        history.remember("https://youtube.com/watch?v=x", [old])
+        result = self._tidy()
+        self.assertEqual(history.url_for(result["songs"][0]), "https://youtube.com/watch?v=x")
+
+    def test_says_which_song_it_is_on(self):
+        self._put("A - Artist.mp3")
+        self._put("B - Artist.mp3")
+        self._tidy()
+        tidying = [e for e in self.events if e["stage"] == "tidying"]
+        self.assertEqual([(e["index"], e["total"]) for e in tidying], [(1, 2), (2, 2)])
+        self.assertEqual(self.events[-1]["stage"], "done")
+
+    def test_stopping_stops_between_songs(self):
+        self._put("A - Artist.mp3")
+        self._put("B - Artist.mp3")
+        result = self._tidy(should_cancel=lambda: self.mock_sanitize.call_count >= 1)
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(self.mock_sanitize.call_count, 1)
+
+    def test_a_trim_question_goes_to_whoever_can_answer(self):
+        self._put("A - Artist.mp3")
+        reviewer = mock.Mock()
+        self._tidy(on_review=reviewer)
+        self.assertIs(self.mock_sanitize.call_args.kwargs["review"], reviewer)
+
+
+class TestIsPlaylistLink(unittest.TestCase):
+    """Whether the page offers to number the songs - from the link's shape
+    alone, since it's asked on every keystroke and can't wait on YouTube."""
+
+    def test_playlists_and_albums(self):
+        for url in ("https://open.spotify.com/playlist/4jFldPjGeA3jiOj6U6PaIW",
+                    "https://open.spotify.com/album/1bt6q2SruMsBtcerNVtpZB",
+                    "https://music.youtube.com/playlist?list=PLabc",
+                    "https://www.youtube.com/playlist?list=PLabc"):
+            self.assertTrue(pipeline.is_playlist_link(url), url)
+
+    def test_single_songs(self):
+        for url in ("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+                    "https://www.youtube.com/watch?v=abc",
+                    # A song clicked inside a playlist is still one song -
+                    # noplaylist downloads just it.
+                    "https://www.youtube.com/watch?v=abc&list=PLabc",
+                    "", "not a link"):
+            self.assertFalse(pipeline.is_playlist_link(url), url)
+
+
 class TestYoutubePlaylists(PipelineTestCase):
     """A YouTube playlist lands the way a Spotify one does: in one folder
     named after it. It used to be filed song by song at the top level of
@@ -1252,6 +1477,38 @@ class TestYoutubePlaylists(PipelineTestCase):
                          ["One - Artist.mp3", "Two - Artist.mp3"])
         for path in result["songs"]:
             self.assertEqual(os.path.dirname(path), folder)
+
+    def test_numbered_songs_say_where_they_sit_in_the_playlist(self):
+        result = self._play(number=True)
+        self.assertEqual(sorted(os.path.basename(p) for p in result["songs"]),
+                         ["001 - One - Artist.mp3", "002 - Two - Artist.mp3"])
+
+    def test_the_number_goes_in_front_of_the_tempo_name(self):
+        self.mock_tempo.return_value = (0, 98.0)
+        result = self._play(number=True)
+        self.assertEqual(sorted(os.path.basename(p) for p in result["songs"]),
+                         ["001 - One - Artist (98 BPM).mp3", "002 - Two - Artist (98 BPM).mp3"])
+
+    def test_numbering_is_off_unless_asked_for(self):
+        result = self._play()
+        self.assertFalse(any(os.path.basename(p)[0].isdigit() for p in result["songs"]))
+
+    def test_the_sanitizer_renaming_a_song_does_not_lose_its_number(self):
+        # The number is yt-dlp's to know, keyed by the name it gave the
+        # file - and sanitizing hands back a different name.
+        def tidy(filenames, output_dir, interactive=True, review=None, renamed=None):
+            out = []
+            for name in filenames:
+                tidied = "Tidied " + name
+                os.rename(os.path.join(output_dir, name), os.path.join(output_dir, tidied))
+                if renamed is not None:
+                    renamed[name] = tidied
+                out.append(tidied)
+            return out
+        self.mock_sanitize.side_effect = tidy
+        result = self._play(number=True)
+        self.assertEqual(sorted(os.path.basename(p) for p in result["songs"]),
+                         ["001 - Tidied One - Artist.mp3", "002 - Tidied Two - Artist.mp3"])
 
     def test_a_playlist_with_no_name_still_gets_a_folder(self):
         with mock.patch.object(_FakeYoutubeDL, "playlist_title", ""):
