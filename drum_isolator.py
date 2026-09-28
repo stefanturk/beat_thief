@@ -37,7 +37,7 @@ _SOURCE_MARKER_FILENAME = ".drums_source.json"
 
 
 def _output_basename(title: str, tempo: float) -> str:
-    return f"{title} ({_LABEL} at {tempo:.3f} BPM)"
+    return f"{title} ({_LABEL} at {instrument_isolator.bpm_text(tempo)} BPM)"
 
 
 def isolate_drums(mp3_path: str, context: instrument_isolator.RunContext | None = None) -> bool:
@@ -72,7 +72,7 @@ def isolate_drums(mp3_path: str, context: instrument_isolator.RunContext | None 
 
     instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
 
-    print(f"{title}: drums isolated ({tempo:.3f} BPM).")
+    print(f"{title}: drums isolated ({instrument_isolator.bpm_text(tempo)} BPM).")
     return True
 
 

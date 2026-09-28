@@ -351,8 +351,8 @@ class Api:
             # somewhere you never heard it start.
             "origin": round(loop.origin_sec, 4),
             "duration": round(loop.beat.duration_sec, 4),
-            "tempo": round(loop.tempo, 3),
-            "song_tempo": round(loop.song_tempo, 3),
+            "tempo": round(loop.tempo, 1),
+            "song_tempo": round(loop.song_tempo, 1),
             "hits": loop.hits_used,
             # Hits nothing was detected for, worked out from the pulse the
             # rest of that voice is on (see groove_reader). Reported because
@@ -578,11 +578,24 @@ class Api:
             return f"Matching {event['index']} of {event['total']} — {event['song']}", None
         if stage == "found":
             song = event.get("song")
+            index, total = event.get("index"), event.get("queue_total")
+            if index and total and total > 1:
+                # Between two songs of a playlist the bar holds its place
+                # rather than going blank and starting over.
+                return f"Song {index} of {total} — {song or 'next song'}", (index - 1) / total * 100
             return (f"Found {song}" if song else "Downloading..."), None
-        if stage == "downloading":
-            return f"Downloading {event['song']}", event.get("percent")
-        if stage == "downloaded":
-            return f"Downloaded {event['song']}", 100
+        if stage in ("downloading", "downloaded"):
+            index, total = event.get("index"), event.get("total")
+            percent = 100.0 if stage == "downloaded" else event.get("percent")
+            if not (index and total and total > 1):
+                verb = "Downloaded" if stage == "downloaded" else "Downloading"
+                return f"{verb} {event['song']}", percent
+            # A playlist: one bar for the whole thing, since each song's
+            # own 0-100 told you nothing about how far through twelve of
+            # them you were. The song's own progress stays in the line.
+            overall = ((index - 1) + (percent or 0) / 100) / total * 100
+            of_it = f" ({round(percent)}%)" if stage == "downloading" and percent is not None else ""
+            return f"Song {index} of {total} — {event['song']}{of_it}", overall
         if stage == "download-failed":
             return f"Couldn't download {event['song']}", None
         if stage == "download-summary":

@@ -24,6 +24,21 @@ def _click_track(bpm, beats, hit_ms=30, freq=1000):
     return track
 
 
+class TestBpmText(unittest.TestCase):
+    def test_one_decimal_at_most(self):
+        self.assertEqual(instrument_isolator.bpm_text(105.373), "105.4")
+        self.assertEqual(instrument_isolator.bpm_text(119.96), "120")
+        self.assertEqual(instrument_isolator.bpm_text(98.0), "98")
+
+    def test_stems_named_before_this_still_read_back(self):
+        # Every stem made before the change says "at 105.373 BPM", and the
+        # picker and the steal both read their tempo out of that name.
+        for basename, tempo in (("Song (Isolated Drums at 105.373 BPM)", 105.373),
+                                ("Song (Isolated Drums at 105.4 BPM)", 105.4),
+                                ("Song (Isolated Drums at 120 BPM)", 120.0)):
+            self.assertEqual(instrument_isolator.parse_tempo_from_basename(basename), tempo)
+
+
 class TestDetectTempo(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()

@@ -88,7 +88,7 @@ class TestIsolateBass(unittest.TestCase):
         result = bass_isolator.isolate_bass(self.mp3_path)
 
         self.assertTrue(result)
-        basename = "Song - Artist (Isolated Bass at 120.000 BPM)"
+        basename = "Song - Artist (Isolated Bass at 120 BPM)"
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
         mock_gate.assert_called_once_with(os.path.join(self.song_dir, basename + ".wav"))
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, bass_isolator._SOURCE_MARKER_FILENAME)))
@@ -126,7 +126,10 @@ class TestIsolateBass(unittest.TestCase):
 
         self.assertTrue(result)
         mock_run_demucs.assert_called_once()
-        self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
+        # Redone under today's name, one decimal at most, and the old
+        # three-decimal copy cleared rather than left beside it.
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Song - Artist (Isolated Bass at 120 BPM).wav")))
+        self.assertFalse(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
 
 
 class TestApplyNoiseGate(unittest.TestCase):

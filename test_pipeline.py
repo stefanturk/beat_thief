@@ -36,8 +36,12 @@ class _FakeYoutubeDL:
     def __exit__(self, *exc):
         return False
 
+    # What yt-dlp calls a playlist, at the top level of its info - empty
+    # for everything but the tests that are about a playlist's name.
+    playlist_title = ""
+
     def extract_info(self, url, download=False):
-        return {"entries": self._entries_for(url)}
+        return {"entries": self._entries_for(url), "title": self.playlist_title}
 
     def prepare_filename(self, entry):
         return os.path.join(
@@ -92,6 +96,12 @@ class PipelineTestCase(unittest.TestCase):
         recorded = mock.patch("history.HISTORY_PATH", os.path.join(self.tmp_dir, "history.json"))
         recorded.start()
         self.addCleanup(recorded.stop)
+        # No YouTube Music release by default, so every Spotify test goes
+        # through the ordinary search it mocks - and none of them touch the
+        # network. The tests about the release patch this back.
+        released = mock.patch("youtube_match.music_match", return_value=None)
+        self.mock_released = released.start()
+        self.addCleanup(released.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -1169,6 +1179,31 @@ class TestSpotifyPlaylists(PipelineTestCase):
 
         self.assertTrue(result["cancelled"])
         self.assertEqual(_FakeYoutubeDL.downloads, [[self._youtube("Them Changes")]])
+        # The song that did finish is a real song: it's in the playlist's
+        # folder and the stash knows it, rather than sitting there
+        # unremembered because the run stopped before filing anything.
+        finished = os.path.join(self.tmp_dir, "Misco", "Them Changes - Artist.mp3")
+        self.assertEqual(result["songs"], [finished])
+        self.assertEqual(history.url_for(finished), self._youtube("Them Changes"))
+
+    def test_a_playlist_youtube_only_had_one_song_from_is_still_a_folder(self):
+        result = self._play(titles=("Them Changes", "Obscure B-Side"),
+                            missing=("Obscure B-Side",))
+        folder = os.path.join(self.tmp_dir, "Misco")
+        self.assertEqual(result["output_dir"], folder)
+        self.assertEqual(os.path.dirname(result["songs"][0]), folder)
+
+    def test_a_release_youtube_music_is_sure_of_skips_the_search(self):
+        self.mock_released.side_effect = lambda query, want, artist: {
+            "url": "https://www.youtube.com/watch?v=release" + query.split(" ", 1)[1][:3]}
+        collection = self._collection("Misco", "Them Changes")
+        _FakeYoutubeDL.by_url = {"https://www.youtube.com/watch?v=releaseThe": [{"title": "Them Changes"}]}
+        with mock.patch("spotify.collection", return_value=collection), \
+             mock.patch("youtube_match.candidates") as searched:
+            pipeline.run(self.PLAYLIST, output_dir=self.tmp_dir, on_event=self.events.append)
+        searched.assert_not_called()
+        self.assertEqual(_FakeYoutubeDL.downloads, [["https://www.youtube.com/watch?v=releaseThe"]])
+        self.mock_released.assert_called_once_with("Someone Them Changes", 200.0, "Someone")
 
     def test_a_full_page_of_songs_says_it_might_not_be_all_of_them(self):
         """The embed page carries no total, so a truncated playlist looks
@@ -1186,6 +1221,63 @@ class TestSpotifyPlaylists(PipelineTestCase):
         self.assertEqual(result["output_dir"], self.tmp_dir)
         self.assertEqual(os.path.dirname(result["songs"][0]),
                          os.path.join(self.tmp_dir, "Some Song - Artist"))
+
+
+class TestYoutubePlaylists(PipelineTestCase):
+    """A YouTube playlist lands the way a Spotify one does: in one folder
+    named after it. It used to be filed song by song at the top level of
+    the downloads folder, because only a Spotify link carried a playlist
+    name - found by a 17-song YouTube Music playlist scattered among
+    everything else."""
+
+    PLAYLIST = "https://music.youtube.com/playlist?list=PLabc"
+
+    def setUp(self):
+        super().setUp()
+        _FakeYoutubeDL.by_url = {self.PLAYLIST: [{"title": "One"}, {"title": "Two"}]}
+        playlist_name = mock.patch.object(_FakeYoutubeDL, "playlist_title", "Funk Night", create=True)
+        playlist_name.start()
+        self.addCleanup(playlist_name.stop)
+
+    def _play(self, **kwargs):
+        kwargs.setdefault("output_dir", self.tmp_dir)
+        kwargs.setdefault("on_event", self.events.append)
+        return pipeline.run(self.PLAYLIST, **kwargs)
+
+    def test_songs_land_in_one_folder_named_after_the_playlist(self):
+        result = self._play()
+        folder = os.path.join(self.tmp_dir, "Funk Night")
+        self.assertEqual(result["output_dir"], folder)
+        self.assertEqual(sorted(os.path.basename(p) for p in result["songs"]),
+                         ["One - Artist.mp3", "Two - Artist.mp3"])
+        for path in result["songs"]:
+            self.assertEqual(os.path.dirname(path), folder)
+
+    def test_a_playlist_with_no_name_still_gets_a_folder(self):
+        with mock.patch.object(_FakeYoutubeDL, "playlist_title", ""):
+            result = self._play()
+        self.assertNotEqual(result["output_dir"], self.tmp_dir)
+        self.assertTrue(os.path.basename(result["output_dir"]).startswith("Playlist"))
+        for path in result["songs"]:
+            self.assertEqual(os.path.dirname(path), result["output_dir"])
+
+    def test_asking_for_a_stem_puts_each_songs_folder_inside_the_playlists(self):
+        with mock.patch("drum_isolator.isolate_drums_for_single_file"):
+            result = self._play(instruments=["drums"])
+        folder = os.path.join(self.tmp_dir, "Funk Night")
+        for path in result["songs"]:
+            title = os.path.splitext(os.path.basename(path))[0]
+            self.assertEqual(os.path.dirname(path), os.path.join(folder, title))
+
+    def test_a_single_video_with_a_list_in_its_link_is_still_one_song(self):
+        """A watch link off a playlist carries list= too, but it's one video
+        (noplaylist), and one song lands where one song always has."""
+        url = "https://www.youtube.com/watch?v=abc&list=PLabc"
+        _FakeYoutubeDL.by_url = {url: [{"title": "Just This"}]}
+        result = pipeline.run(url, output_dir=self.tmp_dir, on_event=self.events.append)
+        self.assertEqual(result["output_dir"], self.tmp_dir)
+        self.assertEqual(os.path.dirname(result["songs"][0]),
+                         os.path.join(self.tmp_dir, "Just This - Artist"))
 
 
 if __name__ == "__main__":

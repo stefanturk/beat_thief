@@ -82,7 +82,7 @@ class TestIsolateDrums(unittest.TestCase):
         result = drum_isolator.isolate_drums(self.mp3_path)
 
         self.assertTrue(result)
-        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        basename = "Song - Artist (Isolated Drums at 120 BPM)"
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, drum_isolator._SOURCE_MARKER_FILENAME)))
 
@@ -116,7 +116,10 @@ class TestIsolateDrums(unittest.TestCase):
 
         self.assertTrue(result)
         mock_run_demucs.assert_called_once()
-        self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
+        # Redone under today's name, one decimal at most, and the old
+        # three-decimal copy cleared rather than left beside it.
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Song - Artist (Isolated Drums at 120 BPM).wav")))
+        self.assertFalse(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
 
     @mock.patch("instrument_isolator.trim_and_export")
     @mock.patch("instrument_isolator.run_demucs")
@@ -141,7 +144,7 @@ class TestIsolateDrums(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertFalse(os.path.exists(os.path.join(self.song_dir, stale + ".wav")))
-        fresh = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        fresh = "Song - Artist (Isolated Drums at 120 BPM)"
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, fresh + ".wav")))
 
 

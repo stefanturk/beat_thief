@@ -245,6 +245,32 @@ class TestApiStatus(unittest.TestCase):
             {"stage": "resolving", "index": 3, "total": 8, "song": "Them Changes"})
         self.assertEqual(message, "Matching 3 of 8 — Them Changes")
 
+    def test_a_playlist_download_counts_songs_and_fills_one_bar_for_all_of_them(self):
+        """Each song's own percentage told you nothing about how far through
+        twelve of them you were. The bar is the whole playlist now, and the
+        line says which song and how far into it."""
+        message, percent = gui.Api._describe(
+            {"stage": "downloading", "song": "Them Changes", "index": 3, "total": 12, "percent": 50.0})
+        self.assertEqual(message, "Song 3 of 12 — Them Changes (50%)")
+        self.assertAlmostEqual(percent, (2 + 0.5) / 12 * 100)
+
+        # Finishing a song moves the bar to that song's share, not to 100.
+        _, percent = gui.Api._describe(
+            {"stage": "downloaded", "song": "Them Changes", "index": 3, "total": 12})
+        self.assertAlmostEqual(percent, 3 / 12 * 100)
+
+    def test_moving_on_to_the_next_song_keeps_the_bar_where_it_was(self):
+        message, percent = gui.Api._describe(
+            {"stage": "found", "total": 1, "song": "Bad Bad News", "index": 4, "queue_total": 12})
+        self.assertEqual(message, "Song 4 of 12 — Bad Bad News")
+        self.assertAlmostEqual(percent, 3 / 12 * 100)
+
+    def test_a_single_song_download_reads_as_it_always_did(self):
+        message, percent = gui.Api._describe(
+            {"stage": "downloading", "song": "Redbone", "index": 1, "total": 1, "percent": 40.0})
+        self.assertEqual(message, "Downloading Redbone")
+        self.assertEqual(percent, 40.0)
+
     def test_found_falls_back_when_it_is_a_playlist(self):
         message, _ = gui.Api._describe({"stage": "found", "total": 12, "song": None})
         self.assertNotIn("None", message)
@@ -951,6 +977,18 @@ class TestUiFile(unittest.TestCase):
         self.assertIsNotNone(box, "the page has no Sanitize checkbox")
         self.assertNotIn("checked", box.group(0))
         self.assertIn('options.sanitize = el("sanitize").checked', markup)
+
+    def test_the_midi_pad_is_hidden(self):
+        # Ableton's drums-to-MIDI does it better for now, so the square is
+        # kept out of the way. Hidden rather than deleted so it can come
+        # back by removing one attribute - and hidden means it can't be
+        # armed, so a steal writes only the .wav.
+        with open(gui.UI_FILE) as page:
+            markup = page.read()
+        pad = re.search(r"<button[^>]*id=\"pad-midi\"[^>]*>", markup).group(0)
+        self.assertIn(" hidden", pad)
+        self.assertIn(".pad[hidden] { display: none; }", markup,
+                      "without it .pad's own styling could still show the square")
 
     def test_the_pads_start_armed_for_what_the_script_says_they_do(self):
         # The starting arm state is written twice: once as aria-pressed in
