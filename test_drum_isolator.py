@@ -86,6 +86,20 @@ class TestIsolateDrums(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, drum_isolator._SOURCE_MARKER_FILENAME)))
 
+    @mock.patch("instrument_isolator.trim_and_export")
+    @mock.patch("instrument_isolator.run_demucs")
+    @mock.patch("instrument_isolator.song_alignment")
+    def test_a_song_with_its_tempo_in_its_name_says_it_once(self, mock_alignment, mock_run_demucs, mock_trim):
+        mp3 = os.path.join(self.tmp_dir, "Song - Artist (120 BPM).mp3")
+        shutil.move(self.mp3_path, mp3)
+        mock_alignment.return_value = (0, 120.0)
+        mock_run_demucs.side_effect = self._fake_run_demucs
+        mock_trim.side_effect = self._fake_trim_and_export
+
+        drum_isolator.isolate_drums(mp3)
+
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Song - Artist (Isolated Drums at 120 BPM).wav")))
+
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
         basename = "Song - Artist (Isolated Drums at 120.000 BPM)"

@@ -128,6 +128,52 @@ class TestApiStart(unittest.TestCase):
         self.assertEqual(calls["url"], "https://example.com/song")
         self.assertEqual(calls["instruments"], ["drums"])
 
+    def test_numbering_reaches_the_pipeline(self):
+        calls = {}
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+        api.start("https://example.com/playlist", {"song": True, "number": True})
+        _wait_until(lambda: not api.status()["running"])
+        self.assertIs(calls["number"], True)
+
+    def test_numbering_is_off_when_the_page_does_not_say(self):
+        calls = {}
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+        api.start("https://example.com/playlist", {"song": True})
+        _wait_until(lambda: not api.status()["running"])
+        self.assertIs(calls["number"], False)
+
+    def test_the_page_can_ask_whether_a_link_is_a_playlist(self):
+        api = gui.Api()
+        self.assertTrue(api.is_playlist("https://open.spotify.com/playlist/4jFldPjGeA3jiOj6U6PaIW"))
+        self.assertFalse(api.is_playlist("https://www.youtube.com/watch?v=abc"))
+
+    def test_sanitizing_a_folder_tidies_the_one_picked(self):
+        calls = {}
+        api = gui.Api(choose_folder=lambda: "/Music/Misco",
+                      sanitize_existing=lambda folder, **kw: calls.update(kw, folder=folder)
+                      or {"songs": ["/Music/Misco/A.mp3"], "outputs": ["/Music/Misco/A.mp3"]})
+        state = api.tidy_folder()
+        self.assertTrue(state["running"])
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["folder"], "/Music/Misco")
+        self.assertIs(calls["interactive"], False)
+        self.assertIsNotNone(calls["on_review"], "a trim question has to reach the window")
+        self.assertEqual(api.status()["stage"], "done")
+
+    def test_closing_the_folder_picker_starts_nothing(self):
+        called = []
+        api = gui.Api(choose_folder=lambda: "",
+                      sanitize_existing=lambda folder, **kw: called.append(folder))
+        state = api.tidy_folder()
+        self.assertFalse(state["running"])
+        self.assertEqual(called, [])
+
+    def test_tidying_says_which_song_of_how_many(self):
+        message, percent = gui.Api._describe({"stage": "tidying", "index": 3, "total": 4, "song": "Redbone"})
+        self.assertEqual(message, "Tidying 3 of 4 — Redbone")
+        self.assertEqual(percent, 50)
+
     def test_the_sanitize_switch_reaches_the_pipeline(self):
         calls = {}
         api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
@@ -233,6 +279,10 @@ class TestApiStatus(unittest.TestCase):
 
         message, _ = gui.Api._describe({"stage": "looking-up"})
         self.assertIn("Looking up", message)
+
+    def test_reading_the_tempo_says_so(self):
+        message, _ = gui.Api._describe({"stage": "tempo"})
+        self.assertEqual(message, "Reading the tempo...")
 
     def test_found_says_the_songs_name_when_it_knows_it(self):
         message, _ = gui.Api._describe({"stage": "found", "total": 1, "song": "Redbone"})
@@ -977,6 +1027,42 @@ class TestUiFile(unittest.TestCase):
         self.assertIsNotNone(box, "the page has no Sanitize checkbox")
         self.assertNotIn("checked", box.group(0))
         self.assertIn('options.sanitize = el("sanitize").checked', markup)
+
+    def test_the_take_block_is_laid_out_song_row_then_stem_columns(self):
+        # Song on its own row with what happens to the song file (Sanitize)
+        # beside it; the stems as columns, each one's loop underneath - Beat
+        # under Drums, and Stage 4's bass/harmony/vocal loops under theirs.
+        with open(gui.UI_FILE) as page:
+            markup = page.read()
+        song_row = re.search(r'<div class="song-row">(.*?)</div>', markup, re.S)
+        self.assertIsNotNone(song_row, "no song row")
+        self.assertIn('id="pad-song"', song_row.group(1))
+        self.assertIn('id="sanitize-wrap"', song_row.group(1))
+        grid = re.search(r'<div class="stem-grid">(.*?)</div>', markup, re.S)
+        self.assertIsNotNone(grid, "no stem grid")
+        order = re.findall(r'id="pad-(\w+)"', grid.group(1))
+        self.assertEqual(order[:4], ["drums", "bass", "harmony", "vocals"])
+        self.assertIn("beat", order[4:])
+        self.assertRegex(markup, r"#pad-beat \{[^}]*grid-column: 1;[^}]*grid-row: 2;")
+
+    def test_numbering_sits_beside_sanitize_and_starts_hidden_and_off(self):
+        with open(gui.UI_FILE) as page:
+            markup = page.read()
+        song_row = re.search(r'<div class="song-row">(.*?)</div>', markup, re.S).group(1)
+        wrap = re.search(r'<label[^>]*id="number-wrap"[^>]*>', song_row)
+        self.assertIsNotNone(wrap, "no numbering checkbox in the song row")
+        self.assertIn(" hidden", wrap.group(0))
+        box = re.search(r'<input[^>]*id="number"[^>]*>', markup).group(0)
+        self.assertNotIn("checked", box)
+        self.assertRegex(markup, r'options\.number = [^;]*el\("number"\)\.checked')
+        self.assertIn("pywebview.api.is_playlist(", markup)
+
+    def test_sanitize_a_folder_sits_at_the_end_of_the_song_row(self):
+        with open(gui.UI_FILE) as page:
+            markup = page.read()
+        song_row = re.search(r'<div class="song-row">(.*?)</div>', markup, re.S).group(1)
+        self.assertIn('id="tidy-folder"', song_row)
+        self.assertIn("pywebview.api.tidy_folder()", markup)
 
     def test_the_midi_pad_is_hidden(self):
         # Ableton's drums-to-MIDI does it better for now, so the square is

@@ -16,6 +16,7 @@ in a window."""
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import time
 
@@ -136,6 +137,19 @@ def youtube_playlist_name(url: str) -> str | None:
     return info.get("title") or ""
 
 
+def is_playlist_link(url: str) -> bool:
+    """Whether this link looks like more than one song, from its shape
+    alone - no network. What the page asks to decide whether numbering the
+    songs is worth offering, on every keystroke, so it can't wait on
+    YouTube. A watch link taken off a playlist is one song (noplaylist),
+    so list= only counts on a link that isn't a single video."""
+    url = (url or "").strip()
+    found = spotify.spotify_id(url)
+    if found:
+        return found[0] in ("playlist", "album")
+    return "list=" in url and "v=" not in url
+
+
 def count_entries(url: str) -> int | None:
     """How many songs this url resolves to, or None if that can't be
     determined quickly. Metadata only - nothing is downloaded."""
@@ -200,6 +214,9 @@ class _Download:
         self.downloaded = 0
         self.failed = 0
         self.filenames: list[str] = []
+        # Where each downloaded file sat in the playlist it came from, by
+        # the name it was saved under - for numbering them in order.
+        self.numbers: dict[str, int] = {}
 
     def _position(self) -> tuple[int | None, int | None]:
         """Which song of how many. Counted across the queue when there is
@@ -252,7 +269,10 @@ class _Download:
             # handed a file that doesn't exist, quietly returned nothing, and
             # the song was never filed, never remembered and never appeared in
             # the stash. The extension is ours to know: we asked for mp3.
-            self.filenames.append(os.path.splitext(os.path.basename(filepath))[0] + ".mp3")
+            filename = os.path.splitext(os.path.basename(filepath))[0] + ".mp3"
+            self.filenames.append(filename)
+            if info.get("playlist_index"):
+                self.numbers[filename] = int(info["playlist_index"])
         index, total = self._position()
         self.on_event({"stage": "downloaded", "song": info.get("title", "Unknown"),
                        "index": index, "total": total})
@@ -311,17 +331,45 @@ def song_folder(output_dir: str, title: str) -> str:
     return os.path.join(output_dir, title)
 
 
+# What numbering puts in front of a song: "004 - ".
+_NUMBER_RE = re.compile(r"^\d{3} - ")
+
+
 def existing_song(output_dir: str, filename: str) -> str:
     """Where this song's mp3 actually is, or "" if it isn't there.
 
     Checks its own folder first and then the top level, because a download
     lands flat and is filed afterwards (see file_into_own_folder) - so
-    between those two moments both are correct answers."""
+    between those two moments both are correct answers.
+
+    filename is what yt-dlp calls the song, which is all a link can tell
+    us. Sanitizing may since have renamed it - tidied the title, then put
+    the tempo on the end - so each of those names is looked for too, worked
+    out the same way the sanitizer did it."""
     title = os.path.splitext(filename)[0]
-    for candidate in (os.path.join(song_folder(output_dir, title), filename),
-                      os.path.join(output_dir, filename)):
-        if os.path.exists(candidate):
-            return candidate
+    _, _, tidied = song_sanitizer._derive_title_artist(filename)
+    titles = [title] + ([tidied] if tidied and tidied != title else [])
+    for name in titles:
+        for candidate in (os.path.join(song_folder(output_dir, name), name + ".mp3"),
+                          os.path.join(output_dir, name + ".mp3")):
+            if os.path.exists(candidate):
+                return candidate
+    try:
+        names = sorted(os.listdir(output_dir))
+    except OSError:
+        return ""
+    # A folder or a flat mp3 whose name is one of those titles with a tempo
+    # on the end. (Not splitext on a folder: "(104.5 BPM)" has a dot in it.)
+    # Numbered in playlist order too, perhaps: "004 - Song - Artist".
+    for name in names:
+        stem = name[:-len(".mp3")] if name.endswith(".mp3") else name
+        bare = instrument_isolator.song_title(_NUMBER_RE.sub("", stem, count=1) + ".mp3")
+        if bare == stem or bare not in titles:
+            continue
+        for candidate in (os.path.join(output_dir, stem, stem + ".mp3"),
+                          os.path.join(output_dir, stem + ".mp3")):
+            if os.path.isfile(candidate):
+                return candidate
     return ""
 
 
@@ -455,7 +503,7 @@ def library(limit: int = 20) -> list[dict]:
 
         songs.append(
             {
-                "title": os.path.splitext(os.path.basename(song_path))[0],
+                "title": instrument_isolator.song_title(song_path),
                 "url": entry.get("url", ""),
                 "song": song_path,
                 # Where everything for this song lives - the mp3, the stems
@@ -572,7 +620,8 @@ def _resolve_spotify(url, on_event, on_choose, cancelled) -> dict:
                       "song": song["title"]})
         match, why_not = _resolve_one(song, index, total, on_event, on_choose, cancelled)
         if match:
-            tracks.append({"url": match, "title": song["title"], "artist": song["artist"]})
+            tracks.append({"url": match, "title": song["title"], "artist": song["artist"],
+                           "number": index})
         elif why_not and total > 1:
             # One song out of a list not being findable is not the list
             # failing - say which one, and carry on with the rest.
@@ -604,30 +653,109 @@ def _download_track(track_url, output_dir, on_event, position, total, known_titl
     return download, status
 
 
+def _read_alignment(path: str, interactive) -> tuple[int, float] | None:
+    """The song's beat-1 trim and tempo (instrument_isolator.song_alignment),
+    or None if it can't be read. A song whose tempo can't be read is still a
+    song - it just keeps the name it had."""
+    try:
+        return instrument_isolator.song_alignment(path, interactive=interactive)
+    except Exception:
+        return None
+
+
+def _put_tempo_in_name(output_dir: str, filename: str, interactive) -> str:
+    """Name a freshly sanitized song for its tempo - "Song - Artist (104.5
+    BPM).mp3" - and write it to the BPM tag too, so Live, Finder and any
+    other player can see it. Returns the song's filename afterwards.
+
+    Done on the flat download, before filing, because the song's folder is
+    named after the mp3."""
+    path = os.path.join(output_dir, filename)
+    if not os.path.isfile(path):
+        return filename
+    alignment = _read_alignment(path, interactive)
+    if alignment is None:
+        return filename
+    tempo = alignment[1]
+    renamed = instrument_isolator.with_song_tempo(os.path.splitext(filename)[0], tempo) + ".mp3"
+    new_path = os.path.join(output_dir, renamed)
+    if new_path != path:
+        if os.path.exists(new_path):
+            return filename
+        try:
+            os.rename(path, new_path)
+        except OSError:
+            return filename
+    try:
+        song_sanitizer.write_tempo_tag(new_path, instrument_isolator.bpm_text(tempo))
+    except Exception:
+        pass
+    instrument_isolator.remember_alignment(new_path, alignment)
+    return renamed
+
+
+def _numbered(output_dir: str, filename: str, number: int | None) -> str:
+    """Put a song's place in its playlist in front of its name - "004 -
+    Song - Artist.mp3" - so a folder of them sorts in playlist order.
+    Returns the filename afterwards; unchanged if there's no number or the
+    name is taken."""
+    if not number:
+        return filename
+    numbered = f"{number:03d} - {filename}"
+    try:
+        if os.path.exists(os.path.join(output_dir, numbered)):
+            return filename
+        os.rename(os.path.join(output_dir, filename), os.path.join(output_dir, numbered))
+    except OSError:
+        return filename
+    return numbered
+
+
 def _finish_track(track_url, fresh, output_dir, on_event, interactive, on_review,
-                  sanitize, own_folder) -> list[str]:
+                  sanitize, own_folder, numbers=None) -> list[str]:
     """Tidy one track's download, put it where it belongs, and remember the
     link it came from. Returns the mp3 paths for that track.
 
     Done per track rather than for the whole queue at once so that what
     history remembers against each YouTube url is that url's own song -
     which is what makes coming back later for another stem work for every
-    song in a playlist rather than only the first."""
+    song in a playlist rather than only the first.
+
+    numbers is where each fresh download sits in its playlist, by the name
+    yt-dlp gave it, when the songs are to be numbered (see _numbered)."""
+    numbers = numbers or {}
     sanitized = []
+    # Which fresh download each name in sanitized came from, since tidying
+    # and the tempo both rename, and the number is known by the old name.
+    came_from = {}
     if fresh:
         if sanitize:
+            renamed = {}
             try:
                 sanitized = song_sanitizer.sanitize_new_downloads(
                     fresh, output_dir,
                     interactive=(interactive is not False),
                     review=on_review,
+                    renamed=renamed,
                 )
             except Exception as e:
                 on_event({"stage": "warning", "message": f"Sanitizing hit a snag, but your downloads are safe: {e}"})
+            came_from = {new: old for old, new in renamed.items()}
+            if sanitized:
+                on_event({"stage": "tempo"})
+                tempo_named = []
+                for name in sanitized:
+                    named = _put_tempo_in_name(output_dir, name, interactive)
+                    came_from[named] = came_from.get(name, name)
+                    tempo_named.append(named)
+                sanitized = tempo_named
         else:
             # Nothing was tidied, so what's on disk is what yt-dlp wrote -
             # which is exactly what the rest of the run chains onto.
             sanitized = list(fresh)
+        if numbers:
+            sanitized = [_numbered(output_dir, name, numbers.get(came_from.get(name, name)))
+                         for name in sanitized]
 
     # A song downloaded on an earlier run is skipped by yt-dlp's archive, so
     # no hook fires for it - but asking to isolate it is still a perfectly
@@ -637,17 +765,18 @@ def _finish_track(track_url, fresh, output_dir, on_event, interactive, on_review
     # Done whatever was armed, not only when an instrument was: pasting the
     # link of a song you already have has to put it back in front of you,
     # and "the stash forgot it" is exactly when somebody re-pastes a link.
-    filenames = list(sanitized)
-    seen = set(filenames)
+    paths = [existing_song(output_dir, filename) or os.path.join(output_dir, filename)
+             for filename in sanitized]
     for filename in requested_mp3_filenames(track_url, output_dir):
-        if filename not in seen and existing_song(output_dir, filename):
-            filenames.append(filename)
-            seen.add(filename)
+        path = existing_song(output_dir, filename)
+        if path and path not in paths:
+            paths.append(path)
 
     songs = []
-    for filename in filenames:
-        path = existing_song(output_dir, filename) or os.path.join(output_dir, filename)
-        songs.append(file_into_own_folder(path) if own_folder else path)
+    for path in paths:
+        song = file_into_own_folder(path) if own_folder else path
+        if song not in songs:
+            songs.append(song)
 
     # Remember where these came from, so coming back later for another stem
     # doesn't mean going and finding the link again (see history.py).
@@ -655,7 +784,7 @@ def _finish_track(track_url, fresh, output_dir, on_event, interactive, on_review
     return songs
 
 
-def _keep_what_finished(fresh_by_track, output_dir, own_folder) -> list[str]:
+def _keep_what_finished(fresh_by_track, output_dir, own_folder, numbers=None) -> list[str]:
     """File and remember the songs that finished downloading before a cancel.
 
     Stopping a playlist halfway is an ordinary thing to do, and the songs
@@ -665,9 +794,11 @@ def _keep_what_finished(fresh_by_track, output_dir, own_folder) -> list[str]:
     is someone saying they're done being asked. Nor is the network touched
     to look for older copies (see _finish_track) - a cancel should be quick."""
     songs = []
+    numbers = numbers or {}
     for track_url, fresh in fresh_by_track:
-        paths = [os.path.join(output_dir, name) for name in fresh
+        fresh = [_numbered(output_dir, name, numbers.get(name)) for name in fresh
                  if os.path.exists(os.path.join(output_dir, name))]
+        paths = [os.path.join(output_dir, name) for name in fresh]
         paths = [file_into_own_folder(path) if own_folder else path for path in paths]
         if paths:
             history.remember(track_url, paths)
@@ -685,6 +816,7 @@ def run(
     on_review=None,
     on_choose=None,
     sanitize: bool = True,
+    number: bool = False,
 ) -> dict:
     """Download url into output_dir, sanitize it, and isolate the requested
     instruments. Returns a result dict describing what happened.
@@ -701,6 +833,10 @@ def run(
     song_sanitizer.review_flags), and the run waits on the answer. The GUI
     passes one because it can ask - it just asks in a window. Nothing else
     does, so every other caller is unchanged.
+
+    number=True puts each song of a playlist's place in it in front of its
+    name ("004 - Song - Artist.mp3"), so the folder sorts in playlist
+    order. A single song is never numbered.
 
     sanitize=False leaves the download exactly as it came off YouTube: no
     trimming, no renaming, no duplicate check, and no question asked about
@@ -798,6 +934,7 @@ def run(
     total_tracks = len(queue)
     fatal = None
     fresh_by_track = []
+    numbers = {}
     for position, entry in enumerate(queue, start=1):
         if cancelled():
             break
@@ -825,6 +962,14 @@ def run(
         result["failed"] += download.failed
         result["skipped"] += max((download.total or 0) - download.downloaded - download.failed, 0)
         fresh_by_track.append((track_url, list(download.filenames)))
+        if number and is_playlist:
+            # A Spotify song's place on Spotify - so one YouTube didn't have
+            # leaves a gap rather than moving the rest up - and a YouTube
+            # playlist's own playlist_index for each of its songs.
+            for filename in download.filenames:
+                place = entry.get("number") or download.numbers.get(filename)
+                if place:
+                    numbers[filename] = place
 
     on_event(
         {
@@ -837,7 +982,7 @@ def run(
     )
 
     if cancelled():
-        result["songs"] = _keep_what_finished(fresh_by_track, output_dir, own_folder)
+        result["songs"] = _keep_what_finished(fresh_by_track, output_dir, own_folder, numbers)
         result["outputs"] = list(result["songs"])
         result["cancelled"] = True
         on_event({"stage": "cancelled"})
@@ -849,7 +994,7 @@ def run(
     songs = []
     for track_url, fresh in fresh_by_track:
         songs.extend(_finish_track(track_url, fresh, output_dir, on_event, interactive,
-                                   on_review, sanitize, own_folder))
+                                   on_review, sanitize, own_folder, numbers))
     result["songs"] = songs
     result["outputs"] = list(songs)
 
@@ -862,6 +1007,93 @@ def run(
         return result
 
     on_event({"stage": "done", "outputs": result["outputs"]})
+    return result
+
+
+def _songs_under(folder: str) -> list[tuple[str, str]]:
+    """Every mp3 under folder, as (its folder, its filename), in the order
+    Finder would list them. Duplicates/ is what sanitizing already set
+    aside, and a hidden folder isn't anybody's music."""
+    found = []
+    for root, subdirs, files in os.walk(folder):
+        subdirs[:] = sorted(d for d in subdirs
+                            if not d.startswith(".") and d != song_sanitizer.DUPLICATES_DIR_NAME)
+        for name in sorted(files):
+            if name.lower().endswith(".mp3") and not name.startswith("."):
+                found.append((root, name))
+    return found
+
+
+def _tidy_one(folder: str, filename: str, on_review, interactive) -> str | None:
+    """Sanitize one song where it sits and put its tempo in its name.
+    Returns where it ended up, or None if it didn't survive (set aside as a
+    duplicate). A song in a folder of its own takes the folder along to its
+    new name, stems and all, and the stash is told where it went."""
+    old_path = os.path.join(folder, filename)
+    # Its own folder is one named after it with no other song in it - a
+    # playlist named after one of its songs is still the playlist's.
+    own_folder = (os.path.basename(folder) == filename[:-len(".mp3")]
+                  and [f for f in os.listdir(folder) if f.lower().endswith(".mp3")] == [filename])
+    url = history.url_for(old_path)
+
+    final = song_sanitizer.sanitize_new_downloads(
+        [filename], folder, interactive=(interactive is not False), review=on_review)
+    if not final:
+        return None
+    current = final[0]
+    if instrument_isolator.song_title(current) == current[:-len(".mp3")]:
+        current = _put_tempo_in_name(folder, current, interactive)
+    new_path = os.path.join(folder, current)
+
+    new_folder = os.path.join(os.path.dirname(folder), current[:-len(".mp3")])
+    if own_folder and new_folder != folder and not os.path.exists(new_folder):
+        try:
+            os.rename(folder, new_folder)
+            new_path = os.path.join(new_folder, current)
+        except OSError:
+            pass
+
+    if url and new_path != old_path:
+        history.remember(url, [new_path])
+    return new_path
+
+
+def sanitize_existing(folder: str, on_event=None, on_review=None, should_cancel=None,
+                      interactive: bool | None = False) -> dict:
+    """Sanitize songs already on disk: every mp3 in folder and the folders
+    under it - flat, filed in a folder of their own, or in a playlist's.
+
+    The same tidying a download gets (song_sanitizer.sanitize_new_downloads,
+    one song at a time so a trim question comes up while that song is the
+    one being talked about), then its tempo in its name. A song already
+    sanitized is only given its tempo, and one that has that too is left
+    alone - so running this over the whole stash again is quick.
+
+    Returns {"songs", "outputs", "cancelled", "output_dir"} like run()."""
+    if on_event is None:
+        def on_event(_event):
+            pass
+    result = {"songs": [], "outputs": [], "cancelled": False, "output_dir": folder,
+              "downloaded": 0}
+    found = _songs_under(folder)
+    total = len(found)
+    for index, (song_dir, filename) in enumerate(found, start=1):
+        if should_cancel is not None and should_cancel():
+            result["cancelled"] = True
+            on_event({"stage": "cancelled"})
+            break
+        on_event({"stage": "tidying", "index": index, "total": total,
+                  "song": instrument_isolator.song_title(filename)})
+        try:
+            song = _tidy_one(song_dir, filename, on_review, interactive)
+        except Exception as e:
+            on_event({"stage": "warning", "message": f"Couldn't tidy {filename}: {e}"})
+            continue
+        if song:
+            result["songs"].append(song)
+    result["outputs"] = list(result["songs"])
+    if not result["cancelled"]:
+        on_event({"stage": "done", "outputs": result["outputs"]})
     return result
 
 
@@ -883,7 +1115,7 @@ def _isolate_songs(song_paths, wanted, on_event, cancelled, should_cancel, inter
     # finished, cancelled or blown up.
     try:
         for mp3_path in song_paths:
-            title = os.path.splitext(os.path.basename(mp3_path))[0]
+            title = instrument_isolator.song_title(mp3_path)
             for name in wanted:
                 if cancelled():
                     result["cancelled"] = True

@@ -24,6 +24,21 @@ def _click_track(bpm, beats, hit_ms=30, freq=1000):
     return track
 
 
+class TestSongTitle(unittest.TestCase):
+    """What a song is called in the names of things made from it: the mp3's
+    name without the tempo sanitizing put there, or every stem would say
+    its tempo twice."""
+
+    def test_the_tempo_is_left_off(self):
+        self.assertEqual(instrument_isolator.song_title("/x/Song - Artist (104.5 BPM).mp3"), "Song - Artist")
+
+    def test_a_name_without_one_is_untouched(self):
+        self.assertEqual(instrument_isolator.song_title("/x/Song - Artist.mp3"), "Song - Artist")
+
+    def test_other_brackets_stay(self):
+        self.assertEqual(instrument_isolator.song_title("/x/Song (Remix) - Artist.mp3"), "Song (Remix) - Artist")
+
+
 class TestBpmText(unittest.TestCase):
     def test_one_decimal_at_most(self):
         self.assertEqual(instrument_isolator.bpm_text(105.373), "105.4")

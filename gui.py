@@ -49,9 +49,12 @@ class Api:
     run_pipeline and isolate_pipeline are injectable so this is testable
     against fakes without downloading anything or importing pywebview."""
 
-    def __init__(self, run_pipeline=pipeline.run, isolate_pipeline=pipeline.isolate):
+    def __init__(self, run_pipeline=pipeline.run, isolate_pipeline=pipeline.isolate,
+                 sanitize_existing=pipeline.sanitize_existing, choose_folder=None):
         self._run_pipeline = run_pipeline
         self._isolate_pipeline = isolate_pipeline
+        self._sanitize_existing = sanitize_existing
+        self._choose_folder = choose_folder or _choose_folder
         self._lock = threading.Lock()
         self._thread = None
         self._cancel = threading.Event()
@@ -113,6 +116,9 @@ class Api:
         # Checked unless the page says otherwise, so a caller that predates
         # the switch - or a page that fails to send it - keeps tidying.
         sanitize = options.get("sanitize", True) is not False
+        # Off unless asked for: a filename that starts with a number is a
+        # surprise to somebody who didn't tick the box.
+        number = options.get("number") is True
 
         instruments = [name for name in pipeline.INSTRUMENT_ORDER if options.get(name)]
         if song and not instruments:
@@ -130,11 +136,35 @@ class Api:
 
         self._thread = threading.Thread(
             target=self._work,
-            args=(url, output_dir, instruments, song, sanitize),
+            args=(url, output_dir, instruments, song, sanitize, number),
             daemon=True,
         )
         self._thread.start()
         return state_snapshot
+
+    def tidy_folder(self) -> dict:
+        """Ask which folder, then sanitize every song in it where it sits
+        (pipeline.sanitize_existing) - on the same worker, status and Stop
+        as a download, so a trim question comes up the way it always does.
+        Closing the folder picker starts nothing."""
+        folder = self._choose_folder()
+        with self._lock:
+            if not folder or (self._thread is not None and self._thread.is_alive()):
+                return dict(self._state)
+            self._cancel.clear()
+            self._state = self._idle_state()
+            self._state.update({"running": True, "stage": "starting", "message": "Getting ready...",
+                                "output_dir": folder})
+            state_snapshot = dict(self._state)
+            self._thread = threading.Thread(target=self._work_tidy, args=(folder,), daemon=True)
+            self._thread.start()
+        return state_snapshot
+
+    def is_playlist(self, url: str) -> bool:
+        """Whether the page should offer to number the songs this link
+        brings - asked as the link is typed, so it goes by the link's shape
+        and never the network (see pipeline.is_playlist_link)."""
+        return pipeline.is_playlist_link(url)
 
     def status(self) -> dict:
         """The current state, polled by the page a few times a second."""
@@ -494,7 +524,7 @@ class Api:
             self._state["choice"] = None
         return decision
 
-    def _work(self, url, output_dir, instruments, song="", sanitize=True):
+    def _work(self, url, output_dir, instruments, song="", sanitize=True, number=False):
         try:
             if song:
                 result = self._isolate_pipeline(
@@ -515,6 +545,7 @@ class Api:
                     on_review=self._on_review if sanitize else None,
                     on_choose=self._on_choose,
                     sanitize=sanitize,
+                    number=number,
                 )
         except BaseException as e:
             # Includes Cancelled and anything a dependency throws: a worker
@@ -539,6 +570,36 @@ class Api:
                 self._state["stage"] = "done"
                 self._state["percent"] = 100
                 self._state["message"] = self._done_message(result, bool(song))
+
+    def _work_tidy(self, folder):
+        try:
+            result = self._sanitize_existing(
+                folder,
+                on_event=self._on_event,
+                on_review=self._on_review,
+                should_cancel=self._cancel.is_set,
+                interactive=False,
+            )
+        except BaseException as e:
+            with self._lock:
+                self._state["running"] = False
+                self._state["stage"] = "error"
+                self._state["error"] = str(e) or e.__class__.__name__
+            return
+
+        with self._lock:
+            self._state["running"] = False
+            self._state["outputs"] = result.get("outputs", [])
+            self._state["cancelled"] = bool(result.get("cancelled"))
+            if result.get("cancelled"):
+                self._state["stage"] = "cancelled"
+                self._state["message"] = "Stopped. The songs already tidied stay tidied."
+            else:
+                self._state["stage"] = "done"
+                self._state["percent"] = 100
+                count = len(result.get("songs", []))
+                self._state["message"] = (f"Tidied {count} song{'' if count == 1 else 's'}."
+                                          if count else "No songs in that folder.")
 
     @staticmethod
     def _done_message(result: dict, from_stash: bool = False) -> str:
@@ -602,6 +663,13 @@ class Api:
             return None, None
         if stage == "sanitizing":
             return "Cleaning it up...", None
+        if stage == "tempo":
+            return "Reading the tempo...", None
+        if stage == "tidying":
+            total = event.get("total") or 0
+            index = event.get("index") or 0
+            percent = (index - 1) / total * 100 if total else None
+            return f"Tidying {index} of {total} — {event['song']}", percent
         if stage == "isolating":
             # "2 of 4" because the slow parts have no percentage of their
             # own for minutes at a time, and knowing which step you're on is
@@ -616,6 +684,19 @@ class Api:
         if stage == "warning":
             return event.get("message"), None
         return None, None
+
+
+def _choose_folder() -> str:
+    """The folder picked in a Finder dialog, starting in the stash, or ""
+    if it was closed."""
+    import webview  # here, not at the top, so the Api stays testable without it
+    if not webview.windows:
+        return ""
+    chosen = webview.windows[0].create_file_dialog(webview.FileDialog.FOLDER,
+                                                    directory=DEFAULT_OUTPUT)
+    if not chosen:
+        return ""
+    return chosen[0] if isinstance(chosen, (list, tuple)) else str(chosen)
 
 
 def _name_the_menu_bar() -> None:

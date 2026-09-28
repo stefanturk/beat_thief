@@ -106,7 +106,7 @@ def isolate_bass(mp3_path: str, context: instrument_isolator.RunContext | None =
     folder from an earlier run or a different file that happened to share
     this title) and reprocessed rather than trusted."""
     context = context or instrument_isolator.DEFAULT_CONTEXT
-    title = os.path.splitext(os.path.basename(mp3_path))[0]
+    title = instrument_isolator.song_title(mp3_path)
     song_dir = instrument_isolator.song_output_dir(mp3_path)
     marker_matches = instrument_isolator.source_marker_matches(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
 

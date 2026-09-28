@@ -305,6 +305,25 @@ def bpm_text(tempo: float) -> str:
 
 _TEMPO_FROM_BASENAME_RE = re.compile(r"at ([\d.]+) BPM\)$")
 
+# What sanitizing adds to a song's own name: "Song - Artist (104.5 BPM)".
+# No "at", which is what keeps it apart from a stem's "(Isolated Drums at
+# 104.5 BPM)" - the one is the song's tempo, the other says what was cut.
+_SONG_TEMPO_RE = re.compile(r" \([\d.]+ BPM\)$")
+
+
+def song_title(mp3_path: str) -> str:
+    """What a song is called in the names of things made from it: the mp3's
+    name without its extension and without the tempo sanitizing puts in
+    it. Otherwise every stem and loop would say the tempo twice - "Song
+    (104.5 BPM) (Isolated Drums at 104.5 BPM)"."""
+    stem = os.path.splitext(os.path.basename(mp3_path))[0]
+    return _SONG_TEMPO_RE.sub("", stem)
+
+
+def with_song_tempo(title: str, tempo: float) -> str:
+    """title with its tempo on the end, as a sanitized song is named."""
+    return f"{_SONG_TEMPO_RE.sub('', title)} ({bpm_text(tempo)} BPM)"
+
 
 def find_existing_basename(song_dir: str, label: str) -> str | None:
     """The basename (no extension) of song_dir's existing wav for this
@@ -618,6 +637,27 @@ def _snap_tempo_to_whole_number_if_close(tempo: float) -> float:
     return float(nearest) if abs(tempo - nearest) < _WHOLE_BPM_SNAP_TOLERANCE else tempo
 
 
+def _alignment_key(mp3_path: str):
+    """The file's name, size and mtime - not its full path, because a song
+    is filed into its own folder after its tempo is read, and a move keeps
+    all three."""
+    try:
+        stat = os.stat(mp3_path)
+    except OSError:
+        return None
+    return (os.path.basename(mp3_path), stat.st_size, stat.st_mtime)
+
+
+def remember_alignment(mp3_path: str, alignment: tuple[int, float]) -> None:
+    """Keep an alignment already read for this file, under its current name
+    and contents. Sanitizing reads the tempo and then renames and tags the
+    mp3 - a new path and a new mtime, so a new cache key - and without this
+    the isolators would read it all over again."""
+    key = _alignment_key(mp3_path)
+    if key is not None:
+        _alignment_cache[key] = alignment
+
+
 def song_alignment(mp3_path: str, interactive: bool | None = None) -> tuple[int, float]:
     """Compute the beat-1 trim point and tempo once, from the full song mix,
     so every instrument isolated from this song can share the exact same
@@ -647,11 +687,7 @@ def song_alignment(mp3_path: str, interactive: bool | None = None) -> tuple[int,
     onsets rather than any single isolated stem - that way it's available
     regardless of which instruments end up being isolated, and it draws on
     more onset information than any one instrument's onsets alone would."""
-    try:
-        stat = os.stat(mp3_path)
-        cache_key = (os.path.abspath(mp3_path), stat.st_size, stat.st_mtime)
-    except OSError:
-        cache_key = None
+    cache_key = _alignment_key(mp3_path)
     if cache_key is not None and cache_key in _alignment_cache:
         return _alignment_cache[cache_key]
 
