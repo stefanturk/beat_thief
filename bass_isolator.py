@@ -93,7 +93,7 @@ def _apply_noise_gate(wav_path: str) -> None:
 
 
 def _output_basename(title: str, tempo: float) -> str:
-    return f"{title} ({_LABEL} at {tempo:.3f} BPM)"
+    return f"{title} ({_LABEL} at {instrument_isolator.bpm_text(tempo)} BPM)"
 
 
 def isolate_bass(mp3_path: str, context: instrument_isolator.RunContext | None = None) -> bool:
@@ -129,7 +129,7 @@ def isolate_bass(mp3_path: str, context: instrument_isolator.RunContext | None =
 
     instrument_isolator.write_source_marker(song_dir, mp3_path, _SOURCE_MARKER_FILENAME)
 
-    print(f"{title}: bass isolated ({tempo:.3f} BPM).")
+    print(f"{title}: bass isolated ({instrument_isolator.bpm_text(tempo)} BPM).")
     return True
 
 

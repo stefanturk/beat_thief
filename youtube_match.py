@@ -28,6 +28,7 @@ edit, and gets the same suspicion as everything else here."""
 from __future__ import annotations
 
 import re
+import urllib.parse
 
 import yt_dlp
 
@@ -200,3 +201,94 @@ def worth_offering(candidates_: list[dict], limit: int = SEARCH_LIMIT) -> list[d
     ]
     rest = [c for c in candidates_ if c not in inside]
     return (inside + rest[:2])[:limit]
+
+
+# --- YouTube Music: the release itself -------------------------------------
+#
+# A plain YouTube search ranks by popularity, so a song's own studio
+# recording can come back fourth, behind the video, a live clip and a lyric
+# upload. YouTube Music's "songs" search is keyed to releases instead: its
+# first result is the track as the label published it - the same master
+# Spotify is serving, which is as close as matching gets without the ISRC
+# (and Spotify's embed page doesn't carry one). Measured while building
+# this: its top result was the right recording for every song tried,
+# including one ordinary search put behind three others.
+#
+# It's used only where it can be trusted without a second look - the right
+# length, the right artist, and nothing in the title saying it's another
+# version. Anything short of that falls through to the ordinary search and
+# pick() as before, so a miss here costs a second and nothing else.
+
+
+def _music_search_url(query: str) -> str:
+    return "https://music.youtube.com/search?q=" + urllib.parse.quote(query) + "#songs"
+
+
+def _squash(name: str) -> str:
+    """A name reduced to letters and digits, so "Earth, Wind & Fire" and
+    "Earth Wind & Fire - Topic" can be compared at all."""
+    name = re.sub(r"\s*-\s*topic$", "", (name or "").strip().lower())
+    return re.sub(r"[^0-9a-z]+", "", name)
+
+
+def same_artist(wanted: str, found: list[str]) -> bool:
+    """Whether any of YouTube's names for who made it is in Spotify's.
+
+    Containment rather than equality, both ways round: Spotify joins
+    collaborators into one string ("Rufus, Chaka Khan") that YouTube lists
+    separately, and YouTube's channel sometimes carries a band's name alone
+    where Spotify credits a featured artist too."""
+    want = _squash(wanted)
+    if len(want) < 2:
+        return False
+    for name in found:
+        have = _squash(name)
+        if len(have) >= 2 and (have in want or want in have):
+            return True
+    return False
+
+
+def music_match(query: str, want_sec: float | None, artist: str) -> dict | None:
+    """The YouTube Music release of this song, when it can be taken without
+    asking - otherwise None, and the ordinary search takes over.
+
+    Two lookups: the search (flat, so it says nothing about length or who
+    made it) and then the one result it names, for its duration and
+    artists. About a second each."""
+    if want_sec is None:
+        return None
+    try:
+        with yt_dlp.YoutubeDL(dict(_search_opts(), playlistend=1)) as ydl:
+            info = ydl.extract_info(_music_search_url(query), download=False)
+        entries = [e for e in (info or {}).get("entries") or [] if e and e.get("id")]
+        if not entries:
+            return None
+        url = "https://www.youtube.com/watch?v=" + entries[0]["id"]
+        looked_up = {k: v for k, v in _search_opts().items() if k != "extract_flat"}
+        with yt_dlp.YoutubeDL(looked_up) as ydl:
+            full = ydl.extract_info(url, download=False, process=False)
+    except Exception:
+        return None
+    if not full:
+        return None
+
+    try:
+        duration = float(full.get("duration"))
+    except (TypeError, ValueError):
+        return None
+    title = full.get("track") or full.get("title") or ""
+    names = list(full.get("artists") or [])
+    names += [full.get(key) for key in ("artist", "channel", "uploader") if full.get(key)]
+
+    offset = abs(duration - want_sec)
+    if offset > CONFIDENT_TOLERANCE_SEC:
+        return None
+    if looks_like_another_version(title) or not same_artist(artist, names):
+        return None
+    return {
+        "url": url,
+        "title": title,
+        "channel": full.get("channel") or "",
+        "duration": duration,
+        "offset": offset,
+    }

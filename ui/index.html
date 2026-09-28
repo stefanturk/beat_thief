@@ -158,6 +158,7 @@
     cursor: pointer;
     transition: background 0.12s, color 0.12s, border-color 0.12s;
   }
+  .pad[hidden] { display: none; }
   .pad:hover { border-color: #3d414b; }
   .pad[aria-pressed="true"] {
     background: var(--violet-dim);
@@ -620,7 +621,7 @@
       <p class="label">Take</p>
       <!--
         Seven things, in the order they're shown everywhere: Song, Drums,
-        Beat, Midi, Bass, Harmony, Vocals. Grey means not armed, purple means
+        Beat, Midi (hidden, see below), Bass, Harmony, Vocals. Grey means not armed, purple means
         armed for this run, green means it's already in the stash - and
         green can only be cleared by deleting the file, never by clicking.
       -->
@@ -628,7 +629,15 @@
         <button class="pad" id="pad-song" data-stem="song" aria-pressed="true">Song</button>
         <button class="pad" id="pad-drums" data-stem="drums" aria-pressed="false">Drums</button>
         <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
-        <button class="pad" id="pad-midi" data-stem="midi" data-again="true" aria-pressed="false">Midi</button>
+        <!--
+          Midi is hidden, not gone: Ableton's own drums-to-MIDI does the job
+          better for now, and a square that makes a worse copy of something
+          you already have is only in the way. Never shown means never armed,
+          so a steal writes the .wav loop alone. Deleting "hidden" brings it
+          back - everything behind it (steal_beat's outputs, the transcriber)
+          is still there.
+        -->
+        <button class="pad" id="pad-midi" data-stem="midi" data-again="true" aria-pressed="false" hidden>Midi</button>
         <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
         <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
         <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>

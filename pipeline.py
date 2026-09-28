@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 
 import yt_dlp
 
@@ -84,10 +85,9 @@ def _base_ydl_opts(output_dir: str) -> dict:
     }
 
 
-def _probe(url: str) -> tuple[int | None, str | None]:
-    """How many songs this url resolves to, and the name of the one worth
-    saying - only when there's exactly one, since a playlist has no single
-    "the" song to name. Metadata only - nothing is downloaded."""
+def _probe_info(url: str) -> dict | None:
+    """yt-dlp's metadata for url, flat - no download, and no per-video
+    lookups inside a playlist. None if it can't be had."""
     probe_opts = {
         "quiet": True,
         "no_warnings": True,
@@ -99,14 +99,41 @@ def _probe(url: str) -> tuple[int | None, str | None]:
     }
     try:
         with yt_dlp.YoutubeDL(probe_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            return ydl.extract_info(url, download=False)
     except Exception:
+        return None
+
+
+def _probe(url: str) -> tuple[int | None, str | None]:
+    """How many songs this url resolves to, and the name of the one worth
+    saying - only when there's exactly one, since a playlist has no single
+    "the" song to name. Metadata only - nothing is downloaded."""
+    info = _probe_info(url)
+    if info is None:
         return None, None
-    entries = info.get("entries") if info else None
+    entries = info.get("entries")
     if entries is None:
         return 1, (info.get("title") if info else None)
     title = entries[0].get("title") if len(entries) == 1 and entries[0] else None
     return len(entries), title
+
+
+def youtube_playlist_name(url: str) -> str | None:
+    """The name of the playlist this link is, "" for one with no name, or
+    None when it isn't a playlist at all.
+
+    Only a link with list= in it is asked about - that's every playlist
+    link, and asking about anything else would put a network round trip in
+    front of every single-song download for nothing. A watch link taken off
+    a playlist carries list= as well, but noplaylist makes it one video, so
+    it's the count that decides, not the link."""
+    if "list=" not in url:
+        return None
+    info = _probe_info(url)
+    entries = (info or {}).get("entries")
+    if entries is None or len(entries) < 2:
+        return None
+    return info.get("title") or ""
 
 
 def count_entries(url: str) -> int | None:
@@ -226,7 +253,9 @@ class _Download:
             # the song was never filed, never remembered and never appeared in
             # the stash. The extension is ours to know: we asked for mp3.
             self.filenames.append(os.path.splitext(os.path.basename(filepath))[0] + ".mp3")
-        self.on_event({"stage": "downloaded", "song": info.get("title", "Unknown")})
+        index, total = self._position()
+        self.on_event({"stage": "downloaded", "song": info.get("title", "Unknown"),
+                       "index": index, "total": total})
         self.active_title = None
 
     def run(self) -> int:
@@ -458,6 +487,12 @@ def _resolve_one(song: dict, index, total, on_event, on_choose, cancelled) -> tu
     Without an on_choose (the CLI has none) the best candidate is taken and
     named in a warning, so a terminal run still works and still says what it
     assumed."""
+    # The release itself, from YouTube Music, when it's plainly the one -
+    # which it usually is. Only when it isn't does the broader search run.
+    released = youtube_match.music_match(song["query"], song["duration_sec"], song["artist"])
+    if released:
+        return released["url"], None
+
     found = youtube_match.candidates(song["query"], song["duration_sec"])
     if not found:
         return None, (
@@ -506,6 +541,9 @@ def _resolve_spotify(url, on_event, on_choose, cancelled) -> dict:
     tracks list means nothing could be settled, and why has already been
     said.
 
+    "is_playlist" says whether the link named more than one song, which is
+    not the same as more than one being found.
+
     Everything is resolved before anything is downloaded. Forty downloads
     punctuated by forty questions is the thing to avoid: the queue gets
     approved once, up front."""
@@ -528,7 +566,7 @@ def _resolve_spotify(url, on_event, on_choose, cancelled) -> dict:
     tracks = []
     for index, song in enumerate(songs, start=1):
         if cancelled():
-            return {"name": found["name"], "tracks": tracks}
+            return {"name": found["name"], "tracks": tracks, "is_playlist": total > 1}
         if total > 1:
             on_event({"stage": "resolving", "index": index, "total": total,
                       "song": song["title"]})
@@ -542,7 +580,7 @@ def _resolve_spotify(url, on_event, on_choose, cancelled) -> dict:
         elif why_not:
             on_event({"stage": "error", "message": why_not})
 
-    return {"name": found["name"], "tracks": tracks}
+    return {"name": found["name"], "tracks": tracks, "is_playlist": total > 1}
 
 
 def _download_track(track_url, output_dir, on_event, position, total, known_title):
@@ -614,6 +652,26 @@ def _finish_track(track_url, fresh, output_dir, on_event, interactive, on_review
     # Remember where these came from, so coming back later for another stem
     # doesn't mean going and finding the link again (see history.py).
     history.remember(track_url, songs)
+    return songs
+
+
+def _keep_what_finished(fresh_by_track, output_dir, own_folder) -> list[str]:
+    """File and remember the songs that finished downloading before a cancel.
+
+    Stopping a playlist halfway is an ordinary thing to do, and the songs
+    already down are real songs - but the run used to return before filing
+    anything, so they sat unremembered where the stash couldn't see them.
+    Nothing is sanitized here: that can stop to ask a question, and a cancel
+    is someone saying they're done being asked. Nor is the network touched
+    to look for older copies (see _finish_track) - a cancel should be quick."""
+    songs = []
+    for track_url, fresh in fresh_by_track:
+        paths = [os.path.join(output_dir, name) for name in fresh
+                 if os.path.exists(os.path.join(output_dir, name))]
+        paths = [file_into_own_folder(path) if own_folder else path for path in paths]
+        if paths:
+            history.remember(track_url, paths)
+        songs.extend(paths)
     return songs
 
 
@@ -703,10 +761,12 @@ def run(
     # everything below it works through that list one ordinary url at a time
     # exactly as it always has for one.
     queue = [{"url": url, "title": None, "artist": None}]
-    playlist_name = ""
     if spotify.spotify_id(url):
         found = _resolve_spotify(url, on_event, on_choose, cancelled)
         queue, playlist_name = found["tracks"], found["name"]
+        # Counted before matching, not after: a playlist where YouTube only
+        # had one of the songs is still a playlist, and still its folder.
+        is_playlist = found.get("is_playlist", False)
         if not queue:
             if cancelled():
                 result["cancelled"] = True
@@ -715,18 +775,25 @@ def run(
                 result["error"] = "Couldn't work out which song that Spotify link means."
             return result
 
+    else:
+        youtube_name = youtube_playlist_name(url)
+        is_playlist = youtube_name is not None
+        playlist_name = youtube_name or ""
+
     # A playlist arrives as one thing and should land as one thing, so its
     # songs go in a folder named after it rather than scattered through the
-    # downloads folder among everything else.
-    if playlist_name and len(queue) > 1:
-        output_dir = os.path.join(output_dir, _safe_folder_name(playlist_name))
+    # downloads folder among everything else - whether it came from Spotify
+    # or YouTube, and whether or not it has a name to go by.
+    if is_playlist:
+        folder = playlist_name or time.strftime("Playlist %Y-%m-%d %H.%M")
+        output_dir = os.path.join(output_dir, _safe_folder_name(folder))
         result["output_dir"] = output_dir
 
     # Whether each song gets a folder of its own. Stems and MIDI need one -
     # they'd otherwise pile up unlabelled beside the mp3s - but a playlist
     # downloaded just for the songs is a folder of songs, and burying each
     # one in a folder of its own would only make it harder to use.
-    own_folder = bool(wanted) or not playlist_name or len(queue) == 1
+    own_folder = bool(wanted) or not is_playlist
 
     total_tracks = len(queue)
     fatal = None
@@ -770,6 +837,8 @@ def run(
     )
 
     if cancelled():
+        result["songs"] = _keep_what_finished(fresh_by_track, output_dir, own_folder)
+        result["outputs"] = list(result["songs"])
         result["cancelled"] = True
         on_event({"stage": "cancelled"})
         return result

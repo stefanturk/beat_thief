@@ -295,6 +295,14 @@ def has_existing_outputs(song_dir: str, label: str, require_midi: bool) -> bool:
     return has_wav and has_mid
 
 
+def bpm_text(tempo: float) -> str:
+    """A tempo as it goes into a filename: one decimal at most, and none at
+    all for a whole number. Three decimals was precision nobody can type
+    into Live or hear, and it made every name longer. The tempo itself is
+    kept at full precision everywhere it's used - only the name rounds."""
+    return f"{round(tempo, 1):g}"
+
+
 _TEMPO_FROM_BASENAME_RE = re.compile(r"at ([\d.]+) BPM\)$")
 
 

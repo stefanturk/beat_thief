@@ -251,8 +251,15 @@ class TestStolenBeatFilename(unittest.TestCase):
         beat = beat_writer.Beat(tempo=104.862, hits=(), bars=4)
         self.assertEqual(
             beat_writer.stolen_beat_filename(beat, "Officially Missing You - Brasstracks"),
-            "Officially Missing You - Brasstracks (Beat at 104.862 BPM).mid",
+            "Officially Missing You - Brasstracks (Beat at 104.9 BPM).mid",
         )
+
+    def test_the_tempo_is_one_decimal_at_most(self):
+        # Three decimals was precision nobody can type into Live or hear.
+        # A whole number stays whole rather than growing a ".0".
+        for tempo, shown in ((104.862, "104.9"), (119.96, "120"), (98.0, "98")):
+            beat = beat_writer.Beat(tempo=tempo, hits=(), bars=4)
+            self.assertIn(f"at {shown} BPM", beat_writer.stolen_beat_filename(beat, "Song"))
 
     def test_the_bar_count_is_not_in_it(self):
         # Two brackets deep the tempo was the half that got clipped first,

@@ -193,12 +193,12 @@ def stolen_beat_filename(beat: Beat, title: str) -> str:
     to set Ableton to.
 
     The bar count used to be in here as well - "(Stolen Beat, 4 bars)
-    (104.862 BPM)" - and it's gone. It's the one number in the name that
+    (104.9 BPM)" - and it's gone. It's the one number in the name that
     can't be acted on: the clip is however many bars it is whether or not
     the filename agrees, while the tempo is a number you have to type into
     Live. Two brackets deep, the tempo was also the half that got clipped
     first in any list narrow enough to truncate."""
-    return f"{title} ({STOLEN_BEAT_LABEL} {beat.tempo:g} BPM).mid"
+    return f"{title} ({STOLEN_BEAT_LABEL} {round(beat.tempo, 1):g} BPM).mid"
 
 
 def is_stolen_beat(name: str) -> bool:

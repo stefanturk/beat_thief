@@ -211,5 +211,78 @@ class TestSearching(unittest.TestCase):
         self.assertTrue(youtube_match._search_opts()["skip_download"])
 
 
+class _FakeMusic:
+    """yt_dlp.YoutubeDL for a Music search and then the one lookup that
+    follows it. `found` is what the lookup says about the top result."""
+
+    top_id = "BuzJ5NArvgw"
+    found = {}
+    calls = []
+
+    def __init__(self, opts):
+        self.opts = opts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def extract_info(self, url, download=False, process=True):
+        _FakeMusic.calls.append(url)
+        if "music.youtube.com/search" in url:
+            return {"entries": [{"id": self.top_id, "title": "whatever"}] if self.top_id else []}
+        return dict(self.found)
+
+
+class TestYoutubeMusicFirst(unittest.TestCase):
+    """The Music "songs" search names the release itself. Trusted only when
+    length, artist and title all agree - anything less is None, and the
+    ordinary search and pick() carry on exactly as before."""
+
+    def setUp(self):
+        _FakeMusic.calls = []
+        _FakeMusic.top_id = "BuzJ5NArvgw"
+        _FakeMusic.found = {"duration": 188, "title": "Them Changes",
+                            "artists": ["Thundercat"], "channel": "Thundercat"}
+        patcher = mock.patch("yt_dlp.YoutubeDL", _FakeMusic)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _match(self, want=188.0, artist="Thundercat"):
+        return youtube_match.music_match("Thundercat Them Changes", want, artist)
+
+    def test_the_release_at_the_right_length_by_the_right_artist_is_taken(self):
+        hit = self._match()
+        self.assertEqual(hit["url"], "https://www.youtube.com/watch?v=BuzJ5NArvgw")
+        self.assertEqual(hit["offset"], 0.0)
+        self.assertIn("music.youtube.com/search", _FakeMusic.calls[0])
+        self.assertIn("#songs", _FakeMusic.calls[0])
+
+    def test_the_wrong_length_is_left_to_the_ordinary_search(self):
+        self.assertIsNone(self._match(want=214.0))
+
+    def test_somebody_elses_recording_is_left_to_the_ordinary_search(self):
+        _FakeMusic.found = dict(_FakeMusic.found, artists=["Cover Band"], channel="Cover Band")
+        self.assertIsNone(self._match())
+
+    def test_another_version_is_left_to_the_ordinary_search(self):
+        _FakeMusic.found = dict(_FakeMusic.found, title="Them Changes (Sped Up)")
+        self.assertIsNone(self._match())
+
+    def test_no_result_or_a_failure_is_none_not_a_crash(self):
+        _FakeMusic.top_id = None
+        self.assertIsNone(self._match())
+        with mock.patch("yt_dlp.YoutubeDL", side_effect=RuntimeError("boom")):
+            self.assertIsNone(self._match())
+
+    def test_artists_are_compared_ignoring_punctuation_and_topic(self):
+        self.assertTrue(youtube_match.same_artist("Earth, Wind & Fire", ["Earth Wind & Fire - Topic"]))
+        self.assertTrue(youtube_match.same_artist("Rufus, Chaka Khan", ["Chaka Khan"]))
+        self.assertTrue(youtube_match.same_artist("Thundercat", ["Thundercat, Kendrick Lamar"]))
+        self.assertFalse(youtube_match.same_artist("Thundercat", ["Vulfpeck"]))
+        self.assertFalse(youtube_match.same_artist("", ["Anyone"]))
+
+
 if __name__ == "__main__":
     unittest.main()
