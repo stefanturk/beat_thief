@@ -842,9 +842,60 @@ class TestWhatASongHas(unittest.TestCase):
             "Song - Artist (Isolated Vocals).wav",
             "Song - Artist (Beat at 120 BPM).wav",
             "Song - Artist (Beat at 120 BPM).mid",
+            "Song - Artist (Bass beat at 120 BPM).wav",
+            "Song - Artist (Harmony beat at 120 BPM).wav",
+            "Song - Artist (Vocals beat at 120 BPM).wav",
         )
 
         self.assertEqual(set(have), set(pipeline.STASH_ORDER))
+
+    def test_each_stem_loop_is_found_and_none_is_taken_for_the_drum_loop(self):
+        have = self._have(
+            "Song - Artist (Isolated Bass at 120.000 BPM).wav",
+            "Song - Artist (Bass beat at 120 BPM).wav",
+        )
+
+        self.assertTrue(have["bass_beat"].endswith("(Bass beat at 120 BPM).wav"))
+        self.assertTrue(have["bass"].endswith("(Isolated Bass at 120.000 BPM).wav"))
+        self.assertNotIn("beat", have)
+
+    def test_the_stem_loop_names_are_the_ones_beat_loop_writes(self):
+        import beat_loop
+        beat = os.path.join(self.tmp_dir, "Song - Artist (Beat at 120 BPM).wav")
+        names = [os.path.basename(beat_loop.stem_loop_path(beat, stem)) for stem in beat_loop.STEM_LOOP_LABELS]
+
+        have = self._have(*names)
+
+        self.assertEqual({"bass_beat", "harmony_beat", "vocals_beat"}, set(have) - {"song"})
+
+
+class TestLoopSpanInTheLibrary(unittest.TestCase):
+    """Whether a song's newest drum loop remembers its bars - which is what
+    lets the other stems be looped without marking again."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.beat = os.path.join(self.tmp_dir, "Song (Beat at 120 BPM).wav")
+        open(self.beat, "wb").close()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_no_sidecar_no_span(self):
+        self.assertFalse(pipeline.has_loop_span({"beat": self.beat}))
+
+    def test_no_beat_no_span(self):
+        self.assertFalse(pipeline.has_loop_span({}))
+
+    def test_a_sidecar_is_a_span(self):
+        import beat_loop
+        loop = beat_loop.Loop(
+            beat=beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0),)),
+            bars=2, origin_sec=1.0, hits_used=1, hits_dropped=0, hits_inferred=0,
+            tempo=120.0, song_tempo=120.0,
+        )
+        beat_loop.write_span(self.beat, loop)
+        self.assertTrue(pipeline.has_loop_span({"beat": self.beat}))
 
 
 class TestIsolateWithoutDownloading(unittest.TestCase):

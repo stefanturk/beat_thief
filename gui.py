@@ -329,7 +329,7 @@ class Api:
         return prepared
 
     def steal_beat(self, wav_path: str, start_sec: float, end_sec: float,
-                    outputs: str = "both", on_phase=None) -> dict:
+                    outputs: str = "both", on_phase=None, stems=()) -> dict:
         """Turn the marked section into a loop and save it next to the stem.
 
         outputs picks what's kept: "wav" for just the trimmed loop audio,
@@ -350,7 +350,12 @@ class Api:
 
         on_phase is optional and only used by steal_beat_start - a direct
         caller (the tests, or a script) has no poller reading it, so it
-        defaults to doing nothing."""
+        defaults to doing nothing.
+
+        stems names the other stems - "bass", "harmony", "vocals" - to loop
+        over the same bars, cut from the loop's own span (after any nudge
+        onto a kick), so they line up with the drum loop to the sample. The
+        span is kept beside the loop either way, for loop_stems later."""
         try:
             song_dir = os.path.dirname(wav_path)
             basename = os.path.splitext(os.path.basename(wav_path))[0]
@@ -367,12 +372,17 @@ class Api:
                 if outputs == "wav":
                     os.remove(mid_path)
                     path = wav_path_out
+            beat_loop.write_span(mid_path, loop)
+            loops, missing = self._cut_stem_loops(
+                song_dir, mid_path, loop.origin_sec, loop.beat.duration_sec, stems)
         except Exception as e:
             return {"error": str(e) or e.__class__.__name__}
 
         return {
             "path": path,
             "name": os.path.basename(path),
+            "loops": loops,
+            "missing": missing,
             "bars": loop.bars,
             # Where the cut actually landed in the stem, and how long it
             # runs. Reported because the picker marks a start and the build
@@ -392,7 +402,7 @@ class Api:
         }
 
     def steal_beat_start(self, wav_path: str, start_sec: float, end_sec: float,
-                          outputs: str = "both") -> dict:
+                          outputs: str = "both", stems=None) -> dict:
         """Like steal_beat, but returns immediately and reports progress
         through beat_status() - the page polls it exactly the way it polls
         status() for a run.
@@ -418,11 +428,47 @@ class Api:
 
         self._beat_thread = threading.Thread(
             target=self._steal_beat_work,
-            args=(wav_path, start_sec, end_sec, outputs),
+            args=(wav_path, start_sec, end_sec, outputs, list(stems or [])),
             daemon=True,
         )
         self._beat_thread.start()
         return snapshot
+
+    def loop_stems(self, song_path: str, stems: list) -> dict:
+        """Loop stems over the bars of the song's newest drum loop, without
+        marking anything: the span that loop was cut from is kept beside it
+        (see steal_beat). Quick - it's a cut per stem, nothing is built - so
+        it answers directly rather than through a poller."""
+        try:
+            song_dir = instrument_isolator.song_output_dir(song_path)
+            files = [os.path.join(song_dir, n) for n in os.listdir(song_dir)]
+            beat_path = pipeline._newest_stolen_beat(files, ".wav") or pipeline._newest_stolen_beat(files, ".mid")
+            span = beat_loop.read_span(beat_path) if beat_path else None
+            if span is None:
+                return {"error": "That drum loop doesn't remember its bars — mark the beat again to loop the other stems over it."}
+            loops, missing = self._cut_stem_loops(
+                song_dir, beat_path, span["origin_sec"], span["duration_sec"], stems)
+        except Exception as e:
+            return {"error": str(e) or e.__class__.__name__}
+        return {"loops": loops, "missing": missing, "bars": span["bars"], "tempo": round(span["tempo"], 1)}
+
+    @staticmethod
+    def _cut_stem_loops(song_dir, beat_path, origin_sec, duration_sec, stems):
+        """Cut each of stems over [origin_sec, +duration_sec], named after
+        the drum loop at beat_path. Returns (paths written, stems that have
+        no isolated wav to cut from)."""
+        names = sorted(os.listdir(song_dir))
+        loops, missing = [], []
+        for stem in stems:
+            label = pipeline._INSTRUMENTS[stem][1]
+            source = next((os.path.join(song_dir, n) for n in names
+                           if label in n and n.endswith(".wav")), None)
+            if source is None:
+                missing.append(stem)
+                continue
+            loops.append(beat_loop.cut(source, origin_sec, duration_sec,
+                                       beat_loop.stem_loop_path(beat_path, stem)))
+        return loops, missing
 
     def beat_status(self) -> dict:
         """The current state of a steal_beat_start() build, polled by the
@@ -434,8 +480,9 @@ class Api:
         with self._beat_lock:
             self._beat_state["phase"] = phase
 
-    def _steal_beat_work(self, wav_path, start_sec, end_sec, outputs="both"):
-        result = self.steal_beat(wav_path, start_sec, end_sec, outputs=outputs, on_phase=self._set_beat_phase)
+    def _steal_beat_work(self, wav_path, start_sec, end_sec, outputs="both", stems=()):
+        result = self.steal_beat(wav_path, start_sec, end_sec, outputs=outputs,
+                                 on_phase=self._set_beat_phase, stems=stems)
         with self._beat_lock:
             self._beat_state["running"] = False
             if "error" in result:

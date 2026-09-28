@@ -758,6 +758,90 @@ class TestStealBeat(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.splitext(loop["path"])[0] + ".wav"))
 
 
+class TestStemLoops(unittest.TestCase):
+    """Bass, harmony and vocal loops over the drum loop's bars: made in the
+    same steal, or later from the bars a drum loop remembers."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.song = os.path.join(self.tmp_dir, "Song - Artist.mp3")
+        open(self.song, "wb").close()
+        self.drums = os.path.join(self.tmp_dir, "Song - Artist (Isolated Drums at 120.0 BPM).wav")
+        self.bass = os.path.join(self.tmp_dir, "Song - Artist (Isolated Bass at 120.0 BPM).wav")
+        self.vocals = os.path.join(self.tmp_dir, "Song - Artist (Isolated Vocals at 120.0 BPM).wav")
+        for path in (self.drums, self.bass, self.vocals):
+            open(path, "wb").close()
+        self.loop = beat_loop.Loop(
+            beat=beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0, 100),), bars=2),
+            bars=2, origin_sec=4.25, hits_used=1, hits_dropped=0, hits_inferred=0,
+            tempo=120.0, song_tempo=120.0,
+        )
+        self.cuts = []
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _cut(self, src, origin, duration, out):
+        self.cuts.append((src, origin, duration, out))
+        open(out, "wb").close()
+        return out
+
+    def _steal(self, stems):
+        with mock.patch("beat_loop.build", return_value=self.loop), \
+             mock.patch("beat_loop.cut", side_effect=self._cut), \
+             mock.patch("instrument_isolator.song_output_dir", return_value=self.tmp_dir):
+            return gui.Api().steal_beat(self.drums, 4.0, 8.0, outputs="wav", stems=stems)
+
+    def test_each_armed_stem_is_cut_over_the_drum_loops_own_span(self):
+        result = self._steal(["bass", "vocals"])
+
+        self.assertNotIn("error", result)
+        by_source = {src: (origin, duration) for src, origin, duration, _ in self.cuts}
+        self.assertEqual(by_source[self.bass], by_source[self.drums])
+        self.assertEqual(by_source[self.vocals], (4.25, self.loop.beat.duration_sec))
+        names = [os.path.basename(p) for p in result["loops"]]
+        self.assertEqual(names, ["Song - Artist (Bass beat at 120 BPM).wav",
+                                 "Song - Artist (Vocals beat at 120 BPM).wav"])
+
+    def test_no_stems_armed_is_the_drum_loop_alone(self):
+        result = self._steal([])
+
+        self.assertEqual(result["loops"], [])
+        self.assertEqual(len(self.cuts), 1)
+
+    def test_a_stem_that_was_never_isolated_is_said_not_skipped_silently(self):
+        result = self._steal(["harmony"])
+
+        self.assertEqual(result["loops"], [])
+        self.assertEqual(result["missing"], ["harmony"])
+
+    def test_the_steal_leaves_its_span_for_later(self):
+        result = self._steal([])
+
+        self.assertEqual(beat_loop.read_span(result["path"])["origin_sec"], 4.25)
+
+    def test_the_stems_can_be_looped_later_over_the_same_bars(self):
+        made = self._steal([])
+        self.cuts.clear()
+
+        with mock.patch("beat_loop.cut", side_effect=self._cut), \
+             mock.patch("instrument_isolator.song_output_dir", return_value=self.tmp_dir), \
+             mock.patch("pipeline._newest_stolen_beat", return_value=made["path"]):
+            result = gui.Api().loop_stems(self.song, ["bass"])
+
+        self.assertEqual(self.cuts, [(self.bass, 4.25, self.loop.beat.duration_sec,
+                                      beat_loop.stem_loop_path(made["path"], "bass"))])
+        self.assertEqual(result["bars"], 2)
+
+    def test_a_drum_loop_without_a_span_asks_to_be_marked_again(self):
+        old = os.path.join(self.tmp_dir, "Song - Artist (Beat at 120 BPM).wav")
+        open(old, "wb").close()
+        with mock.patch("instrument_isolator.song_output_dir", return_value=self.tmp_dir):
+            result = gui.Api().loop_stems(self.song, ["bass"])
+
+        self.assertIn("mark", result["error"])
+
+
 class TestStealBeatAsync(unittest.TestCase):
     """steal_beat_start()/beat_status(): the same start()/status() polling
     shape as a run, so the picker can show something better than a static
@@ -1044,6 +1128,26 @@ class TestUiFile(unittest.TestCase):
         self.assertEqual(order[:4], ["drums", "bass", "harmony", "vocals"])
         self.assertIn("beat", order[4:])
         self.assertRegex(markup, r"#pad-beat \{[^}]*grid-column: 1;[^}]*grid-row: 2;")
+        for column, stem in enumerate(["bass", "harmony", "vocals"], start=2):
+            self.assertIn(f"{stem}_beat", order)
+            self.assertRegex(markup, rf"#pad-{stem}_beat \{{[^}}]*grid-column: {column};[^}}]*grid-row: 2;")
+
+    def test_every_pad_is_one_the_page_knows_and_the_library_reports(self):
+        # A pad the page's STASH_ORDER doesn't list is never armed, coloured
+        # or sent; one the library doesn't report never goes green.
+        import pipeline
+        with open(gui.UI_FILE) as page:
+            markup = page.read()
+        pads = set(re.findall(r'id="pad-(\w+)"', markup))
+        page_order = re.search(r"const STASH_ORDER = \[(.*?)\];", markup, re.S).group(1)
+        self.assertEqual(pads, set(re.findall(r'"(\w+)"', page_order)))
+        self.assertEqual(pads, set(pipeline.STASH_ORDER))
+
+    def test_a_steal_sends_the_armed_stem_loops_along(self):
+        with open(gui.UI_FILE) as page:
+            markup = page.read()
+        self.assertRegex(markup, r"steal_beat_start\([^)]*stemsFromPads\(\)\)")
+        self.assertIn("pywebview.api.loop_stems(", markup)
 
     def test_numbering_sits_beside_sanitize_and_starts_hidden_and_off(self):
         with open(gui.UI_FILE) as page:
