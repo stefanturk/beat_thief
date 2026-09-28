@@ -167,6 +167,9 @@
   .stem-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
   /* Each stem's loop goes under the stem it's cut from. */
   #pad-beat { grid-column: 1; grid-row: 2; }
+  #pad-bass_beat { grid-column: 2; grid-row: 2; }
+  #pad-harmony_beat { grid-column: 3; grid-row: 2; }
+  #pad-vocals_beat { grid-column: 4; grid-row: 2; }
 
   .pad {
     flex: 1;
@@ -461,16 +464,17 @@
   /* The same six things as the Take section, in the same order, so a
      glance down the list and a glance up at the pads mean the same thing.
      Green is in the stash; clicking one reveals that exact file. */
-  .marks { display: flex; gap: 3px; flex: none; }
+  .marks { display: grid; grid-template-columns: repeat(5, 11px); grid-auto-rows: 11px; gap: 3px; flex: none; }
   .mark {
-    width: 13px;
-    height: 13px;
+    width: 11px;
+    height: 11px;
     padding: 0;
     border-radius: 3px;
     background: transparent;
     border: 1px solid var(--edge);
     cursor: default;
   }
+  .mark-song { grid-row: span 2; height: auto; }
   .mark[data-have="true"] {
     background: var(--good);
     border-color: var(--good);
@@ -694,6 +698,15 @@
           <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
           <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
           <!--
+            A loop of each stem over the drum loop's bars - the same marking,
+            so they stack in Ableton without lining anything up. With a drum
+            loop already there (one that remembers its bars), no marking at
+            all: they're cut straight from it.
+          -->
+          <button class="pad" id="pad-bass_beat" data-stem="bass_beat" data-again="true" aria-pressed="false">Beat</button>
+          <button class="pad" id="pad-harmony_beat" data-stem="harmony_beat" data-again="true" aria-pressed="false">Beat</button>
+          <button class="pad" id="pad-vocals_beat" data-stem="vocals_beat" data-again="true" aria-pressed="false">Beat</button>
+          <!--
             Midi is hidden, not gone: Ableton's own drums-to-MIDI does the job
             better for now, and a square that makes a worse copy of something
             you already have is only in the way. Never shown means never armed,
@@ -889,13 +902,14 @@
     open.addEventListener("click", () => window.pywebview.api.reveal(song.dir || song.song));
     item.append(open);
 
-    // The same six squares as the Take section, in the same order.
+    // The Take section in miniature: the song, then the stems with each
+    // one's loop under it. Midi stays out, like its pad.
     const marks = document.createElement("div");
     marks.className = "marks";
-    for (const thing of STASH_ORDER) {
+    for (const thing of MARK_LAYOUT) {
       const path = (song.have || {})[thing];
       const mark = document.createElement("button");
-      mark.className = "mark";
+      mark.className = thing === "song" ? "mark mark-song" : "mark";
       mark.dataset.have = path ? "true" : "false";
       mark.title = path ? LABELS[thing] + " — click to show it in Finder" : "No " + LABELS[thing].toLowerCase() + " yet";
       if (path) mark.addEventListener("click", () => window.pywebview.api.reveal(path));
@@ -915,22 +929,45 @@
 
   // --- what's armed, and what's already in the stash ---------------------
 
-  const STASH_ORDER = ["song", "drums", "beat", "midi", "bass", "harmony", "vocals"];
+  const STASH_ORDER = ["song", "drums", "beat", "midi", "bass", "harmony", "vocals",
+                       "bass_beat", "harmony_beat", "vocals_beat"];
   const LABELS = {
     song: "Song", drums: "Drums", beat: "Beat", midi: "Midi",
     bass: "Bass", harmony: "Harmony", vocals: "Vocals",
+    bass_beat: "Bass beat", harmony_beat: "Harmony beat", vocals_beat: "Vocals beat",
   };
+  // The song down the left, as tall as both rows (see .mark-song).
+  const MARK_LAYOUT = ["song", "drums", "bass", "harmony", "vocals",
+                       "beat", "bass_beat", "harmony_beat", "vocals_beat"];
+  // The stems that can be looped over a drum loop's bars.
+  const LOOPED_STEMS = ["bass", "harmony", "vocals"];
 
   // What each thing needs before it can exist. A beat (the trimmed .wav)
   // and its midi are both cut out of the drum stem, independently of one
   // another - a steal writes whichever one you clicked, never both - and
   // every stem is separated out of the song, so arming one arms what it's
   // made from.
+  //
+  // A stem's loop is cut over a drum loop's bars, so it needs the drum loop
+  // marked as well - unless the song already has one that remembers where
+  // it was cut (song.span), and then it's cut straight from that.
   const NEEDS = {
     song: [],
     drums: ["song"], bass: ["song"], harmony: ["song"], vocals: ["song"],
     beat: ["song", "drums"], midi: ["song", "drums"],
+    bass_beat: ["song", "bass", "drums", "beat"],
+    harmony_beat: ["song", "harmony", "drums", "beat"],
+    vocals_beat: ["song", "vocals", "drums", "beat"],
   };
+
+  function spanToLoopFrom() { return !!(selected && selected.span && have("beat")); }
+
+  function needs(thing) {
+    if (thing.endsWith("_beat") && spanToLoopFrom()) {
+      return NEEDS[thing].filter((t) => t !== "beat" && t !== "drums");
+    }
+    return NEEDS[thing];
+  }
 
   let selected = null;   // the song the Take section is pointed at, if any
 
@@ -940,7 +977,8 @@
   // ear, and the verse and the chorus of the same drums are two different
   // loops. So a green Beat or Midi can still be armed, and goes purple like
   // anything else.
-  const MORE_THAN_ONE = new Set(["beat", "midi"]);
+  // A stem's loop is the same: another marking is another loop.
+  const MORE_THAN_ONE = new Set(["beat", "midi", "bass_beat", "harmony_beat", "vocals_beat"]);
 
   // What a pasted link is armed for before you touch anything: the song and
   // nothing else. Arming the beat as well would be the faster route to a
@@ -963,7 +1001,7 @@
   // locked either - green needs nothing.
   function lockedOn(thing) {
     return STASH_ORDER.some(
-      (other) => other !== thing && isArmed(other) && NEEDS[other].includes(thing));
+      (other) => other !== thing && isArmed(other) && needs(other).includes(thing));
   }
 
   function setArmed(thing, on) {
@@ -987,7 +1025,7 @@
       setArmed(thing, false);
     } else {
       setArmed(thing, true);
-      for (const needed of NEEDS[thing]) setArmed(needed, true);
+      for (const needed of needs(thing)) setArmed(needed, true);
     }
     showLocks();
     describeTake();
@@ -1896,6 +1934,11 @@
     return null;
   }
 
+  // Which stems to loop over the same bars, also read off the pads at Build.
+  function stemsFromPads() {
+    return LOOPED_STEMS.filter((stem) => isArmed(stem + "_beat"));
+  }
+
   function refreshBuildEnabled() {
     if (!picker) return;
     el("build").disabled = !(picker.start !== null && picker.end !== null && outputsFromPads());
@@ -1917,7 +1960,7 @@
     // jump straight from the click to the result with nothing shown between.
     el("picker-hint").textContent = "Cutting the section...";
 
-    window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end, outputs).then((snapshot) => {
+    window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end, outputs, stemsFromPads()).then((snapshot) => {
       if (snapshot.busy) {
         // A build was already running when this click landed - it's still
         // that one's result on the way, not this click's, so say so rather
@@ -1950,12 +1993,35 @@
         // Notes worked out from the pattern rather than heard - say so.
         (loop.inferred ? " (" + loop.inferred + " put back)" : "") + ", " +
         loop.pieces.join(" / ") + " — set Ableton to " + loop.tempo + " BPM" +
-        tempoQuibble(loop) + cutMoved(loop);
+        tempoQuibble(loop) + cutMoved(loop) + stemLoopsSaid(loop);
       refreshLibrary().then(() => {
         closePicker();
         el("message").textContent = summary;
       });
     });
+  }
+
+  // What else was looped over the same bars, and what couldn't be because
+  // its stem was never isolated.
+  function stemLoopsSaid(result) {
+    const made = (result.loops || []).length;
+    const missing = result.missing || [];
+    return (made ? ", plus " + made + " stem loop" + (made === 1 ? "" : "s") : "") +
+      (missing.length ? " (no " + missing.map((s) => LABELS[s].toLowerCase()).join(" or ") + " stem to loop)" : "");
+  }
+
+  // Loop stems over the song's newest drum loop, with no marking - its bars
+  // are kept beside it. A cut per stem, so it answers straight away.
+  function loopStems(song, stems) {
+    el("message").textContent = "Looping over the drum loop's bars...";
+    return window.pywebview.api.loop_stems(song.song, stems).then((result) => {
+      refreshLibrary();
+      if (result.error) { el("message").textContent = result.error; return; }
+      const made = result.loops.length;
+      el("message").textContent =
+        made + " loop" + (made === 1 ? "" : "s") + " of " + result.bars + " bar" + (result.bars === 1 ? "" : "s") +
+        " — set Ableton to " + result.tempo + " BPM" + stemLoopsSaid({ missing: result.missing });
+    }).catch(complain);
   }
 
   // The build is still allowed to move the cut onto a kick when the marking
@@ -2126,6 +2192,12 @@
           // The drums are there now, so the phrase can be picked.
           const waiting = pendingBeatFor;
           pendingBeatFor = null;
+          const looping = pendingLoopsFor;
+          pendingLoopsFor = null;
+          if (looping && !state.error && !state.cancelled) {
+            const fresh = songWaitedFor(looping, state);
+            if (fresh) loopStems(fresh, looping.stems);
+          }
           if (waiting && !state.error && !state.cancelled) {
             const fresh = songWaitedFor(waiting, state);
             if (fresh && fresh.have && fresh.have.drums) openPicker(fresh);
@@ -2151,14 +2223,23 @@
     const wantsBeat = options.beat || options.midi;
     delete options.beat;
     delete options.midi;
+    // Stem loops are cut from a marking too - this one's, when Beat is
+    // armed, or the one the song's drum loop kept. Either way not a run's.
+    const stemLoops = LOOPED_STEMS.filter((stem) => options[stem + "_beat"]);
+    for (const stem of LOOPED_STEMS) delete options[stem + "_beat"];
+    const loopFromSpan = stemLoops.length && !wantsBeat;
 
     if (selected) {
       // "source", not "song": every other key here is an armed/not flag,
       // and one of the squares is called Song.
       options.source = selected.song;
       // Nothing left to separate: go straight to the picker.
-      if (wantsBeat && !options.drums && selected.have && selected.have.drums) {
+      if (wantsBeat && !INSTRUMENTS.some((t) => options[t]) && selected.have && selected.have.drums) {
         openPicker(selected);
+        return;
+      }
+      if (loopFromSpan && !INSTRUMENTS.some((t) => options[t])) {
+        loopStems(selected, stemLoops);
         return;
       }
     }
@@ -2166,6 +2247,7 @@
     // that hasn't been downloaded yet has no song object to remember - and
     // that's the ordinary case: paste a link, click Beat, take it.
     pendingBeatFor = wantsBeat ? { song: selected ? selected.song : "" } : null;
+    pendingLoopsFor = loopFromSpan ? { song: selected ? selected.song : "", stems: stemLoops } : null;
 
     lastStage = null;
     window.pywebview.api.start(el("url").value, options).then((state) => {
@@ -2192,6 +2274,10 @@
 
   // A song whose beat was armed, waiting for its drums to finish.
   let pendingBeatFor = null;
+  // A song whose stems are to be looped over its drum loop's kept bars,
+  // waiting for those stems to be isolated.
+  let pendingLoopsFor = null;
+  const INSTRUMENTS = ["drums", "bass", "harmony", "vocals"];
 
   // Which song that run was about. A song picked out of the stash is known
   // by its path from the start; a freshly downloaded one isn't known until
@@ -2230,6 +2316,7 @@
     if (running) return;
     lastStage = null;
     pendingBeatFor = null;
+    pendingLoopsFor = null;
     window.pywebview.api.tidy_folder().then((state) => {
       render(state);
       if (state.running && !polling) polling = setInterval(poll, 250);

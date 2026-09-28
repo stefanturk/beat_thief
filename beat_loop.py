@@ -452,6 +452,25 @@ def write(loop: Loop, out_dir: str, title: str) -> str:
     return beat_writer.write(named, path)
 
 
+def cut(src_path: str, origin_sec: float, duration_sec: float, out_path: str) -> str:
+    """Cut [origin_sec, origin_sec + duration_sec] out of src_path into
+    out_path. The one cut both the drum loop and every stem loop go through,
+    so a bass loop lines up with its drums to the sample: same stem clock,
+    same numbers, same ffmpeg call."""
+    subprocess.run(
+        [
+            "ffmpeg", "-loglevel", "error", "-y",
+            "-ss", f"{origin_sec:.6f}",
+            "-t", f"{duration_sec:.6f}",
+            "-i", src_path,
+            out_path,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return out_path
+
+
 def write_wav(loop: Loop, wav_path: str, mid_path: str) -> str:
     """Cut the loop's own span - origin_sec to origin_sec + duration_sec,
     the marking after it was nudged onto a kick, not the raw click - out of
@@ -462,15 +481,26 @@ def write_wav(loop: Loop, wav_path: str, mid_path: str) -> str:
     of the two drifting out of sync should one ever be written without the
     other."""
     out_path = os.path.splitext(mid_path)[0] + ".wav"
-    subprocess.run(
-        [
-            "ffmpeg", "-loglevel", "error", "-y",
-            "-ss", f"{loop.origin_sec:.6f}",
-            "-t", f"{loop.beat.duration_sec:.6f}",
-            "-i", wav_path,
-            out_path,
-        ],
-        check=True,
-        capture_output=True,
-    )
-    return out_path
+    return cut(wav_path, loop.origin_sec, loop.beat.duration_sec, out_path)
+
+
+# --- loops of the other stems --------------------------------------------
+#
+# The names and the sidecar live in beat_writer, next to the drum loop's own
+# name, so the library can read them without loading the model; these are
+# here so everything about cutting a loop can be reached from one place.
+
+STEM_LOOP_LABELS = beat_writer.STEM_LOOP_LABELS
+stem_loop_path = beat_writer.stem_loop_path
+read_span = beat_writer.read_span
+
+
+def write_span(beat_path: str, loop: Loop) -> str:
+    """Remember where the drum loop at beat_path was cut from, so the other
+    stems can be looped over the same bars later without marking again."""
+    return beat_writer.write_span(beat_path, {
+        "origin_sec": loop.origin_sec,
+        "duration_sec": loop.beat.duration_sec,
+        "bars": loop.bars,
+        "tempo": loop.tempo,
+    })

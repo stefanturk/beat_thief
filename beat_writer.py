@@ -22,6 +22,7 @@ Run it directly to write the two reference files (see main)."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from typing import NamedTuple
 
@@ -204,6 +205,57 @@ def stolen_beat_filename(beat: Beat, title: str) -> str:
 def is_stolen_beat(name: str) -> bool:
     """Whether a filename is a stolen loop, under either name it has had."""
     return STOLEN_BEAT_LABEL in name or _FORMER_STOLEN_BEAT_LABEL in name
+
+
+# --- loops of the other stems --------------------------------------------
+#
+# Every stem is trimmed by the same beat-1 cut (instrument_isolator
+# .song_alignment), so a time in the drum stem is the same time in the bass
+# stem - and the drum loop's span, cut out of any of them, is the same bars.
+# Lower-case "beat", so none of these reads as the drum loop's "Beat at".
+
+STEM_LOOP_LABELS = {"bass": "Bass beat", "harmony": "Harmony beat", "vocals": "Vocals beat"}
+
+
+def stem_loop_path(beat_path: str, stem: str) -> str:
+    """Where the loop of stem that matches the drum loop at beat_path goes:
+    "Song (Beat at 104.5 BPM) (2).wav" -> "Song (Bass beat at 104.5 BPM) (2).wav".
+
+    Derived from the drum loop's own name, " (2)" and all, so a second
+    marking's stems stay paired with it rather than with the first."""
+    directory, name = os.path.split(beat_path)
+    base = os.path.splitext(name)[0]
+    at = base.rfind("(" + STOLEN_BEAT_LABEL)
+    if at < 0:
+        raise ValueError(f"not a drum loop: {name}")
+    renamed = base[:at + 1] + STEM_LOOP_LABELS[stem] + base[at + len("(Beat"):]
+    return os.path.join(directory, renamed + ".wav")
+
+
+def _span_path(beat_path: str) -> str:
+    # Hidden, so the folder full of loops you drag into Ableton holds only
+    # things worth dragging. The .mid and the .wav of one loop share it.
+    directory, name = os.path.split(beat_path)
+    return os.path.join(directory, "." + os.path.splitext(name)[0] + ".loop.json")
+
+
+def write_span(beat_path: str, span: dict) -> str:
+    """Keep where a drum loop was cut from - origin_sec, duration_sec, bars,
+    tempo - beside it."""
+    path = _span_path(beat_path)
+    with open(path, "w") as f:
+        json.dump(span, f)
+    return path
+
+
+def read_span(beat_path: str) -> dict | None:
+    """What write_span kept for this drum loop, or None - a loop made before
+    spans were kept has nothing to go on but being marked again."""
+    try:
+        with open(_span_path(beat_path)) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 # --- the two reference beats -------------------------------------------

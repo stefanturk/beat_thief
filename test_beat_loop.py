@@ -586,5 +586,73 @@ class TestWriteWav(unittest.TestCase):
         self.assertLess(loudest / rate, 0.015)
 
 
+class TestStemLoops(unittest.TestCase):
+    """Bass, harmony and vocal loops cut over exactly the drum loop's bars."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _loop(self, origin_sec=4.0, bars=2, tempo=120.0):
+        return TestWriteWav._loop(self, origin_sec=origin_sec, bars=bars, tempo=tempo)
+
+    def test_a_stem_loop_is_named_after_the_drum_loop_it_matches(self):
+        beat = os.path.join(self.tmp_dir, "Song - Artist (Beat at 104.5 BPM).wav")
+        self.assertEqual(
+            beat_loop.stem_loop_path(beat, "bass"),
+            os.path.join(self.tmp_dir, "Song - Artist (Bass beat at 104.5 BPM).wav"))
+
+    def test_a_second_drum_loops_number_carries_over(self):
+        beat = os.path.join(self.tmp_dir, "Song (Beat at 104.5 BPM) (2).wav")
+        self.assertEqual(
+            os.path.basename(beat_loop.stem_loop_path(beat, "vocals")),
+            "Song (Vocals beat at 104.5 BPM) (2).wav")
+
+    def test_a_stem_loop_is_not_mistaken_for_the_drum_loop(self):
+        for stem in beat_loop.STEM_LOOP_LABELS:
+            name = os.path.basename(beat_loop.stem_loop_path("/x/Song (Beat at 100 BPM).wav", stem))
+            self.assertFalse(beat_writer.is_stolen_beat(name), name)
+
+    def test_the_span_round_trips_through_the_sidecar(self):
+        beat = os.path.join(self.tmp_dir, "Song (Beat at 120 BPM).wav")
+        loop = self._loop(origin_sec=4.25, bars=2)
+        beat_loop.write_span(beat, loop)
+
+        span = beat_loop.read_span(beat)
+
+        self.assertEqual(span["origin_sec"], 4.25)
+        self.assertAlmostEqual(span["duration_sec"], loop.beat.duration_sec)
+        self.assertEqual(span["bars"], 2)
+        self.assertEqual(span["tempo"], 120.0)
+
+    def test_the_sidecar_is_hidden_so_the_folder_stays_draggable(self):
+        beat = os.path.join(self.tmp_dir, "Song (Beat at 120 BPM).wav")
+        beat_loop.write_span(beat, self._loop())
+        self.assertTrue(all(n.startswith(".") for n in os.listdir(self.tmp_dir)))
+
+    def test_a_loop_made_before_sidecars_has_no_span(self):
+        self.assertIsNone(beat_loop.read_span(os.path.join(self.tmp_dir, "Old (Beat at 120 BPM).wav")))
+
+    def test_the_stem_cut_is_the_drum_cut_to_the_sample(self):
+        import numpy as np
+        drums = os.path.join(self.tmp_dir, "drums.wav")
+        bass = os.path.join(self.tmp_dir, "bass.wav")
+        _click_wav(drums, seconds=20.0, tempo=120.0)
+        _click_wav(bass, seconds=20.0, tempo=120.0)
+        loop = self._loop(origin_sec=4.0, bars=2)
+        mid = os.path.join(self.tmp_dir, "Song (Beat at 120 BPM).mid")
+        drum_loop = beat_loop.write_wav(loop, drums, mid)
+
+        out = beat_loop.stem_loop_path(drum_loop, "bass")
+        beat_loop.cut(bass, loop.origin_sec, loop.beat.duration_sec, out)
+
+        drum_samples, _ = _wav_samples(drum_loop)
+        bass_samples, _ = _wav_samples(out)
+        self.assertEqual(len(drum_samples), len(bass_samples))
+        self.assertTrue(np.array_equal(drum_samples, bass_samples))
+
+
 if __name__ == "__main__":
     unittest.main()

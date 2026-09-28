@@ -423,7 +423,11 @@ def _instrument_outputs(mp3_path: str, label: str) -> list[str]:
 # now (see gui.Api.steal_beat's outputs param), so each gets its own square.
 # The middle four are the stems. This order is the app's, top to bottom and
 # left to right.
-STASH_ORDER = ("song", "drums", "beat", "midi", "bass", "harmony", "vocals")
+#
+# Each "<stem>_beat" is a loop of that stem cut over a drum loop's bars (see
+# beat_writer.stem_loop_path).
+STASH_ORDER = ("song", "drums", "beat", "midi", "bass", "harmony", "vocals",
+               "bass_beat", "harmony_beat", "vocals_beat")
 
 
 def _newest_stolen_beat(files: list[str], ext: str) -> str | None:
@@ -454,7 +458,19 @@ def _what_a_song_has(song_path: str, files: list[str]) -> dict:
     midi_beat = _newest_stolen_beat(files, ".mid")
     if midi_beat:
         have["midi"] = midi_beat
+    for stem, label in beat_writer.STEM_LOOP_LABELS.items():
+        marker = f"({label} at "
+        loops = [p for p in files if marker in os.path.basename(p) and p.endswith(".wav")]
+        if loops:
+            have[stem + "_beat"] = max(loops, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0.0)
     return have
+
+
+def has_loop_span(have: dict) -> bool:
+    """Whether the song's newest drum loop remembers the bars it was cut
+    from - a loop made before that was kept has to be marked again before
+    the other stems can be looped over it."""
+    return bool(have.get("beat")) and beat_writer.read_span(have["beat"]) is not None
 
 
 def library(limit: int = 20) -> list[dict]:
@@ -501,6 +517,7 @@ def library(limit: int = 20) -> list[dict]:
                 continue
             files.append(path)
 
+        have = _what_a_song_has(song_path, files)
         songs.append(
             {
                 "title": instrument_isolator.song_title(song_path),
@@ -510,7 +527,10 @@ def library(limit: int = 20) -> list[dict]:
                 # and the MIDI. What a front end wants to open, since the
                 # stems get dragged out of it together.
                 "dir": song_dir if os.path.isdir(song_dir) else "",
-                "have": _what_a_song_has(song_path, files),
+                "have": have,
+                # The other stems can be looped over the newest drum loop's
+                # bars without marking them again.
+                "span": has_loop_span(have),
                 "files": files,
             }
         )
