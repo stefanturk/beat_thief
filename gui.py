@@ -328,6 +328,26 @@ class Api:
                             pulse.grid_track(prepared.get("kicks") or [], prepared["tempo"])]
         return prepared
 
+    def audition_song(self, song_path: str) -> dict:
+        """The whole song, to swap in for the drum stem while marking.
+
+        offset is where stem time's zero sits in the song - the beat-1 trim
+        every stem had cut off its front (instrument_isolator.song_trim_ms).
+        The page plays the song from stem time + offset, so the marks stay in
+        stem time and the swap lands on the same beat. Only what playing it
+        needs goes back; the song's peaks and kicks are never drawn."""
+        try:
+            prepared = audition.preview(song_path)
+            offset_ms = instrument_isolator.song_trim_ms(song_path)
+        except Exception as e:
+            return {"error": str(e) or e.__class__.__name__}
+        return {
+            "audio": prepared["audio"],
+            "lead": prepared["lead"],
+            "duration": prepared["duration"],
+            "offset": offset_ms / 1000.0,
+        }
+
     def steal_beat(self, wav_path: str, start_sec: float, end_sec: float,
                     outputs: str = "both", on_phase=None, stems=()) -> dict:
         """Turn the marked section into a loop and save it next to the stem.

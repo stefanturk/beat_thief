@@ -587,6 +587,7 @@
 
   .picker-controls {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 10px;
     margin-top: 10px;
@@ -605,6 +606,20 @@
   }
   .picker-controls button:hover { border-color: var(--violet); color: var(--violet); }
   .picker-controls button:disabled { opacity: 0.4; cursor: default; border-color: var(--edge); color: var(--dim); }
+  /* A row of joined buttons where one is lit: how many bars to mark, and
+     whether you're hearing the drums or the whole song. */
+  .seg { display: inline-flex; }
+  .seg[hidden] { display: none; }
+  .picker-controls .seg button { padding: 8px 9px; border-radius: 0; margin-left: -1px; }
+  .picker-controls .seg button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
+  .picker-controls .seg button:last-child { border-radius: 0 4px 4px 0; }
+  .picker-controls .seg button.on {
+    position: relative;
+    border-color: var(--violet);
+    color: var(--violet);
+    background: var(--violet-dim);
+  }
+
   /* The one thing in here that writes a file, so it's the one that's lit. */
   #build { border-color: var(--violet); color: var(--violet); }
   #build:hover { background: var(--violet-dim); }
@@ -747,6 +762,16 @@
         <button id="build" type="button" disabled>Build</button>
         <button id="fade" type="button" hidden>Fade here</button>
         <button id="keep" type="button" hidden>Leave it alone</button>
+        <span class="seg" id="bars" role="group" aria-label="Bars to mark">
+          <button type="button" data-bars="16" class="on">16 bars</button>
+          <button type="button" data-bars="32">32</button>
+          <button type="button" data-bars="64">64</button>
+          <button type="button" data-bars="0">By ear</button>
+        </span>
+        <span class="seg" id="hear" role="group" aria-label="Listen to">
+          <button type="button" data-hear="drums" class="on">Drums</button>
+          <button type="button" data-hear="song" disabled title="Getting the song...">Song</button>
+        </span>
         <button id="picker-close" type="button">Close</button>
         <span id="marked"></span>
         <span id="clock">0:00</span>
@@ -1194,7 +1219,13 @@
   function playhead() {
     if (!picker) return 0;
     if (!playing) return picker.at;
-    return Math.min(picker.duration, startedFrom + (context().currentTime - startedAt));
+    let at = startedFrom + (context().currentTime - startedAt);
+    // Round and round the marked bars - see playFrom.
+    if (picker.loop && at >= picker.loop[1]) {
+      const [from, to] = picker.loop;
+      at = from + ((at - from) % (to - from));
+    }
+    return Math.min(picker.duration, at);
   }
 
   function clock(seconds) {
@@ -1231,6 +1262,121 @@
   function beatAt(when) {
     const grid = gridAt(when);
     return grid ? grid.step * 4 : picker.beat;
+  }
+
+  // --- marking a length in bars ----------------------------------------------
+  //
+  // One click at the 1 and the end is put this many bars on. Walked a beat at
+  // a time along the fitted grid rather than start + bars * one tempo, for
+  // the same reason the grid is fitted locally at all: 64 bars at a tempo a
+  // few tenths of a percent out ends a sixteenth or more off the one.
+  //
+  // 0 is "by ear" - the old way, where stopping is what marks the end. Kept
+  // across pickers, because it's a way of working rather than a per-song
+  // choice.
+  let barsWanted = 16;
+
+  function barsAfter(from, bars) {
+    let at = from;
+    for (let n = 0; n < bars * BEATS_PER_BAR; n++) at += beatAt(at);
+    return at <= picker.duration ? at : null;
+  }
+
+  // Counting bars decides the end, so stopping only stops - otherwise
+  // pausing to think would throw away the bars you asked for.
+  function countingBars() {
+    return picker !== null && !trimming() && barsWanted > 0;
+  }
+
+  function placeEnd() {
+    if (!countingBars() || picker.start === null) return;
+    picker.end = barsAfter(picker.start, barsWanted);
+    refreshBuildEnabled();
+  }
+
+  function chooseBars(bars) {
+    barsWanted = bars;
+    for (const chip of document.querySelectorAll("#bars button")) {
+      chip.classList.toggle("on", Number(chip.dataset.bars) === bars);
+      chip.blur();
+    }
+    if (!picker || trimming() || picker.start === null) return;
+    // By ear keeps whatever end there is; you move it from there.
+    placeEnd();
+    if (playing) playFrom(playhead());
+    sayWhatIsMarked();
+    showClock();
+    drawWave();
+    drawDetail();
+  }
+
+  // --- the drums, or the whole song ------------------------------------------
+  //
+  // Where the one is is easiest to hear on the drums; whether it's a good
+  // place to start is easiest to hear in the song. S swaps between them at
+  // the same moment. The marks never move: they are in stem time, and the
+  // song is played from stem time + the trim the stems had cut off their
+  // front (gui.Api.audition_song), so the swap lands on the same beat.
+  function hearingSong() {
+    return picker !== null && picker.hearing === "song" && picker.songAudio !== null;
+  }
+
+  function hearingBuffer() {
+    return hearingSong() ? picker.songAudio.buffer : picker.buffer;
+  }
+
+  // How far into the playing buffer stem time's zero sits.
+  function hearingLead() {
+    return hearingSong() ? picker.songAudio.lead + picker.songAudio.offset : picker.lead;
+  }
+
+  function showHearing() {
+    const ready = picker !== null && !trimming() && picker.songAudio !== null;
+    for (const choice of document.querySelectorAll("#hear button")) {
+      choice.classList.toggle("on", (choice.dataset.hear === "song") === hearingSong());
+      if (choice.dataset.hear === "song") choice.disabled = !ready;
+    }
+  }
+
+  function hear(which) {
+    if (!picker || trimming() || !picker.songAudio) return;
+    if (picker.hearing === which) return;
+    picker.hearing = which;
+    showHearing();
+    if (playing) playFrom(playhead());
+  }
+
+  function toggleHearing() {
+    if (!picker) return;
+    hear(picker.hearing === "song" ? "drums" : "song");
+  }
+
+  // Fetched once the drums are playable, so the song never holds them up -
+  // until it arrives the picker is exactly what it was.
+  function loadSong(opened) {
+    const path = opened.song && opened.song.have && opened.song.have.song;
+    const button = document.querySelector('#hear button[data-hear="song"]');
+    if (!path) { button.title = "No song to play"; return; }
+    button.title = "Getting the song...";
+    window.pywebview.api.audition_song(path).then((prepared) => {
+      if (picker !== opened) return;
+      if (!prepared || prepared.error) {
+        button.title = (prepared && prepared.error) || "Could not get the song";
+        return;
+      }
+      return context().decodeAudioData(decodeDataUri(prepared.audio)).then((buffer) => {
+        if (picker !== opened) return;
+        picker.songAudio = {
+          buffer,
+          lead: (prepared.lead || 0) + decoderLead(buffer, prepared.duration),
+          offset: prepared.offset || 0,
+        };
+        button.title = "S swaps the drums and the song";
+        showHearing();
+      });
+    }).catch((e) => {
+      if (picker === opened) button.title = "Could not get the song: " + e;
+    });
   }
 
   // How far a click is allowed to be dragged onto a real kick. Half a
@@ -1453,7 +1599,10 @@
   function showClock() {
     if (!picker) return;
     const marked = markedSoFar();
-    el("marked").textContent = marked === null ? "" : "marked " + marked.toFixed(1) + "s";
+    el("marked").textContent = marked === null ? ""
+      : !countingBars() ? "marked " + marked.toFixed(1) + "s"
+      : picker.end === null ? ""   // the bars don't fit; the hint says so
+      : barsWanted + " bars · " + marked.toFixed(1) + "s";
     el("clock").textContent = clock(playhead()) + " / " + clock(picker.duration);
   }
 
@@ -1497,13 +1646,28 @@
     stopSource();
     picker.at = Math.max(0, Math.min(seconds, picker.duration));
 
+    const buffer = hearingBuffer();
+    const lead = hearingLead();
     source = ctx.createBufferSource();
-    source.buffer = picker.buffer;
+    source.buffer = buffer;
     source.connect(ctx.destination);
     source.onended = () => { if (source) pausePlay(); };
-    // picker.lead is how far into the decoded copy the stem's zero actually
-    // sits - see decoderLead. Everything outside this line is in stem time.
-    source.start(0, Math.min(picker.at + picker.lead, picker.buffer.duration));
+    // Counted bars play round and round, so what you hear is the loop you'd
+    // get - a start that's off the one is obvious the second time it comes
+    // round. By ear it plays on, because playing past the end is how the
+    // end gets moved.
+    picker.loop = countingBars() && picker.start !== null && picker.end !== null &&
+                  picker.at >= picker.start && picker.at < picker.end
+      ? [picker.start, picker.end] : null;
+    if (picker.loop) {
+      source.loop = true;
+      source.loopStart = picker.start + lead;
+      source.loopEnd = picker.end + lead;
+    }
+    // lead is how far into the decoded copy the stem's zero actually sits -
+    // see decoderLead and hearingLead. Everything outside these lines is in
+    // stem time.
+    source.start(0, Math.min(picker.at + lead, buffer.duration));
 
     startedAt = ctx.currentTime;
     startedFrom = picker.at;
@@ -1584,6 +1748,8 @@
     el("url").blur();
     el("picker-title").textContent = song.title;
     el("picker-hint").textContent = "Getting the audio...";
+    el("bars").hidden = false;
+    el("hear").hidden = false;
 
     window.pywebview.api.audition(song.have.drums).then((prepared) => {
       if (prepared.error) { el("picker-hint").textContent = prepared.error; return; }
@@ -1595,6 +1761,7 @@
         lead: 0,
         at: 0,
         start: null, end: null,
+        hearing: "drums", songAudio: null, loop: null,
         // Fallbacks only. Where the grid reaches, stepAt/beatAt use what the
         // drumming actually says instead - a filename tempo is a whole-song
         // estimate and is routinely a fraction of a percent out.
@@ -1602,6 +1769,7 @@
         nudge: prepared.tempo > 0 ? 60 / prepared.tempo / 4 : FALLBACK_NUDGE_SEC,
       };
       el("play").disabled = true;
+      showHearing();
       drawWave();
       drawDetail();
 
@@ -1611,9 +1779,9 @@
         picker.buffer = buffer;
         picker.lead = (prepared.lead || 0) + decoderLead(buffer, prepared.duration);
         el("play").disabled = false;
-        el("picker-hint").textContent =
-          "Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — stop at the next 1 to end it.";
+        el("picker-hint").textContent = firstHint();
         drawDetail();
+        loadSong(opened);
       }).catch((e) => {
         el("picker-hint").textContent = "Could not read the audio: " + e;
       });
@@ -1661,6 +1829,9 @@
     el("build").hidden = true;
     el("fade").hidden = false;
     el("keep").hidden = false;
+    // Nothing to count bars of or swap to: this is the song already.
+    el("bars").hidden = true;
+    el("hear").hidden = true;
     el("picker-title").textContent = review.filename;
     el("picker-hint").textContent = "Getting the audio...";
 
@@ -1809,11 +1980,16 @@
       return;
     }
     picker.start = Math.max(0, Math.min(seconds, picker.duration));
-    if (!keepEnd || picker.end <= picker.start) {
+    if (countingBars()) {
+      // Counted from wherever the start now is, so nudging it keeps the
+      // bars rather than the seconds.
+      placeEnd();
+    } else if (!keepEnd || picker.end <= picker.start) {
       picker.end = null;
       refreshBuildEnabled();
     }
     playFrom(picker.start);
+    sayWhatIsMarked();
     drawWave();
     drawDetail();
   }
@@ -1848,7 +2024,8 @@
     const start = Math.max(0, Math.min(picker.start + by, picker.duration - span));
 
     picker.start = start;
-    if (picker.end !== null) picker.end = start + span;
+    if (countingBars()) placeEnd();
+    else if (picker.end !== null) picker.end = start + span;
     playFrom(picker.start);
     drawWave();
     drawDetail();
@@ -1856,9 +2033,22 @@
   }
 
   function sayWhatIsMarked() {
+    if (!picker || picker.start === null) return;
+    if (countingBars()) {
+      el("picker-hint").textContent = picker.end === null
+        ? "There aren't " + barsWanted + " bars left after here — start earlier, or count fewer."
+        : barsWanted + " bars, looping — ← → a sixteenth, ⇧ a beat, S drums/song — Build when it loops right.";
+      return;
+    }
     if (picker.end === null) return;
     el("picker-hint").textContent = (picker.end - picker.start).toFixed(1) +
       "s marked — build the beat, ⇧← ⇧→ to slide it a beat, or play it again and stop at a different 1 to move the end.";
+  }
+
+  function firstHint() {
+    return countingBars()
+      ? "Click at the 1 of the phrase — " + barsWanted + " bars are marked from there. S swaps drums and song."
+      : "Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — stop at the next 1 to end it.";
   }
 
   // Space only says where the phrase ends. Building the .mid is a separate
@@ -1879,6 +2069,8 @@
     // Trimming has no phrase and no end to mark, and neither does a picker
     // with no start set yet - both just stop.
     if (trimming() || picker.start === null) { pausePlay(); return; }
+    // The bars already say where it ends; stopping is only stopping.
+    if (countingBars()) { pausePlay(); return; }
     pausePlay();
     if (end <= picker.start) {
       el("picker-hint").textContent = "That is before the start - click again and play on.";
@@ -2363,6 +2555,12 @@
   el("play").addEventListener("click", togglePlay);
 
   el("build").addEventListener("click", buildBeat);
+  for (const chip of document.querySelectorAll("#bars button")) {
+    chip.addEventListener("click", () => chooseBars(Number(chip.dataset.bars)));
+  }
+  for (const choice of document.querySelectorAll("#hear button")) {
+    choice.addEventListener("click", () => { hear(choice.dataset.hear); choice.blur(); });
+  }
   el("fade").addEventListener("click", () => answerTrim("fade"));
   el("keep").addEventListener("click", () => answerTrim("keep"));
 
@@ -2371,8 +2569,11 @@
   // and never while a link is being typed into the box.
   document.addEventListener("keydown", (event) => {
     if (el("picker").hidden) return;
-    const keyed = event.code === "Space" || event.code === "ArrowLeft" || event.code === "ArrowRight";
+    const keyed = event.code === "Space" || event.code === "ArrowLeft" || event.code === "ArrowRight" ||
+                  event.code === "KeyS";
     if (!keyed) return;
+    // ⌘S and friends are the system's, not a swap.
+    if (event.code === "KeyS" && (event.metaKey || event.ctrlKey || event.altKey)) return;
     // Somewhere you can type is the one place these are just keys. The link
     // box is autofocused, so without this the whole interaction is dead -
     // which is exactly how the spacebar came to do nothing for a while.
@@ -2391,6 +2592,10 @@
     // avoids.
     if (event.code === "Space") {
       togglePlay();
+      return;
+    }
+    if (event.code === "KeyS") {
+      toggleHearing();
       return;
     }
     const direction = event.code === "ArrowLeft" ? -1 : 1;

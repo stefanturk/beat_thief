@@ -282,6 +282,33 @@ class TestSongAlignment(unittest.TestCase):
         self.assertAlmostEqual(tempo, 100.0, delta=2.0)
 
 
+class TestSongTrimMs(unittest.TestCase):
+    """Where stem time's zero sits in the song, without the tempo work."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.mp3_path = os.path.join(self.tmp_dir, "song.mp3")
+        (AudioSegment.silent(duration=3000) + _click_track(bpm=120, beats=24)).export(
+            self.mp3_path, format="mp3")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_it_is_the_same_trim_song_alignment_cuts(self):
+        trim_ms = instrument_isolator.song_trim_ms(self.mp3_path)
+        instrument_isolator._alignment_cache.clear()
+
+        self.assertEqual(trim_ms, instrument_isolator.song_alignment(self.mp3_path)[0])
+        self.assertGreater(trim_ms, 1500)
+
+    def test_an_alignment_already_worked_out_is_used(self):
+        instrument_isolator.remember_alignment(self.mp3_path, (1234, 120.0))
+        try:
+            self.assertEqual(instrument_isolator.song_trim_ms(self.mp3_path), 1234)
+        finally:
+            instrument_isolator._alignment_cache.clear()
+
+
 class TestRunDemucsProgress(unittest.TestCase):
     """run_demucs parses demucs' own output for a percentage; where that
     percentage goes is what these cover."""

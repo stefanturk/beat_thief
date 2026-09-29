@@ -1,7 +1,9 @@
 import contextlib
+import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import threading
 import time
@@ -606,6 +608,28 @@ class TestAudition(unittest.TestCase):
         self.assertNotIn("error", got)
 
 
+class TestAuditionSong(unittest.TestCase):
+    """The song the picker swaps to, lined up with its stems."""
+
+    def test_the_offset_is_the_trim_every_stem_had_cut_off(self):
+        # Stem time zero is this far into the song, so the page plays the
+        # song from stem time + offset and a swap lands on the same beat.
+        prepared = {"audio": "data:x", "lead": 0.002, "duration": 200.0,
+                    "peaks": [0.1], "kicks": [1.0], "path": "s.mp3"}
+        with mock.patch("audition.preview", return_value=prepared), \
+             mock.patch("instrument_isolator.song_trim_ms", return_value=1250):
+            got = gui.Api().audition_song("s.mp3")
+
+        self.assertEqual(got, {"audio": "data:x", "lead": 0.002,
+                               "duration": 200.0, "offset": 1.25})
+
+    def test_a_song_that_will_not_prepare_is_an_error_not_a_crash(self):
+        with mock.patch("audition.preview", side_effect=FileNotFoundError("gone.mp3")):
+            got = gui.Api().audition_song("gone.mp3")
+
+        self.assertEqual(got, {"error": "gone.mp3"})
+
+
 class TestStealBeat(unittest.TestCase):
     """What comes back from stealing a loop - specifically which of the two
     tempos in play reaches the page."""
@@ -1073,6 +1097,59 @@ class TestReviewAudio(unittest.TestCase):
         self.assertIn("no such codec", got["error"])
 
 
+def _page_function(html, name):
+    """One top-level function out of the page, by brace counting - enough
+    for the small pure ones the tests below run under node."""
+    start = html.index("function " + name + "(")
+    depth = 0
+    for at in range(html.index("{", start), len(html)):
+        depth += {"{": 1, "}": -1}.get(html[at], 0)
+        if depth == 0:
+            return html[start:at + 1]
+    raise ValueError(name)
+
+
+@unittest.skipUnless(shutil.which("node"), "needs node to run the page's arithmetic")
+class TestBarsAfter(unittest.TestCase):
+    """The picker's one-click end, walked along the fitted grid."""
+
+    def _bars_after(self, grid, start, bars, duration=600.0, beat=0.5):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        script = "\n".join([
+            "const BEATS_PER_BAR = 4;",
+            "const picker = " + json.dumps({"grid": grid, "duration": duration, "beat": beat}) + ";",
+            _page_function(html, "gridAt"),
+            _page_function(html, "beatAt"),
+            _page_function(html, "barsAfter"),
+            "console.log(JSON.stringify(barsAfter(%r, %d)));" % (start, bars),
+        ])
+        out = subprocess.run(["node", "-e", script], capture_output=True, text=True, check=True)
+        return json.loads(out.stdout)
+
+    def test_sixteen_bars_at_120_is_thirty_two_seconds(self):
+        grid = [{"start": 0.0, "end": 600.0, "downbeat": 0.0, "step": 0.125}]
+
+        self.assertAlmostEqual(self._bars_after(grid, 10.0, 16), 42.0, places=6)
+
+    def test_the_bars_follow_the_grid_where_it_changes(self):
+        # 8 bars at 120 then the rest at 100: a flat tempo from the start
+        # would end 64 bars somewhere the drummer isn't.
+        grid = [{"start": 0.0, "end": 26.0, "downbeat": 0.0, "step": 0.125},
+                {"start": 26.0, "end": 600.0, "downbeat": 26.0, "step": 0.15}]
+
+        # 16 beats of 0.5s reach 26.0, the other 48 are 0.6s each.
+        self.assertAlmostEqual(self._bars_after(grid, 18.0, 16), 26.0 + 48 * 0.6, places=6)
+
+    def test_bars_that_run_past_the_end_are_not_marked(self):
+        grid = [{"start": 0.0, "end": 60.0, "downbeat": 0.0, "step": 0.125}]
+
+        self.assertIsNone(self._bars_after(grid, 40.0, 16, duration=60.0))
+
+    def test_with_no_grid_the_filename_tempo_is_used(self):
+        self.assertAlmostEqual(self._bars_after([], 0.0, 4, beat=0.6), 9.6, places=6)
+
+
 class TestUiFile(unittest.TestCase):
     def test_the_page_the_window_loads_actually_exists(self):
         self.assertTrue(os.path.exists(gui.UI_FILE), gui.UI_FILE)
@@ -1088,6 +1165,32 @@ class TestUiFile(unittest.TestCase):
         for name in sorted(called):
             with self.subTest(method=name):
                 self.assertTrue(callable(getattr(gui.Api, name, None)))
+
+    def test_the_picker_offers_16_32_64_bars_or_by_ear(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        chips = re.findall(r'data-bars="(\d+)"', html)
+
+        self.assertEqual(chips, ["16", "32", "64", "0"])
+        self.assertIn("let barsWanted = 16;", html)
+        self.assertRegex(html, r'data-bars="16" class="on"')
+
+    def test_s_swaps_the_drums_and_the_song(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+
+        self.assertIn('event.code === "KeyS"', html)
+        self.assertIn("toggleHearing();", html)
+        self.assertIn('data-hear="song" disabled', html)   # until the song has loaded
+        self.assertIn("pywebview.api.audition_song(path)", html)
+
+    def test_the_song_plays_from_stem_time_plus_its_offset(self):
+        # The marks are in stem time; only the playing buffer changes.
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+
+        self.assertIn("picker.songAudio.lead + picker.songAudio.offset", html)
+        self.assertIn("source.start(0, Math.min(picker.at + lead, buffer.duration));", html)
 
     def test_leaving_a_song_out_skips_it_rather_than_cancelling(self):
         # The button used to end the run. With a playlist behind it that
