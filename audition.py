@@ -52,6 +52,10 @@ PEAK_SAMPLE_RATE = 4000
 
 _cache: dict[tuple[str, float], dict] = {}
 
+# The drum stem and the song it came from are in hand together - the picker
+# swaps between them - so two are kept. Each is megabytes, so no more.
+_CACHE_SIZE = 2
+
 
 def _run_ffmpeg(args: list[str], stdin: bytes | None = None) -> bytes:
     """ffmpeg writing to stdout, with its own chatter kept out of the way.
@@ -230,6 +234,7 @@ def preview(wav_path: str) -> dict:
         "duration": duration_sec(wav_path),
         "path": wav_path,
     }
-    _cache.clear()  # only ever one stem in hand, and each is megabytes
+    while len(_cache) >= _CACHE_SIZE:
+        _cache.pop(next(iter(_cache)))   # oldest first
     _cache[key] = prepared
     return prepared

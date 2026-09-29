@@ -658,6 +658,22 @@ def remember_alignment(mp3_path: str, alignment: tuple[int, float]) -> None:
         _alignment_cache[key] = alignment
 
 
+def song_trim_ms(mp3_path: str) -> int:
+    """How much of the front of mp3_path every stem had cut off - where stem
+    time's zero sits in the song. The trim half of song_alignment on its
+    own, because that is all a player lining the song up with its stems
+    needs, and the tempo half is seconds of work."""
+    cache_key = _alignment_key(mp3_path)
+    if cache_key is not None and cache_key in _alignment_cache:
+        return _alignment_cache[cache_key][0]
+    return _trim_ms(AudioSegment.from_file(mp3_path))
+
+
+def _trim_ms(audio: AudioSegment) -> int:
+    cut_ms = song_sanitizer._find_cut_from_start(audio, audio.dBFS)
+    return cut_ms if 0 < cut_ms < len(audio) else 0
+
+
 def song_alignment(mp3_path: str, interactive: bool | None = None) -> tuple[int, float]:
     """Compute the beat-1 trim point and tempo once, from the full song mix,
     so every instrument isolated from this song can share the exact same
@@ -692,9 +708,7 @@ def song_alignment(mp3_path: str, interactive: bool | None = None) -> tuple[int,
         return _alignment_cache[cache_key]
 
     audio = AudioSegment.from_file(mp3_path)
-    cut_ms = song_sanitizer._find_cut_from_start(audio, audio.dBFS)
-    if not (0 < cut_ms < len(audio)):
-        cut_ms = 0
+    cut_ms = _trim_ms(audio)
     trimmed = audio[cut_ms:] if cut_ms else audio
 
     tmp_fd, tmp_wav = tempfile.mkstemp(suffix=".wav")

@@ -119,6 +119,15 @@ class TestPreview(unittest.TestCase):
         first = audition.preview(self.path)
         self.assertIs(audition.preview(self.path), first)
 
+    def test_the_stem_and_its_song_are_both_kept(self):
+        # The picker swaps between the drums and the song, so preparing one
+        # must not throw the other away.
+        other = os.path.join(self.tmp_dir, "other.wav")
+        shutil.copy(self.path, other)
+        first = audition.preview(self.path)
+        audition.preview(other)
+        self.assertIs(audition.preview(self.path), first)
+
     def test_a_file_that_is_not_there_is_an_error_worth_reading(self):
         with self.assertRaises(FileNotFoundError):
             audition.preview(os.path.join(self.tmp_dir, "nope.wav"))
