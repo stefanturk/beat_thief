@@ -185,21 +185,34 @@ def normalize_for_compare(stem: str) -> str:
 
 def find_duplicate_pairs(filenames: list[str], threshold: float = DEDUP_THRESHOLD,
                          against: list[str] | None = None) -> list[tuple[str, str]]:
-    """Every pair of names alike enough to be the same song.
+    """Every pair of names alike enough to be the same song, in the order
+    the names were given.
 
     With against, only pairs that include one of those names - what a run
     that just added a song needs, since the rest of the folder was already
-    checked against itself when each of those songs arrived. That keeps a
-    5,000-song folder to 5,000 comparisons per new song, not 12 million."""
+    checked against itself when each of those songs arrived. That's one
+    pass over the folder per new song, not every pair in it: a 5,000-song
+    folder is 5,000 comparisons, not 12 million."""
     normalized = [(f, normalize_for_compare(os.path.splitext(f)[0])) for f in filenames]
-    new = None if against is None else set(against)
+    if against is None:
+        firsts = range(len(normalized))
+    else:
+        new = set(against)
+        firsts = [i for i, (f, _) in enumerate(normalized) if f in new]
     pairs = []
-    for i in range(len(normalized)):
-        for j in range(i + 1, len(normalized)):
-            f1, n1 = normalized[i]
-            f2, n2 = normalized[j]
-            if new is not None and f1 not in new and f2 not in new:
+    # Two new songs would otherwise each be paired with the other; only
+    # needed with against, where it's a handful of pairs at most.
+    seen = set()
+    for i in firsts:
+        for j in range(i + 1 if against is None else 0, len(normalized)):
+            if j == i:
                 continue
+            a, b = (i, j) if i < j else (j, i)
+            if against is not None:
+                if (a, b) in seen:
+                    continue
+                seen.add((a, b))
+            (f1, n1), (f2, n2) = normalized[a], normalized[b]
             matcher = difflib.SequenceMatcher(None, n1, n2)
             # The quick bounds are upper limits on ratio(), so a pair that
             # fails them can't pass it - and they cost almost nothing.
@@ -207,6 +220,8 @@ def find_duplicate_pairs(filenames: list[str], threshold: float = DEDUP_THRESHOL
                     and matcher.quick_ratio() >= threshold
                     and matcher.ratio() >= threshold):
                 pairs.append((f1, f2))
+    order = {f: n for n, f in enumerate(filenames)}
+    pairs.sort(key=lambda pair: (order[pair[0]], order[pair[1]]))
     return pairs
 
 

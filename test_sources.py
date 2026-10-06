@@ -62,6 +62,7 @@ class TestTheCsv(SourcesTestCase):
         record = sources.Sources(self.folder)
         record.record("b", title="Two", number=2)
         record.record("a", title="One", number=1)
+        record.flush()
         self.assertEqual([r["Song"] for r in self._rows()], ["One", "Two"])
 
     def test_the_bpm_comes_from_the_file_name(self):
@@ -84,6 +85,7 @@ class TestKeys(unittest.TestCase):
 class TestWhichFolderAPasteBelongsIn(SourcesTestCase):
     def _folder_with(self, name, keys):
         folder = os.path.join(self.folder, name)
+        os.makedirs(folder)
         record = sources.Sources(folder)
         for key in keys:
             record.record(key, title=key)
@@ -101,3 +103,53 @@ class TestWhichFolderAPasteBelongsIn(SourcesTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestALongPlaylistIsCheapToWriteDown(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, True)
+
+    def _csv_rows(self):
+        with open(os.path.join(self.folder, sources.CSV_FILENAME), encoding="utf-8-sig") as f:
+            return len(f.read().splitlines()) - 1
+
+    def test_the_csv_is_written_every_so_often_and_at_the_end(self):
+        record = sources.Sources(self.folder)
+        record.record("a", title="First")
+        self.assertEqual(self._csv_rows(), 1)       # there from the first song
+        for n in range(sources.CSV_EVERY - 1):
+            record.record(f"k{n}", title=str(n))
+        self.assertEqual(self._csv_rows(), 1)       # not rewritten every time
+        record.record("due", title="due")           # the CSV_EVERY-th change since
+        self.assertEqual(self._csv_rows(), sources.CSV_EVERY + 1)
+        record.record("late", title="late")
+        record.flush()
+        self.assertEqual(self._csv_rows(), sources.CSV_EVERY + 2)
+
+    def test_a_folder_that_has_gone_is_not_made_again(self):
+        record = sources.Sources(self.folder)
+        record.record("a", title="First")
+        shutil.rmtree(self.folder)
+        record.record("b", title="Second")
+        record.flush()
+        self.assertFalse(os.path.exists(self.folder))
+
+    def test_a_change_kept_for_later_is_written_with_the_next(self):
+        record = sources.Sources(self.folder)
+        record.record("a", save=False, title="Kept")
+        self.assertEqual(sources.Sources(self.folder).songs, {})
+        record.record("a", status="done")
+        self.assertEqual(sources.Sources(self.folder).get("a"), {"title": "Kept", "status": "done"})
+
+    def test_writing_down_song_5000_is_quick(self):
+        import time
+        record = sources.Sources(self.folder)
+        for n in range(5000):
+            record.songs[f"spotify:{n}"] = {"title": f"Song {n}", "artist": "Someone", "status": "done",
+                                            "file": f"Song {n} - Someone (120 BPM).mp3", "number": n,
+                                            "youtube_url": "https://www.youtube.com/watch?v=x" * 1}
+        record._unwritten = 0
+        started = time.monotonic()
+        record.record("spotify:5000", title="Last", status="done")
+        self.assertLess(time.monotonic() - started, 0.1)

@@ -2519,6 +2519,7 @@
   // library() is cheap, but polling it every 250ms regardless would be
   // wasteful, so this only calls it again when the stage actually moves on.
   let lastStage = null;
+  let lastRefresh = 0;
 
   function clock(sec) {
     if (sec === null || sec === undefined) return "—";
@@ -2610,9 +2611,16 @@
         if (choice) openChoice(choice);
         else closeChoice();
       }
+      // A playlist changes stage several times a song, and each refresh
+      // reads the history and lists folders - so while it's running, the
+      // Files list catches up at most every few seconds.
       if (state.stage !== lastStage) {
         lastStage = state.stage;
-        refreshLibrary();
+        const now = Date.now();
+        if (!state.running || now - lastRefresh > 5000) {
+          lastRefresh = now;
+          refreshLibrary();
+        }
       }
       if (!state.running && polling) {
         clearInterval(polling);
