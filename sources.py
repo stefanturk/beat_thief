@@ -74,7 +74,17 @@ class Sources:
         if record.get("status") != "done" or not record.get("file"):
             return ""
         path = os.path.join(self.folder, record["file"])
-        return path if os.path.isfile(path) else ""
+        try:
+            # An empty file is what a full disk or a killed app leaves -
+            # not a song, whatever the record says.
+            return path if os.path.getsize(path) > 0 else ""
+        except OSError:
+            return ""
+
+    def owner(self, path: str) -> str | None:
+        """Which song's record names this file as its own, if any."""
+        relative = os.path.relpath(path, self.folder)
+        return next((key for key, song in self.songs.items() if song.get("file") == relative), None)
 
     def record(self, key: str, **fields) -> None:
         """Update one song and write both files straight away. A path in

@@ -377,6 +377,18 @@
   }
   body[data-state="error"] #message { color: var(--bad); }
 
+  .after {
+    display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center;
+    gap: 4px 14px; margin-top: 10px; font-size: 11.5px;
+  }
+  .after[hidden], .after [hidden] { display: none; }
+  .problems { color: var(--dim); text-align: left; max-width: 100%; }
+  .problems summary { cursor: pointer; text-align: center; color: var(--bad); }
+  .problems ul {
+    margin: 8px 0 0; padding: 0 0 0 16px; max-height: 140px; overflow-y: auto;
+    line-height: 1.45; word-break: break-word;
+  }
+
   .track {
     height: 3px;
     background: var(--edge);
@@ -884,6 +896,18 @@
       <div id="unit"></div>
       <p id="message">Paste a link to get started.</p>
       <div class="track"><div id="bar"></div></div>
+      <!--
+        What a long run couldn't get, kept rather than flashing past one
+        message at a time - and the folder's Sources.csv, which has the
+        whole story song by song.
+      -->
+      <div class="after" id="after" hidden>
+        <details class="problems" id="problems" hidden>
+          <summary id="problems-count"></summary>
+          <ul id="problems-list"></ul>
+        </details>
+        <button class="text-button" id="open-sources" type="button" hidden>Open Sources.csv</button>
+      </div>
     </section>
 
     <!--
@@ -1040,9 +1064,34 @@
       setFigure("···", "", false);
     }
 
+    renderAfter(state);
+
     el("go").textContent = state.running ? "Stop" : "Steal it";
     el("go").dataset.mode = state.running ? "cancel" : "go";
     if (state.output_dir) setDestination(state.output_dir);
+  }
+
+  // What a run couldn't get, and where the whole story is.
+  function renderAfter(state) {
+    const problems = state.problems || [];
+    const count = state.problem_count || 0;
+    el("problems").hidden = count === 0;
+    if (count) {
+      el("problems-count").textContent = count === 1 ? "1 song couldn't be had" : count.toLocaleString() + " songs couldn't be had";
+      const shown = el("problems-list").dataset.shown;
+      const key = count + ":" + problems.length;
+      if (shown !== key) {
+        el("problems-list").dataset.shown = key;
+        el("problems-list").replaceChildren(...problems.map((text) => {
+          const item = document.createElement("li");
+          item.textContent = text;
+          return item;
+        }));
+      }
+    }
+    el("open-sources").dataset.path = state.sources_csv || "";
+    el("open-sources").hidden = !(state.sources_csv && !state.running);
+    el("after").hidden = el("problems").hidden && el("open-sources").hidden;
   }
 
   // Songs are listed rather than loose files so "go back for another stem"
@@ -2790,6 +2839,10 @@
     el("howto").hidden = false;
   }
 
+  el("open-sources").addEventListener("click", () => {
+    const path = el("open-sources").dataset.path;
+    if (path) window.pywebview.api.open_file(path);
+  });
   el("howto-open").addEventListener("click", () => {
     if (el("howto").hidden) showHowTo("", false);
     else el("howto").hidden = true;

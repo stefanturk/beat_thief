@@ -50,8 +50,12 @@ def _save(entries: list[dict], path: str | None = None) -> None:
     path = _resolve(path)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        # Written beside it and swapped in, so a crash or a full disk mid-
+        # write leaves the old history rather than an empty one.
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(entries[:MAX_ENTRIES], f, indent=2)
+        os.replace(tmp, path)
     except OSError:
         # Remembering is a convenience - never let it take down a run that
         # has already produced the files someone asked for.

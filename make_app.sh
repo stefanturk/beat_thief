@@ -61,6 +61,7 @@ SOURCES=(
     gui.py
     pipeline.py
     sources.py
+    net.py
     spotify.py
     youtube_match.py
     history.py
