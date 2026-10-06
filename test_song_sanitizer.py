@@ -983,5 +983,62 @@ class TestSanitizeFileReplace(unittest.TestCase):
         self.assertEqual(mp3_files, ["Song Name - Artist.mp3"])
 
 
+class TestKeepingANameAndChoosingSteps(unittest.TestCase):
+    """A song Spotify named is already named; and each part of sanitizing
+    can be switched off on its own."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+
+    def _write(self, filename, audio):
+        sanitizer.export_audio(audio, os.path.join(self.tmp_dir, filename))
+
+    def test_keep_name_does_not_split_a_title_with_a_dash_in_it(self):
+        filename = "Song - 2011 Remaster (Live) - Artist.mp3"
+        self._write(filename, _tone(3000, dbfs_gain=-20))
+        sanitizer.sanitize_file(filename, self.tmp_dir, keep_name=True)
+        self.assertEqual([f for f in os.listdir(self.tmp_dir) if f.endswith(".mp3")], [filename])
+
+    def test_keep_name_still_evens_out_the_volume(self):
+        filename = "Quiet - Artist.mp3"
+        self._write(filename, _tone(3000, dbfs_gain=-20))
+        sanitizer.sanitize_file(filename, self.tmp_dir, keep_name=True)
+        audio = sanitizer.load_audio(os.path.join(self.tmp_dir, filename))
+        self.assertGreater(audio.max_dBFS, -3)
+
+    def test_volume_off_leaves_a_quiet_song_quiet(self):
+        filename = "Quiet - Artist.mp3"
+        self._write(filename, _tone(3000, dbfs_gain=-20))
+        sanitizer.sanitize_file(filename, self.tmp_dir, steps={"trim", "names", "duplicates"})
+        audio = sanitizer.load_audio(os.path.join(self.tmp_dir, filename))
+        self.assertLess(audio.max_dBFS, -15)
+
+    def test_trim_off_asks_nothing_about_an_intro(self):
+        filename = "Song - Artist.mp3"
+        self._write(filename, _tone(3000, dbfs_gain=-45) + _tone(5000, dbfs_gain=-3))
+        flags = sanitizer.sanitize_file(filename, self.tmp_dir, steps={"volume", "names"})
+        self.assertEqual(flags, [])
+
+    def test_names_off_is_the_same_as_keeping_the_name(self):
+        filename = "Song (Official Video) - Artist.mp3"
+        self._write(filename, _tone(3000, dbfs_gain=-20))
+        sanitizer.sanitize_file(filename, self.tmp_dir, steps={"volume"})
+        self.assertIn(filename, os.listdir(self.tmp_dir))
+
+    def test_duplicates_off_leaves_both_copies(self):
+        for name in ("Song - Artist.mp3", "Song - Artist (Remastered).mp3"):
+            self._write(name, _tone(1000, dbfs_gain=-1))
+        sanitizer.sanitize_new_downloads(["Song - Artist (Remastered).mp3"], self.tmp_dir,
+                                         interactive=False, steps={"volume"})
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, sanitizer.DUPLICATES_DIR_NAME)))
+
+    def test_a_partial_sanitize_is_not_marked_finished(self):
+        filename = "Quiet - Artist.mp3"
+        self._write(filename, _tone(3000, dbfs_gain=-20))
+        sanitizer.sanitize_file(filename, self.tmp_dir, steps={"volume"})
+        self.assertFalse(sanitizer._is_already_sanitized(os.path.join(self.tmp_dir, filename)))
+
+
 if __name__ == "__main__":
     unittest.main()
