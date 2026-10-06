@@ -86,6 +86,9 @@ class Api:
             "review": None,
             # The Spotify match currently waiting to be picked, if any.
             "choice": None,
+            # A Spotify playlist longer than its link lists:
+            # {"listed", "count", "name"} - see pipeline.run(take_listed).
+            "too_long": None,
         }
 
     @staticmethod
@@ -113,9 +116,26 @@ class Api:
         if not song and not url:
             return self._fail("Paste a link first.")
 
-        # Checked unless the page says otherwise, so a caller that predates
-        # the switch - or a page that fails to send it - keeps tidying.
-        sanitize = options.get("sanitize", True) is not False
+        # Off, Auto or Ask. Auto unless the page says otherwise, so a caller
+        # that predates the switch - or a page that fails to send it - keeps
+        # tidying. The old checkbox sent true, which was asking.
+        sanitize = options.get("sanitize", "auto")
+        if sanitize is True:
+            sanitize = "ask"
+        elif sanitize is False:
+            sanitize = "off"
+        elif sanitize not in ("off", "auto", "ask"):
+            sanitize = "auto"
+        run_options = {
+            "sanitize": sanitize,
+            "bpm": options.get("bpm", True) is not False,
+            "steps": [step for step in (options.get("sanitize_steps") or [])
+                      if isinstance(step, str)] or None,
+            "folder_name": options.get("folder_name") if isinstance(options.get("folder_name"), str) else "",
+            # Asked for after being told the link only lists 100: "just
+            # these". Without it, a longer playlist stops and says paste.
+            "take_listed": options.get("take_listed") is True,
+        }
         # Off unless asked for: a filename that starts with a number is a
         # surprise to somebody who didn't tick the box.
         number = options.get("number") is True
@@ -136,7 +156,7 @@ class Api:
 
         self._thread = threading.Thread(
             target=self._work,
-            args=(url, output_dir, instruments, song, sanitize, number),
+            args=(url, output_dir, instruments, song, number, run_options),
             daemon=True,
         )
         self._thread.start()
@@ -591,7 +611,13 @@ class Api:
             self._state["choice"] = None
         return decision
 
-    def _work(self, url, output_dir, instruments, song="", sanitize=True, number=False):
+    def _work(self, url, output_dir, instruments, song="", number=False, run_options=None):
+        run_options = dict(run_options or {})
+        sanitize = run_options.pop("sanitize", "auto")
+        # Ask puts every doubt to the page - which recording, where the song
+        # starts. Auto and Off ask nothing: the best match and the
+        # algorithm's own trim, so a long playlist can run unattended.
+        asking = sanitize == "ask"
         try:
             if song:
                 result = self._isolate_pipeline(
@@ -609,10 +635,11 @@ class Api:
                     on_event=self._on_event,
                     should_cancel=self._cancel.is_set,
                     interactive=False,
-                    on_review=self._on_review if sanitize else None,
-                    on_choose=self._on_choose,
-                    sanitize=sanitize,
+                    on_review=self._on_review if asking else None,
+                    on_choose=self._on_choose if asking else None,
+                    sanitize=sanitize != "off",
                     number=number,
+                    **run_options,
                 )
         except BaseException as e:
             # Includes Cancelled and anything a dependency throws: a worker
@@ -630,6 +657,17 @@ class Api:
             if result.get("error"):
                 self._state["stage"] = "error"
                 self._state["error"] = result["error"]
+            elif result.get("too_long"):
+                # Not an error: the page explains how to paste the whole
+                # playlist, or offers to take the songs the link did list.
+                too_long = result["too_long"]
+                self._state["stage"] = "too-long"
+                self._state["too_long"] = too_long
+                count = too_long.get("count")
+                self._state["message"] = (
+                    f"This playlist has {count:,} songs - Spotify's link only gives {too_long['listed']}."
+                    if count else
+                    f"Spotify's link stops at {too_long['listed']} songs - this playlist may be longer.")
             elif result.get("cancelled"):
                 self._state["stage"] = "cancelled"
                 self._state["message"] = "Stopped. Anything already finished is saved."
@@ -700,6 +738,11 @@ class Api:
 
         if stage == "looking-up":
             return "Looking up that link...", None
+        if stage == "resuming":
+            # Picking a long playlist back up: say how far it already got
+            # before the first song that still needs doing.
+            done, total = event.get("done") or 0, event.get("total") or 0
+            return f"Picking up at song {done + 1:,} of {total:,}", done / total * 100 if total else None
         if stage == "resolving":
             # A playlist is looked up one song at a time and that takes a
             # while, so it says which song rather than sitting on one line.

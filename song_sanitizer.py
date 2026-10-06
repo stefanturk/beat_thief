@@ -588,14 +588,35 @@ def _existing_companion(output_dir: str, filename: str) -> str | None:
     return None
 
 
-def sanitize_file(filename: str, output_dir: str) -> list[dict]:
+# The parts of sanitizing that can be switched off one at a time - what the
+# app's ⚙ next to Sanitize lists:
+#   trim        dead air off either end, and an unclear intro or outro
+#               faded, cut or put to whoever's there to ask
+#   volume      peak-normalize a quiet song
+#   names       tidy the title ("(Official Video)" and the like) and its tags
+#   duplicates  move the smaller of two copies of a song into Duplicates/
+ALL_STEPS = frozenset({"trim", "volume", "names", "duplicates"})
+
+
+def _steps(steps) -> frozenset:
+    return ALL_STEPS if steps is None else frozenset(steps) & ALL_STEPS
+
+
+def sanitize_file(filename: str, output_dir: str, keep_name: bool = False,
+                  steps=None) -> list[dict]:
     """Produce a cleaned-up copy of filename next to it, if it needs one, then
     delete the original — the raw file is never opened for writing, only
     ever read from, and only removed once its replacement has been written
     successfully. If nothing about it needs fixing, the original is left
     exactly as it is (no replacement needed). If a sanitized copy already
-    exists next to it, it's left alone (skipped)."""
-    companion = _existing_companion(output_dir, filename)
+    exists next to it, it's left alone (skipped).
+
+    keep_name leaves the name as it is: it was already the song's real one
+    (Spotify's), and "tidying" "Song - 2011 Remaster - Artist" would split
+    it in the wrong place. steps is which parts of ALL_STEPS to do."""
+    steps = _steps(steps)
+    keep_name = keep_name or "names" not in steps
+    companion = None if keep_name else _existing_companion(output_dir, filename)
     if companion:
         print(f"{filename}: already sanitized as '{companion}', nothing to do.")
         return []
@@ -609,7 +630,7 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
         return []
 
     audio = load_audio(path)
-    candidates = analyze_cut_candidates(audio)
+    candidates = analyze_cut_candidates(audio) if "trim" in steps else {}
 
     trim_start_ms = None
     trim_end_ms = None
@@ -635,12 +656,16 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
     if needs_trim:
         audio = trim(audio, trim_start_ms, trim_end_ms)
 
-    needs_normalize = needs_normalization(audio)
+    needs_normalize = "volume" in steps and needs_normalization(audio)
     if needs_normalize:
         audio = peak_normalize(audio)
 
     stem, ext = os.path.splitext(filename)
-    title, artist, canonical_stem = _derive_title_artist(filename)
+    if keep_name:
+        title, artist = split_title_artist(stem)
+        canonical_stem = stem
+    else:
+        title, artist, canonical_stem = _derive_title_artist(filename)
     name_changed = canonical_stem != stem
 
     if not (needs_trim or needs_normalize or name_changed or new_flags):
@@ -666,7 +691,10 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
     final_filename = os.path.basename(output_path)
 
     export_audio(audio, output_path)
-    write_id3_tags(output_path, title, artist)
+    if keep_name:
+        _copy_tags(path, output_path)
+    else:
+        write_id3_tags(output_path, title, artist)
 
     os.remove(path)
     if self_collision:
@@ -678,10 +706,11 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
             output_path = canonical_path
             final_filename = os.path.basename(output_path)
 
-    if not new_flags:
+    if not new_flags and steps == ALL_STEPS:
         # Only mark it finished once there's nothing left pending review —
         # a flagged copy still needs resolve_flags() to touch it, and that
-        # happens right after sanitize_file() returns.
+        # happens right after sanitize_file() returns. Nor when some of it
+        # was switched off: a later full sanitize still has work to do.
         _mark_as_sanitized(output_path)
 
     for flag in new_flags:
@@ -693,6 +722,18 @@ def sanitize_file(filename: str, output_dir: str) -> list[dict]:
         print(f"{filename}: cleaned up and renamed to '{final_filename}'.")
 
     return new_flags
+
+
+def _copy_tags(source: str, destination: str) -> None:
+    """Carry title and artist across to a re-exported copy - which pydub
+    writes without any tags at all."""
+    try:
+        tags = EasyID3(source)
+        title, artist = (tags.get("title") or [""])[0], (tags.get("artist") or [""])[0]
+    except Exception:
+        return
+    if title or artist:
+        write_id3_tags(destination, title, artist)
 
 
 def _run_dedup(output_dir: str) -> None:
@@ -739,7 +780,8 @@ def sanitize_folder(output_dir: str) -> None:
 
 
 def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: bool = True,
-                           review=None, renamed: dict | None = None) -> list[str]:
+                           review=None, renamed: dict | None = None,
+                           keep_name: bool = False, steps=None) -> list[str]:
     """Sanitize exactly the given (just-downloaded) filenames, rather than
     rescanning every mp3 already in output_dir - reprocessing/reporting on
     songs this run never touched is just noise. Duplicate detection still
@@ -760,7 +802,10 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
 
     renamed, if given, is filled in with which download became which of
     the returned names - for a caller that knows something about a
-    download by the name yt-dlp gave it (its place in a playlist, say)."""
+    download by the name yt-dlp gave it (its place in a playlist, say).
+
+    keep_name and steps are sanitize_file's."""
+    steps = _steps(steps)
     all_flags = []
     final_filenames = []
     for filename in filenames:
@@ -769,7 +814,7 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
             continue
         before = set(os.listdir(output_dir))
         try:
-            new_flags = sanitize_file(filename, output_dir)
+            new_flags = sanitize_file(filename, output_dir, keep_name=keep_name, steps=steps)
         except Exception as e:
             print(f"  Could not sanitize {filename}, skipping: {e}")
             continue
@@ -788,7 +833,8 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
         # else: sanitize_file left the original in place under a name that
         # collided with an unrelated existing song - nothing to chain onto.
 
-    _run_dedup(output_dir)
+    if "duplicates" in steps:
+        _run_dedup(output_dir)
     final_filenames = [f for f in final_filenames if os.path.exists(os.path.join(output_dir, f))]
 
     if all_flags:

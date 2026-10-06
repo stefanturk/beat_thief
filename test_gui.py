@@ -188,16 +188,63 @@ class TestApiStart(unittest.TestCase):
         # for a question the page has just said it doesn't want.
         self.assertIsNone(calls["on_review"])
 
-    def test_tidying_is_what_happens_unless_the_page_says_otherwise(self):
-        """An older page, or one that failed to send the key, still gets the
-        behaviour it has always had."""
+    def test_auto_is_what_happens_unless_the_page_says_otherwise(self):
+        """An older page, or one that failed to send the key, still gets
+        tidied - by the algorithm's own answers, asking nothing."""
+        calls = self._started({"song": True})
+        self.assertIs(calls["sanitize"], True)
+        self.assertIsNone(calls["on_review"])
+        self.assertIsNone(calls["on_choose"])
+
+    def _started(self, options, url="https://example.com/song"):
         calls = {}
         api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
-        api.start("https://example.com/song", {"song": True})
+        api.start(url, options)
         _wait_until(lambda: not api.status()["running"])
+        return calls
 
+    def test_ask_puts_trims_and_matches_to_the_page(self):
+        calls = self._started({"song": True, "sanitize": "ask"})
         self.assertIs(calls["sanitize"], True)
         self.assertIsNotNone(calls["on_review"])
+        self.assertIsNotNone(calls["on_choose"])
+
+    def test_the_old_checkbox_ticked_means_ask(self):
+        calls = self._started({"song": True, "sanitize": True})
+        self.assertIsNotNone(calls["on_review"])
+
+    def test_off_asks_nothing_either(self):
+        calls = self._started({"song": True, "sanitize": "off"})
+        self.assertIs(calls["sanitize"], False)
+        self.assertIsNone(calls["on_choose"])
+
+    def test_bpm_steps_and_folder_name_reach_the_pipeline(self):
+        calls = self._started({"song": True, "bpm": False, "sanitize_steps": ["volume"],
+                               "folder_name": "Road Trip"})
+        self.assertIs(calls["bpm"], False)
+        self.assertEqual(calls["steps"], ["volume"])
+        self.assertEqual(calls["folder_name"], "Road Trip")
+        self.assertIs(calls["take_listed"], False)
+
+    def test_bpm_is_on_and_every_step_is_done_unless_the_page_says(self):
+        calls = self._started({"song": True})
+        self.assertIs(calls["bpm"], True)
+        self.assertIsNone(calls["steps"])
+
+    def test_a_playlist_longer_than_its_link_says_so_and_is_not_an_error(self):
+        api = gui.Api(run_pipeline=lambda url, **kwargs: {
+            "outputs": [], "too_long": {"listed": 100, "count": 1214, "name": "Misco"}})
+        api.start("https://open.spotify.com/playlist/x", {"song": True})
+        _wait_until(lambda: not api.status()["running"])
+        state = api.status()
+        self.assertEqual(state["stage"], "too-long")
+        self.assertEqual(state["error"], "")
+        self.assertIn("1,214 songs", state["message"])
+        self.assertEqual(state["too_long"]["listed"], 100)
+
+    def test_picking_up_says_where(self):
+        message, percent = gui.Api._describe({"stage": "resuming", "done": 1213, "total": 4870})
+        self.assertEqual(message, "Picking up at song 1,214 of 4,870")
 
     def test_a_song_flag_is_not_mistaken_for_a_song_path(self):
         # Same shape, but pointed at something already in the stash: the
@@ -1202,18 +1249,51 @@ class TestUiFile(unittest.TestCase):
         self.assertIn("pywebview.api.skip_match()", html)
         self.assertNotIn('resolve_match("")', html)
 
-    def test_the_sanitize_switch_is_on_the_page_and_starts_off(self):
-        # start() defaults a *missing* key to on, for callers that predate
-        # the switch. So the page has to send its answer every time: an
-        # unchecked box whose value never left the page would read as no
-        # opinion, and the run would tidy anyway - stopping to ask about a
-        # trim nobody armed.
+    def _page(self):
         with open(gui.UI_FILE) as page:
-            markup = page.read()
-        box = re.search(r'<input[^>]*id="sanitize"[^>]*>', markup)
-        self.assertIsNotNone(box, "the page has no Sanitize checkbox")
-        self.assertNotIn("checked", box.group(0))
-        self.assertIn('options.sanitize = el("sanitize").checked', markup)
+            return page.read()
+
+    def test_sanitize_is_off_auto_or_ask_and_starts_on_auto(self):
+        # start() reads a missing mode as Auto, so the page has to send its
+        # answer every time - Off that never left the page would tidy.
+        markup = self._page()
+        control = re.search(r'id="sanitize-mode"(.*?)</span>', markup, re.S).group(1)
+        self.assertEqual(re.findall(r'data-mode="(\w+)"', control), ["off", "auto", "ask"])
+        self.assertRegex(markup, r'data-mode="auto" class="on"')
+        self.assertIn('let sanitizeMode = "auto";', markup)
+        self.assertIn("options.sanitize = sanitizeMode;", markup)
+
+    def test_each_part_of_sanitizing_can_be_switched_off(self):
+        import song_sanitizer
+        markup = self._page()
+        steps = set(re.findall(r'data-step="(\w+)"', markup))
+        self.assertEqual(steps, set(song_sanitizer.ALL_STEPS))
+        self.assertIn("options.sanitize_steps = sanitizeSteps();", markup)
+
+    def test_bpm_is_its_own_box_and_starts_on(self):
+        markup = self._page()
+        box = re.search(r'<input[^>]*id="bpm"[^>]*>', markup).group(0)
+        self.assertIn("checked", box)
+        self.assertIn('options.bpm = el("bpm").checked;', markup)
+
+    def test_a_pasted_playlist_stands_in_for_the_link(self):
+        markup = self._page()
+        self.assertIn('el("url").addEventListener("paste"', markup)
+        self.assertIn("pywebview.api.start(pastedText || el(\"url\").value, options)", markup)
+        self.assertIn('options.folder_name = el("folder-name").value.trim();', markup)
+
+    def test_the_page_says_how_to_copy_a_whole_playlist(self):
+        markup = self._page()
+        card = re.search(r'<div class="howto" id="howto" hidden>(.*?)</ol>', markup, re.S).group(1)
+        self.assertIn("<kbd>⌘</kbd><kbd>A</kbd>", card)
+        self.assertIn("<kbd>⌘</kbd><kbd>C</kbd>", card)
+        self.assertIn("<kbd>⌘</kbd><kbd>V</kbd>", card)
+        self.assertIn('id="howto-open"', markup)
+
+    def test_a_playlist_too_long_for_its_link_opens_the_card_and_offers_the_rest(self):
+        markup = self._page()
+        self.assertIn('state.stage === "too-long"', markup)
+        self.assertIn("start({ take_listed: true })", markup)
 
     def test_the_take_block_is_laid_out_song_row_then_stem_columns(self):
         # Song on its own row with what happens to the song file (Sanitize)
@@ -1221,7 +1301,7 @@ class TestUiFile(unittest.TestCase):
         # under Drums, and Stage 4's bass/harmony/vocal loops under theirs.
         with open(gui.UI_FILE) as page:
             markup = page.read()
-        song_row = re.search(r'<div class="song-row">(.*?)</div>', markup, re.S)
+        song_row = re.search(r'<div class="song-row">(.*?)<div class="stem-grid">', markup, re.S)
         self.assertIsNotNone(song_row, "no song row")
         self.assertIn('id="pad-song"', song_row.group(1))
         self.assertIn('id="sanitize-wrap"', song_row.group(1))
@@ -1255,7 +1335,7 @@ class TestUiFile(unittest.TestCase):
     def test_numbering_sits_beside_sanitize_and_starts_hidden_and_off(self):
         with open(gui.UI_FILE) as page:
             markup = page.read()
-        song_row = re.search(r'<div class="song-row">(.*?)</div>', markup, re.S).group(1)
+        song_row = re.search(r'<div class="song-row">(.*?)<div class="stem-grid">', markup, re.S).group(1)
         wrap = re.search(r'<label[^>]*id="number-wrap"[^>]*>', song_row)
         self.assertIsNotNone(wrap, "no numbering checkbox in the song row")
         self.assertIn(" hidden", wrap.group(0))
@@ -1267,7 +1347,7 @@ class TestUiFile(unittest.TestCase):
     def test_sanitize_a_folder_sits_at_the_end_of_the_song_row(self):
         with open(gui.UI_FILE) as page:
             markup = page.read()
-        song_row = re.search(r'<div class="song-row">(.*?)</div>', markup, re.S).group(1)
+        song_row = re.search(r'<div class="song-row">(.*?)<div class="stem-grid">', markup, re.S).group(1)
         self.assertIn('id="tidy-folder"', song_row)
         self.assertIn("pywebview.api.tidy_folder()", markup)
 

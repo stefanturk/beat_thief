@@ -164,6 +164,102 @@
   .text-button:hover { color: var(--violet); }
   .text-button:disabled { opacity: 0.4; cursor: default; }
   .text-button:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; }
+  .song-row { flex-wrap: wrap; row-gap: 8px; }
+  .label-row { display: flex; align-items: baseline; justify-content: space-between; }
+  .howto-open { font-size: 11px; }
+
+  /* Off · Auto · Ask, small enough to sit in the Song row. */
+  .sanitize { position: relative; display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--dim); }
+  .sanitize[data-off="true"] { opacity: 0.4; }
+  .seg-small button {
+    padding: 3px 8px;
+    background: none;
+    border: 1px solid var(--edge);
+    margin-left: -1px;
+    color: var(--dim);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+  .seg-small button:first-child { border-radius: 4px 0 0 4px; margin-left: 0; }
+  .seg-small button:last-child { border-radius: 0 4px 4px 0; }
+  .seg-small button.on { position: relative; border-color: var(--violet); color: var(--violet); background: var(--violet-dim); }
+  .seg-small button:disabled { cursor: default; }
+  .gear {
+    padding: 0 2px; background: none; border: none; color: var(--dim);
+    font-size: 13px; line-height: 1; cursor: pointer;
+  }
+  .gear:hover, .gear[aria-expanded="true"] { color: var(--violet); }
+  .gear:disabled { cursor: default; }
+  .steps-pop {
+    position: absolute; top: calc(100% + 6px); left: 0; z-index: 5;
+    display: flex; flex-direction: column; gap: 7px;
+    padding: 11px 13px;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-radius: var(--radius);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+    white-space: nowrap;
+  }
+  .steps-pop[hidden] { display: none; }
+  .steps-pop label { display: flex; align-items: center; gap: 7px; cursor: pointer; color: var(--ink); }
+  .steps-pop label[data-off="true"] { opacity: 0.4; cursor: default; }
+  .steps-pop input { accent-color: var(--violet); margin: 0; }
+
+  /* A pasted copy of a playlist, standing in for the link. */
+  .pasted {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 8px; padding: 7px 8px 7px 12px;
+    background: #0f1013;
+    border: 1px solid var(--violet);
+    border-radius: var(--radius);
+    font-size: 12.5px; color: var(--dim);
+  }
+  .pasted[hidden] { display: none; }
+  .pasted-count b { color: var(--violet); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pasted input {
+    flex: 1; min-width: 0;
+    padding: 4px 8px;
+    background: none;
+    border: 1px solid var(--edge);
+    border-radius: 4px;
+    color: var(--ink);
+    font: inherit;
+    user-select: text; cursor: text;
+  }
+  .pasted input:focus { outline: none; border-color: var(--violet); }
+  .pasted input::placeholder { color: #5b5d64; }
+  .pasted-clear { background: none; border: none; color: var(--dim); cursor: pointer; font-size: 12px; padding: 2px 4px; }
+  .pasted-clear:hover { color: var(--bad); }
+
+  /* How to copy a whole playlist out of Spotify: three steps, small. */
+  .howto {
+    margin-top: 8px; padding: 11px 13px 10px;
+    background: var(--raised);
+    border: 1px solid var(--edge);
+    border-left: 2px solid var(--violet);
+    border-radius: var(--radius);
+    font-size: 12px;
+  }
+  .howto[hidden] { display: none; }
+  .howto-lead { margin: 0 0 8px; color: var(--ink); }
+  .howto-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; color: var(--dim); }
+  .howto-steps li { display: flex; align-items: center; gap: 8px; }
+  .howto-steps .step {
+    flex: none; width: 17px; height: 17px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--violet-dim); color: var(--violet); font-size: 10px; font-weight: 600;
+  }
+  kbd {
+    display: inline-block; min-width: 18px; padding: 0 4px;
+    border: 1px solid var(--edge); border-bottom-width: 2px; border-radius: 4px;
+    background: var(--panel); color: var(--ink);
+    font-family: var(--ui); font-size: 11px; line-height: 16px; text-align: center;
+  }
+  .howto-actions { display: flex; justify-content: flex-end; gap: 16px; margin-top: 6px; }
+  .howto-actions .text-button { margin-left: 0; font-size: 11.5px; }
+  #take-listed { color: var(--violet); }
+
   .stem-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
   /* Each stem's loop goes under the stem it's cut from. */
   #pad-beat { grid-column: 1; grid-row: 2; }
@@ -657,8 +753,34 @@
 
   <main>
     <section>
-      <p class="label">Link</p>
+      <div class="label-row">
+        <p class="label">Link</p>
+        <!-- Spotify's link lists 100 songs at most; copying them all out
+             of the Spotify app has no limit (see showHowTo). -->
+        <button class="text-button howto-open" id="howto-open" type="button">Over 100 songs?</button>
+      </div>
       <input id="url" type="url" placeholder="paste a YouTube or Spotify song or playlist link" spellcheck="false" autofocus>
+      <!-- A pasted copy of a playlist stands in for the link: one line
+           saying how many songs, where they'll go, and a way to clear it. -->
+      <div class="pasted" id="pasted" hidden>
+        <span class="pasted-count"><b id="pasted-count">0</b> songs from Spotify</span>
+        <span class="pasted-into">into</span>
+        <input id="folder-name" type="text" placeholder="a folder named after them" spellcheck="false"
+               title="What to call the folder. Leave it empty to carry on in the folder these songs went into last time.">
+        <button class="pasted-clear" id="pasted-clear" type="button" title="Clear the pasted songs">✕</button>
+      </div>
+      <div class="howto" id="howto" hidden>
+        <p class="howto-lead" id="howto-lead">Spotify's link only lists the first 100 songs. To get every one:</p>
+        <ol class="howto-steps">
+          <li><span class="step">1</span>Open the playlist in the Spotify app</li>
+          <li><span class="step">2</span>Click any song, then <kbd>⌘</kbd><kbd>A</kbd> and <kbd>⌘</kbd><kbd>C</kbd></li>
+          <li><span class="step">3</span>Click the box above and <kbd>⌘</kbd><kbd>V</kbd></li>
+        </ol>
+        <div class="howto-actions">
+          <button class="text-button" id="take-listed" type="button" hidden>Just get the first 100</button>
+          <button class="text-button" id="howto-close" type="button">Got it</button>
+        </div>
+      </div>
     </section>
 
     <section>
@@ -678,17 +800,34 @@
           <!--
             Sanitize belongs with Song rather than with the run as a whole:
             it's what happens to the song file after it lands - trimmed,
-            renamed, checked against the stash for duplicates - and it's the
-            only part of a run that stops to ask you anything.
+            evened out, renamed, checked against the stash for duplicates.
 
-            Off to begin with, for that last reason: on, a pasted link can
-            stop halfway and wait to be told where the song starts, which is
-            a lot to spring on somebody who asked for an mp3. Switch it on
-            when tidying is the point. (The Python side still defaults it on
-            for a caller that sends no opinion at all - see Api.start.)
+            Off, Auto or Ask. Auto takes the algorithm's own answers - the
+            best YouTube match, the suggested trim - and asks nothing, so a
+            long playlist can run overnight; Ask puts every doubt to you,
+            which recording and where the song starts. The ⚙ says which
+            parts of tidying to do at all. The page always sends its mode
+            (see Api.start, which reads a missing one as Auto).
           -->
-          <label id="sanitize-wrap" title="Trim, tidy and de-duplicate what lands. Off: keep it exactly as downloaded.">
-            <input type="checkbox" id="sanitize"> Sanitize
+          <div class="sanitize" id="sanitize-wrap">
+            <span class="sanitize-name">Sanitize</span>
+            <span class="seg seg-small" id="sanitize-mode" role="radiogroup" aria-label="Sanitize">
+              <button type="button" data-mode="off" title="Keep each song exactly as downloaded.">Off</button><button type="button" data-mode="auto" class="on" title="Tidy each song using the best guess, and never stop to ask.">Auto</button><button type="button" data-mode="ask" title="Tidy each song, and ask when it isn't sure: which recording, where the song starts.">Ask</button>
+            </span>
+            <button type="button" class="gear" id="sanitize-gear" title="Which parts of sanitizing to do" aria-expanded="false">⚙</button>
+            <span class="steps-pop" id="sanitize-steps" hidden>
+              <label><input type="checkbox" data-step="trim" checked> Trim silence &amp; intros</label>
+              <label><input type="checkbox" data-step="volume" checked> Even out volume</label>
+              <label id="names-step"><input type="checkbox" data-step="names" checked> Tidy names &amp; tags</label>
+              <label><input type="checkbox" data-step="duplicates" checked> Set duplicates aside</label>
+            </span>
+          </div>
+          <!--
+            The tempo in the name and the BPM tag. Needs nothing but the
+            song, so it doesn't wait on Sanitize.
+          -->
+          <label id="bpm-wrap" title="Put the song's tempo in its name and its BPM tag: Song - Artist (104.5 BPM).">
+            <input type="checkbox" id="bpm" checked> BPM
           </label>
           <!--
             Only for a playlist - a single song has no place in anything to
@@ -696,7 +835,7 @@
             showNumbering). Off to begin with, like Sanitize.
           -->
           <label id="number-wrap" title="Put each song's place in the playlist in front of its name: 001 - Song - Artist." hidden>
-            <input type="checkbox" id="number"> Number in order
+            <input type="checkbox" id="number"> Number
           </label>
           <!--
             Songs you already have, tidied where they sit: any folder, and
@@ -883,6 +1022,15 @@
       const tempo = tempoOf(state.outputs || []);
       if (tempo) setFigure(tempo, "BPM — click to copy", true);
       else setFigure("✓", "Finished", false);
+    } else if (state.stage === "too-long" && state.too_long) {
+      // Not a failure - the link just can't list the whole playlist.
+      const listed = state.too_long.listed;
+      setFigure(listed + "+", "Paste the whole playlist", false);
+      if (!el("howto").dataset.shownFor || el("howto").dataset.shownFor !== state.message) {
+        el("howto").dataset.shownFor = state.message || "";
+        showHowTo((state.message || "") + " To get every one:", true);
+      }
+      el("take-listed").textContent = "Just get the first " + listed;
     } else if (body.dataset.state === "error" || body.dataset.state === "cancelled") {
       setFigure("···", body.dataset.state === "cancelled" ? "Cancelled" : "Stopped", false);
     } else {
@@ -1066,6 +1214,7 @@
     // before, and that's no longer the one being taken from.
     if (!el("picker").hidden) closePicker();
     selected = song;
+    clearPasted();
     el("url").value = song.title;
     el("number-wrap").hidden = true;   // a song from the stash is one song
     for (const thing of STASH_ORDER) {
@@ -1092,11 +1241,12 @@
     // there is nothing left to sanitize, so the switch says so rather than
     // sitting there looking like it still does something.
     const wrap = el("sanitize-wrap");
-    el("sanitize").disabled = !!selected;
+    wrap.querySelectorAll("button").forEach((b) => { b.disabled = !!selected; });
+    if (selected) showSteps(false);
     wrap.dataset.off = selected ? "true" : "false";
-    wrap.title = selected
-      ? "Already in the stash — nothing left to tidy."
-      : "Trim, tidy and de-duplicate what lands. Off: keep it exactly as downloaded.";
+    wrap.title = selected ? "Already in the stash — nothing left to tidy." : "";
+    el("bpm").disabled = !!selected;
+    el("bpm-wrap").dataset.off = selected ? "true" : "false";
     el("take-note").textContent = selected
       ? (armed.length ? "Taking " + armed.map((t) => (have(t) ? "another " : "") + LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
                       : "Nothing armed — click a square to take something from " + selected.title + ".")
@@ -2401,11 +2551,16 @@
     });
   }
 
-  function start() {
-    const options = {};
+  function start(extra) {
+    const options = Object.assign({}, extra || {});
     for (const thing of STASH_ORDER) options[thing] = isArmed(thing);
-    options.sanitize = el("sanitize").checked;
+    options.sanitize = sanitizeMode;
+    options.sanitize_steps = sanitizeSteps();
+    options.bpm = el("bpm").checked;
     options.number = !el("number-wrap").hidden && el("number").checked;
+    if (pastedText) options.folder_name = el("folder-name").value.trim();
+    el("howto").hidden = true;
+    delete el("howto").dataset.shownFor;
 
     // Neither Beat nor Midi is something a run can produce - both need you
     // to hear the phrase - so they're dropped from what's asked for and
@@ -2442,7 +2597,7 @@
     pendingLoopsFor = loopFromSpan ? { song: selected ? selected.song : "", stems: stemLoops } : null;
 
     lastStage = null;
-    window.pywebview.api.start(el("url").value, options).then((state) => {
+    window.pywebview.api.start(pastedText || el("url").value, options).then((state) => {
       render(state);
       if (state.running && !polling) polling = setInterval(poll, 250);
     }).catch(complain);
@@ -2497,12 +2652,149 @@
 
   // Numbering only means something for a playlist, so the box is only
   // there when the link is one. Python decides, from the link's shape.
+  // A song Spotify names keeps Spotify's name, so tidying the name is moot.
   function showNumbering() {
-    const url = el("url").value;
+    const url = pastedText || el("url").value;
+    const spotifyNamed = /spotify/i.test(url);
+    const names = el("names-step");
+    names.dataset.off = spotifyNamed ? "true" : "false";
+    names.querySelector("input").disabled = spotifyNamed;
+    names.title = spotifyNamed ? "Spotify already names the song — that's the name it gets." : "";
     window.pywebview.api.is_playlist(url).then((playlist) => {
-      if (el("url").value === url) el("number-wrap").hidden = !playlist;
+      if ((pastedText || el("url").value) === url) el("number-wrap").hidden = !playlist;
     });
   }
+
+  // --- Sanitize: Off · Auto · Ask, which parts, and BPM ------------------
+  //
+  // Remembered between launches - it's how you like your files, not a
+  // per-song decision. Storage can be missing or refuse; the defaults
+  // (Auto, every part, BPM on) stand in then.
+
+  let sanitizeMode = "auto";
+  const STEP_BOXES = () => Array.from(document.querySelectorAll("#sanitize-steps input[data-step]"));
+
+  function sanitizeSteps() {
+    return STEP_BOXES().filter((box) => box.checked).map((box) => box.dataset.step);
+  }
+
+  function remember() {
+    try {
+      localStorage.setItem("beatThief.sanitize", JSON.stringify({
+        mode: sanitizeMode,
+        steps: STEP_BOXES().filter((box) => box.checked).map((box) => box.dataset.step),
+        bpm: el("bpm").checked,
+      }));
+    } catch (e) { /* not remembered, that's all */ }
+  }
+
+  function chooseSanitize(mode) {
+    sanitizeMode = mode;
+    el("sanitize-mode").querySelectorAll("button").forEach((b) => {
+      b.classList.toggle("on", b.dataset.mode === mode);
+      b.setAttribute("aria-checked", b.dataset.mode === mode ? "true" : "false");
+    });
+    el("sanitize-gear").disabled = mode === "off";
+    if (mode === "off") showSteps(false);
+  }
+
+  function showSteps(show) {
+    el("sanitize-steps").hidden = !show;
+    el("sanitize-gear").setAttribute("aria-expanded", show ? "true" : "false");
+  }
+
+  (function recall() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem("beatThief.sanitize") || "null"); } catch (e) { saved = null; }
+    if (saved && ["off", "auto", "ask"].includes(saved.mode)) chooseSanitize(saved.mode);
+    if (saved && Array.isArray(saved.steps)) {
+      STEP_BOXES().forEach((box) => { box.checked = saved.steps.includes(box.dataset.step); });
+    }
+    if (saved && typeof saved.bpm === "boolean") el("bpm").checked = saved.bpm;
+  })();
+
+  el("sanitize-mode").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-mode]");
+    if (!button || button.disabled) return;
+    chooseSanitize(button.dataset.mode);
+    remember();
+  });
+  el("sanitize-gear").addEventListener("click", (event) => {
+    event.stopPropagation();
+    showSteps(el("sanitize-steps").hidden);
+  });
+  el("sanitize-steps").addEventListener("click", (event) => event.stopPropagation());
+  el("sanitize-steps").addEventListener("change", remember);
+  el("bpm").addEventListener("change", remember);
+  document.addEventListener("click", () => showSteps(false));
+
+  // --- a whole playlist, pasted ------------------------------------------
+  //
+  // Spotify's link lists 100 songs at most. Selecting every song in the
+  // Spotify app (⌘A) and copying (⌘C) gives one link per song, however
+  // many - pasted here, that list stands in for the link. It's kept out of
+  // the box itself: thousands of links in a one-line field is unreadable
+  // and slow, and all that's worth seeing is how many.
+
+  const TRACK_LINK = /(?:open\.spotify\.com\/(?:intl-[a-z-]+\/)?track\/|spotify:track:)([A-Za-z0-9]{22})/g;
+  let pastedText = "";
+
+  function countTracks(text) {
+    return new Set(Array.from(text.matchAll(TRACK_LINK), (m) => m[1])).size;
+  }
+
+  function showPasted(text) {
+    pastedText = text;
+    const count = countTracks(text);
+    el("pasted-count").textContent = count.toLocaleString();
+    el("pasted").hidden = false;
+    el("url").hidden = true;
+    el("url").value = "";
+    el("howto").hidden = true;
+    if (selected) clearSelection();
+    showNumbering();
+    el("folder-name").focus();
+  }
+
+  function clearPasted() {
+    if (!pastedText) return;
+    pastedText = "";
+    el("pasted").hidden = true;
+    el("url").hidden = false;
+    el("folder-name").value = "";
+    showNumbering();
+  }
+
+  el("url").addEventListener("paste", (event) => {
+    const text = (event.clipboardData || window.clipboardData).getData("text") || "";
+    if (countTracks(text) < 2) return;   // one link is just a link
+    event.preventDefault();
+    showPasted(text);
+  });
+  el("pasted-clear").addEventListener("click", () => {
+    clearPasted();
+    el("url").focus();
+  });
+  el("folder-name").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !running) start();
+  });
+
+  // The three steps, opened by hand from "Over 100 songs?", or by a run
+  // that found its playlist was longer than the link lets on.
+  function showHowTo(lead, offerListed) {
+    el("howto-lead").textContent = lead || "Spotify's link only lists the first 100 songs. To get every one:";
+    el("take-listed").hidden = !offerListed;
+    el("howto").hidden = false;
+  }
+
+  el("howto-open").addEventListener("click", () => {
+    if (el("howto").hidden) showHowTo("", false);
+    else el("howto").hidden = true;
+  });
+  el("howto-close").addEventListener("click", () => { el("howto").hidden = true; });
+  el("take-listed").addEventListener("click", () => {
+    if (!running) start({ take_listed: true });
+  });
 
   el("tidy-folder").addEventListener("click", () => {
     if (running) return;

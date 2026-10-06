@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 
@@ -37,12 +38,13 @@ _USER_AGENT = (
 
 _TIMEOUT_SEC = 15
 
-# How many rows the embed page has been observed to list for a playlist. The
-# entity carries no total to check that against, so a longer playlist would
-# come back truncated with nothing to say it had been. Callers that hit this
-# number exactly are told to treat the list as possibly incomplete - see
-# pipeline._resolve_spotify.
-EMBED_ROW_LIMIT = 50
+# How many rows the embed page lists for a playlist, at most - seen in use
+# on longer playlists, which stopped at exactly this many. The entity
+# carries no total to check that against, so a longer playlist comes back
+# truncated with nothing to say it had been. Callers that reach this number
+# are told the list may be incomplete, and how to paste the whole thing
+# instead (see track_ids).
+EMBED_ROW_LIMIT = 100
 
 # open.spotify.com/track/<id>, the /intl-de/ localized variants, and the
 # spotify:track:<id> URIs that the desktop app's "Copy Spotify URI" produces.
@@ -52,6 +54,20 @@ _LINK = re.compile(
     re.IGNORECASE,
 )
 _URI = re.compile(r"spotify:(track|playlist|album):([A-Za-z0-9]+)", re.IGNORECASE)
+
+# Every track link in a block of pasted text. Selecting a whole playlist in
+# the Spotify app (⌘A) and copying it (⌘C) puts one track link per song on
+# the clipboard - however long the playlist is, which is the way past
+# EMBED_ROW_LIMIT that needs no account and no API key.
+_TRACK_LINKS = re.compile(
+    r"(?:open\.spotify\.com/(?:intl-[a-z-]+/)?track/|spotify:track:)([A-Za-z0-9]{22})",
+    re.IGNORECASE,
+)
+
+# A long pasted list is one page fetch per song, and Spotify answers too
+# many too quickly with 429. Waiting it out a few times is cheaper than
+# losing the song.
+_RETRIES_ON_429 = 3
 
 _NEXT_DATA = re.compile(
     r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
@@ -76,6 +92,48 @@ def spotify_id(url: str) -> tuple[str, str] | None:
     return None
 
 
+def track_ids(text: str) -> list[str]:
+    """Every Spotify track id in text, in order, each once. What a
+    pasted copy of a playlist turns into."""
+    seen, ids = set(), []
+    for match in _TRACK_LINKS.finditer(text or ""):
+        found = match.group(1)
+        if found not in seen:
+            seen.add(found)
+            ids.append(found)
+    return ids
+
+
+def track_url(track_id: str) -> str:
+    return f"https://open.spotify.com/track/{track_id}"
+
+
+_SONG_COUNT = re.compile(r'<meta[^>]+(?:name|property)="music:song_count"[^>]+content="(\d+)"')
+
+PAGE_URL = "https://open.spotify.com/{kind}/{spotify_id}"
+
+
+def song_count(url: str) -> int | None:
+    """How many songs a playlist or album really has, from the ordinary
+    Spotify page's link-preview tags - or None if it can't be told.
+
+    The embed page stops listing at EMBED_ROW_LIMIT; this page doesn't list
+    songs at all, but it does say how many there are, which is what tells a
+    100-song playlist from a 1,200-song one cut short. A plain client is
+    served those tags (a browser gets the web player instead)."""
+    found = spotify_id(url)
+    if not found or found[0] == "track":
+        return None
+    page = PAGE_URL.format(kind=found[0], spotify_id=found[1])
+    request = urllib.request.Request(page, headers={"User-Agent": "curl/8"})
+    try:
+        html = _fetch(request)
+    except Exception:
+        return None
+    match = _SONG_COUNT.search(html)
+    return int(match.group(1)) if match else None
+
+
 def _embed_entity(kind: str, spotify_id_: str) -> dict:
     """The entity blob behind the public embed player.
 
@@ -85,8 +143,7 @@ def _embed_entity(kind: str, spotify_id_: str) -> dict:
     url = EMBED_URL.format(kind=kind, spotify_id=spotify_id_)
     request = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SEC) as response:
-            html = response.read().decode("utf-8", "replace")
+        html = _fetch(request)
     except urllib.error.HTTPError as e:
         if e.code == 404:
             raise SpotifyUnavailable(
@@ -98,6 +155,23 @@ def _embed_entity(kind: str, spotify_id_: str) -> dict:
         raise SpotifyUnavailable(f"Couldn't reach Spotify: {e}") from e
 
     return _entity_from_html(html)
+
+
+def _fetch(request) -> str:
+    """The page, waiting out Spotify's "slow down" a few times first."""
+    for attempt in range(_RETRIES_ON_429 + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=_TIMEOUT_SEC) as response:
+                return response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == _RETRIES_ON_429:
+                raise
+            try:
+                wait = float((e.headers or {}).get("Retry-After") or 0)
+            except (TypeError, ValueError):
+                wait = 0
+            time.sleep(min(max(wait, 2.0 * 2 ** attempt), 60.0))
+    raise AssertionError("unreachable")
 
 
 def _entity_from_html(html: str) -> dict:
@@ -176,6 +250,7 @@ def track(url: str) -> dict:
     )
     if not song["title"]:
         raise SpotifyUnavailable("Spotify's page didn't name that track.")
+    song["id"] = spotify_id_
     return song
 
 
@@ -201,7 +276,11 @@ def collection(url: str) -> dict:
         title = row.get("title") or ""
         if not title:
             continue
-        songs.append(_song(title, row.get("subtitle", "") or "", row.get("duration")))
+        song = _song(title, row.get("subtitle", "") or "", row.get("duration"))
+        uri = row.get("uri") or ""
+        if uri.startswith("spotify:track:"):
+            song["id"] = uri.rsplit(":", 1)[1]
+        songs.append(song)
     if not songs:
         raise SpotifyUnavailable(
             "Spotify's page didn't list any tracks for that link - if it's a "

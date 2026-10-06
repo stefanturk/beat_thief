@@ -60,6 +60,7 @@ fi
 SOURCES=(
     gui.py
     pipeline.py
+    sources.py
     spotify.py
     youtube_match.py
     history.py

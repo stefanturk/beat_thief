@@ -29,6 +29,7 @@ import harmony_isolator
 import history
 import instrument_isolator
 import song_sanitizer
+import sources
 import spotify
 import vocals_isolator
 import youtube_match
@@ -74,10 +75,23 @@ class _SilentLogger:
         pass
 
 
-def _base_ydl_opts(output_dir: str) -> dict:
+def file_name_for(title: str, artist: str) -> str:
+    """"Song - Artist", fit to be a filename, from what Spotify calls the
+    song. A slash would make a path of it and a leading dot would hide it;
+    a colon shows up in Finder as a slash."""
+    name = f"{title} - {artist}" if artist else title
+    cleaned = "".join(" " if c in "/\\:" else c for c in name)
+    return re.sub(r"\s+", " ", cleaned).strip(" .") or "Song"
+
+
+def _base_ydl_opts(output_dir: str, name: str | None = None) -> dict:
+    """yt-dlp's settings for one download. Given a name, the file is saved
+    under it rather than under whatever the upload calls itself - so a
+    song Spotify named arrives with Spotify's name on it."""
+    stem = name.replace("%", "%%") if name else "%(title)s - %(uploader)s"
     return {
         "format": "bestaudio/best",
-        "outtmpl": os.path.join(output_dir, "%(title)s - %(uploader)s.%(ext)s"),
+        "outtmpl": os.path.join(output_dir, stem + ".%(ext)s"),
         "noplaylist": True,
         "extractor_args": {"youtube": {"player_client": ["android"]}},
         "quiet": True,
@@ -156,7 +170,7 @@ def count_entries(url: str) -> int | None:
     return _probe(url)[0]
 
 
-def requested_mp3_filenames(url: str, output_dir: str) -> list[str]:
+def requested_mp3_filenames(url: str, output_dir: str, name: str | None = None) -> list[str]:
     """The mp3 filename(s) this url resolves to, whether they were just
     downloaded this run or already sat on disk from a previous one (skipped
     via the download archive).
@@ -165,7 +179,7 @@ def requested_mp3_filenames(url: str, output_dir: str) -> list[str]:
     fresh downloads alone misses a request for a song you already have,
     since yt-dlp's archive skip means no download hook ever fires for it."""
     try:
-        with yt_dlp.YoutubeDL(_base_ydl_opts(output_dir)) as ydl:
+        with yt_dlp.YoutubeDL(_base_ydl_opts(output_dir, name)) as ydl:
             info = ydl.extract_info(url, download=False)
             if not info:
                 return []
@@ -193,8 +207,11 @@ class _Download:
 
     def __init__(self, url: str, output_dir: str, on_event, use_archive: bool = True,
                  queue_index: int | None = None, queue_total: int | None = None,
-                 known_title: str | None = None):
+                 known_title: str | None = None, name: str | None = None):
         self.url = url
+        # What to save the file as, when that's already known (see
+        # _base_ydl_opts) - None leaves it to the upload's own title.
+        self.name = name
         self.output_dir = output_dir
         self.on_event = on_event
         self.use_archive = use_archive
@@ -289,7 +306,7 @@ class _Download:
         self.on_event({"stage": "found", "total": self.total, "song": title,
                        "index": self.queue_index, "queue_total": self.queue_total})
 
-        opts = _base_ydl_opts(self.output_dir)
+        opts = _base_ydl_opts(self.output_dir, self.name)
         if self.use_archive:
             opts["download_archive"] = os.path.join(self.output_dir, ARCHIVE_FILENAME)
         opts.update(
@@ -311,14 +328,14 @@ class _Download:
             return ydl.download([self.url])
 
 
-def _nothing_on_disk_for(url: str, output_dir: str) -> bool:
+def _nothing_on_disk_for(url: str, output_dir: str, name: str | None = None) -> bool:
     """True when this url resolves to songs and none of them are here.
 
     The question behind the stale-archive retry in run(). Unknowable is not
     the same as missing: if the url can't be resolved to any filename at all
     (offline, a dead link) this says False, so a network problem can't turn
     into a second download attempt."""
-    filenames = requested_mp3_filenames(url, output_dir)
+    filenames = requested_mp3_filenames(url, output_dir, name)
     if not filenames:
         return False
     return not any(existing_song(output_dir, filename) for filename in filenames)
@@ -544,22 +561,27 @@ def _safe_folder_name(name: str) -> str:
     return cleaned or "Playlist"
 
 
-def _resolve_one(song: dict, index, total, on_event, on_choose, cancelled) -> tuple[str | None, str | None]:
-    """The YouTube url for one Spotify track, or (None, why not).
+def _resolve_one(song: dict, index, total, on_event, on_choose, cancelled) -> tuple[dict | None, str | None]:
+    """The YouTube upload for one Spotify track, or (None, why not).
+
+    The match comes back as {"url", "title", "channel", "guessed"}, where
+    "title" and "channel" are the upload's own (what Sources.csv shows next
+    to Spotify's name) and "guessed" says nobody confirmed it.
 
     Where the match is unambiguous this is silent. Where it isn't - a
     remaster at the same length, two uploads equally close - it's put to
     on_choose, because picking the wrong recording here quietly poisons
     every tempo, grid and MIDI file made from it further down.
 
-    Without an on_choose (the CLI has none) the best candidate is taken and
-    named in a warning, so a terminal run still works and still says what it
-    assumed."""
+    Without an on_choose (the CLI, and the app's Auto mode) the best
+    candidate is taken, named in a warning and marked as a guess, so a
+    5,000-song run can go overnight and still say what it assumed."""
     # The release itself, from YouTube Music, when it's plainly the one -
     # which it usually is. Only when it isn't does the broader search run.
     released = youtube_match.music_match(song["query"], song["duration_sec"], song["artist"])
     if released:
-        return released["url"], None
+        return {"url": released["url"], "title": released.get("title", ""),
+                "channel": released.get("channel", ""), "guessed": False}, None
 
     found = youtube_match.candidates(song["query"], song["duration_sec"])
     if not found:
@@ -568,9 +590,14 @@ def _resolve_one(song: dict, index, total, on_event, on_choose, cancelled) -> tu
             "audio has to come from - Spotify only says what the song is."
         )
 
+    def described(url, guessed):
+        chosen = next((c for c in found if c.get("url") == url), {})
+        return {"url": url, "title": chosen.get("title", ""),
+                "channel": chosen.get("channel", ""), "guessed": guessed}
+
     best, needs_asking = youtube_match.pick(found)
     if not needs_asking:
-        return best, None
+        return described(best, False), None
 
     if on_choose is None:
         on_event({
@@ -580,7 +607,7 @@ def _resolve_one(song: dict, index, total, on_event, on_choose, cancelled) -> tu
                 f"took \"{found[0]['title']}\"."
             ),
         })
-        return best, None
+        return described(best, True), None
 
     if cancelled():
         return None, None
@@ -596,63 +623,91 @@ def _resolve_one(song: dict, index, total, on_event, on_choose, cancelled) -> tu
     }) or {}
     picked = answer.get("url") or None
     if picked:
-        return picked, None
+        return described(picked, False), None
     return None, f"Skipped {song['title']}."
 
 
-def _resolve_spotify(url, on_event, on_choose, cancelled) -> dict:
-    """Turn a Spotify link into the YouTube links of the same recordings.
+def _spotify_queue(url, on_event, take_listed) -> dict:
+    """What a Spotify link or a pasted copy of a playlist says the songs
+    are - {"name", "songs", "is_playlist"} - without going near YouTube.
+    Matching each song happens when it's that song's turn (see run).
 
-    Spotify names the songs; YouTube supplies the audio. Returns
-    {"name", "tracks"} where each track is {"url", "title", "artist"} - one
-    of them for a track link, all of them for a playlist or album. An empty
-    tracks list means nothing could be settled, and why has already been
-    said.
+    A pasted list carries only track links, so each song's title is read
+    when its turn comes too; a playlist link already lists them.
 
-    "is_playlist" says whether the link named more than one song, which is
-    not the same as more than one being found.
+    A playlist longer than Spotify's link will list (EMBED_ROW_LIMIT) is
+    "too_long" rather than quietly cut short, unless take_listed says the
+    listed songs are what's wanted - the way past it is pasting the whole
+    list, and that's the page's to explain."""
+    pasted = spotify.track_ids(url)
+    if len(pasted) > 1:
+        songs = [{"id": track_id, "number": n, "spotify": True}
+                 for n, track_id in enumerate(pasted, start=1)]
+        return {"name": "", "songs": songs, "is_playlist": True}
 
-    Everything is resolved before anything is downloaded. Forty downloads
-    punctuated by forty questions is the thing to avoid: the queue gets
-    approved once, up front."""
     on_event({"stage": "looking-up"})
     try:
         found = spotify.collection(url)
     except spotify.SpotifyUnavailable as e:
         on_event({"stage": "error", "message": str(e)})
-        return {"name": "", "tracks": []}
+        return {"name": "", "songs": [], "is_playlist": False, "error": str(e)}
 
     songs = found["songs"]
-    if len(songs) == spotify.EMBED_ROW_LIMIT:
-        on_event({"stage": "warning", "message": (
-            f"Spotify's page listed {spotify.EMBED_ROW_LIMIT} songs, which is as "
-            "many as it ever lists - if that playlist is longer, the rest of it "
-            "isn't here."
-        )})
-
-    total = len(songs)
-    tracks = []
-    for index, song in enumerate(songs, start=1):
-        if cancelled():
-            return {"name": found["name"], "tracks": tracks, "is_playlist": total > 1}
-        if total > 1:
-            on_event({"stage": "resolving", "index": index, "total": total,
-                      "song": song["title"]})
-        match, why_not = _resolve_one(song, index, total, on_event, on_choose, cancelled)
-        if match:
-            tracks.append({"url": match, "title": song["title"], "artist": song["artist"],
-                           "number": index})
-        elif why_not and total > 1:
-            # One song out of a list not being findable is not the list
-            # failing - say which one, and carry on with the rest.
-            on_event({"stage": "warning", "message": why_not})
-        elif why_not:
-            on_event({"stage": "error", "message": why_not})
-
-    return {"name": found["name"], "tracks": tracks, "is_playlist": total > 1}
+    for number, song in enumerate(songs, start=1):
+        song["number"] = number
+        song["spotify"] = True
+    out = {"name": found["name"], "songs": songs, "is_playlist": len(songs) > 1}
+    if len(songs) >= spotify.EMBED_ROW_LIMIT:
+        really = spotify.song_count(url)
+        if really is None or really > len(songs):
+            out["too_long"] = {"listed": len(songs), "count": really, "name": found["name"]}
+            if not take_listed:
+                return out
+            on_event({"stage": "warning", "message": (
+                f"Spotify's link listed {len(songs)} songs"
+                + (f" of the playlist's {really}" if really else "")
+                + " - to get them all, copy them in Spotify (⌘A, ⌘C) and paste them here."
+            )})
+    return out
 
 
-def _download_track(track_url, output_dir, on_event, position, total, known_title):
+def _youtube_queue(url) -> dict:
+    """A YouTube link as {"name", "songs", "is_playlist"}: a playlist is
+    every video in it, one song each, so each can be taken all the way
+    through - and picked up from - on its own. Anything else is one song,
+    downloaded from the link as given."""
+    if "list=" in url:
+        info = _probe_info(url) or {}
+        entries = [e for e in (info.get("entries") or []) if e]
+        if len(entries) >= 2:
+            songs = []
+            for number, entry in enumerate(entries, start=1):
+                video = entry.get("url") or entry.get("webpage_url") or (
+                    f"https://www.youtube.com/watch?v={entry['id']}" if entry.get("id") else None)
+                if not video:
+                    continue
+                songs.append({"youtube_url": video, "youtube_title": entry.get("title") or "",
+                              "channel": entry.get("channel") or entry.get("uploader") or "",
+                              "number": number})
+            if songs:
+                return {"name": info.get("title") or "", "songs": songs, "is_playlist": True}
+            # Entries without links to them: hand yt-dlp the playlist whole.
+            return {"name": info.get("title") or "", "is_playlist": True,
+                    "songs": [{"youtube_url": url, "whole": True}]}
+    return {"name": "", "songs": [{"youtube_url": url}], "is_playlist": False}
+
+
+def _key(song: dict) -> str:
+    """Which song this is, for sources.Sources - by its Spotify id when
+    there is one, so a playlist link and a pasted copy of it agree."""
+    if song.get("id"):
+        return sources.spotify_key(song["id"])
+    if song.get("spotify"):
+        return "spotify-search:" + song.get("query", "")
+    return sources.youtube_key(song.get("youtube_url") or "")
+
+
+def _download_track(track_url, output_dir, on_event, position, total, known_title, name=None):
     """One track's download, including the stale-archive retry.
 
     The archive lists video ids, so it says "you already have this" about a
@@ -663,14 +718,15 @@ def _download_track(track_url, output_dir, on_event, position, total, known_titl
     to go and get the song."""
     download = _Download(track_url, output_dir, on_event, queue_index=position,
                          queue_total=total if total > 1 else None,
-                         known_title=known_title)
+                         known_title=known_title, name=name)
     status = download.run()
-    if download.downloaded == 0 and download.failed == 0 and _nothing_on_disk_for(track_url, output_dir):
+    if download.downloaded == 0 and download.failed == 0 and _nothing_on_disk_for(track_url, output_dir, name):
         download = _Download(track_url, output_dir, on_event, use_archive=False,
                              queue_index=position, queue_total=total if total > 1 else None,
-                             known_title=known_title)
+                             known_title=known_title, name=name)
         status = download.run()
     return download, status
+
 
 
 def _read_alignment(path: str, interactive) -> tuple[int, float] | None:
@@ -732,7 +788,8 @@ def _numbered(output_dir: str, filename: str, number: int | None) -> str:
 
 
 def _finish_track(track_url, fresh, output_dir, on_event, interactive, on_review,
-                  sanitize, own_folder, numbers=None) -> list[str]:
+                  sanitize, own_folder, number=None, bpm=True, name=None, tags=None,
+                  steps=None) -> list[str]:
     """Tidy one track's download, put it where it belongs, and remember the
     link it came from. Returns the mp3 paths for that track.
 
@@ -741,41 +798,41 @@ def _finish_track(track_url, fresh, output_dir, on_event, interactive, on_review
     which is what makes coming back later for another stem work for every
     song in a playlist rather than only the first.
 
-    numbers is where each fresh download sits in its playlist, by the name
-    yt-dlp gave it, when the songs are to be numbered (see _numbered)."""
-    numbers = numbers or {}
-    sanitized = []
-    # Which fresh download each name in sanitized came from, since tidying
-    # and the tempo both rename, and the number is known by the old name.
-    came_from = {}
+    number is the song's place in its playlist, when the songs are to be
+    numbered (see _numbered). name is what the song was saved as when that
+    was already known (Spotify's name) - the sanitizer leaves a name like
+    that alone - and tags the (title, artist) to write into it. bpm puts
+    the tempo in the name whether or not the song was sanitized. steps is
+    which parts of sanitizing to do (song_sanitizer.ALL_STEPS by default)."""
+    finished = []
     if fresh:
         if sanitize:
-            renamed = {}
             try:
-                sanitized = song_sanitizer.sanitize_new_downloads(
+                finished = song_sanitizer.sanitize_new_downloads(
                     fresh, output_dir,
                     interactive=(interactive is not False),
                     review=on_review,
-                    renamed=renamed,
+                    keep_name=bool(name),
+                    steps=steps,
                 )
             except Exception as e:
                 on_event({"stage": "warning", "message": f"Sanitizing hit a snag, but your downloads are safe: {e}"})
-            came_from = {new: old for old, new in renamed.items()}
-            if sanitized:
-                on_event({"stage": "tempo"})
-                tempo_named = []
-                for name in sanitized:
-                    named = _put_tempo_in_name(output_dir, name, interactive)
-                    came_from[named] = came_from.get(name, name)
-                    tempo_named.append(named)
-                sanitized = tempo_named
+                finished = [f for f in fresh if os.path.exists(os.path.join(output_dir, f))]
         else:
             # Nothing was tidied, so what's on disk is what yt-dlp wrote -
             # which is exactly what the rest of the run chains onto.
-            sanitized = list(fresh)
-        if numbers:
-            sanitized = [_numbered(output_dir, name, numbers.get(came_from.get(name, name)))
-                         for name in sanitized]
+            finished = list(fresh)
+        if tags:
+            for filename in finished:
+                try:
+                    song_sanitizer.write_id3_tags(os.path.join(output_dir, filename), *tags)
+                except Exception:
+                    pass
+        if bpm and finished:
+            on_event({"stage": "tempo"})
+            finished = [_put_tempo_in_name(output_dir, filename, interactive) for filename in finished]
+        if number:
+            finished = [_numbered(output_dir, filename, number) for filename in finished]
 
     # A song downloaded on an earlier run is skipped by yt-dlp's archive, so
     # no hook fires for it - but asking to isolate it is still a perfectly
@@ -786,11 +843,12 @@ def _finish_track(track_url, fresh, output_dir, on_event, interactive, on_review
     # link of a song you already have has to put it back in front of you,
     # and "the stash forgot it" is exactly when somebody re-pastes a link.
     paths = [existing_song(output_dir, filename) or os.path.join(output_dir, filename)
-             for filename in sanitized]
-    for filename in requested_mp3_filenames(track_url, output_dir):
-        path = existing_song(output_dir, filename)
-        if path and path not in paths:
-            paths.append(path)
+             for filename in finished]
+    if not fresh:
+        for filename in requested_mp3_filenames(track_url, output_dir, name):
+            path = existing_song(output_dir, filename)
+            if path and path not in paths:
+                paths.append(path)
 
     songs = []
     for path in paths:
@@ -804,26 +862,36 @@ def _finish_track(track_url, fresh, output_dir, on_event, interactive, on_review
     return songs
 
 
-def _keep_what_finished(fresh_by_track, output_dir, own_folder, numbers=None) -> list[str]:
-    """File and remember the songs that finished downloading before a cancel.
+def _keep_what_finished(track_url, fresh, output_dir, own_folder, number=None) -> list[str]:
+    """File and remember a song that finished downloading as a cancel came in.
 
-    Stopping a playlist halfway is an ordinary thing to do, and the songs
-    already down are real songs - but the run used to return before filing
-    anything, so they sat unremembered where the stash couldn't see them.
-    Nothing is sanitized here: that can stop to ask a question, and a cancel
-    is someone saying they're done being asked. Nor is the network touched
-    to look for older copies (see _finish_track) - a cancel should be quick."""
-    songs = []
-    numbers = numbers or {}
-    for track_url, fresh in fresh_by_track:
-        fresh = [_numbered(output_dir, name, numbers.get(name)) for name in fresh
-                 if os.path.exists(os.path.join(output_dir, name))]
-        paths = [os.path.join(output_dir, name) for name in fresh]
-        paths = [file_into_own_folder(path) if own_folder else path for path in paths]
-        if paths:
-            history.remember(track_url, paths)
-        songs.extend(paths)
-    return songs
+    The song already down is a real song, so it's filed where the stash can
+    see it. Nothing is sanitized here: that can stop to ask a question, and
+    a cancel is someone saying they're done being asked. It isn't recorded
+    as finished either, so the next run picks it up and tidies it."""
+    fresh = [_numbered(output_dir, name, number) for name in fresh
+             if os.path.exists(os.path.join(output_dir, name))]
+    paths = [os.path.join(output_dir, name) for name in fresh]
+    paths = [file_into_own_folder(path) if own_folder else path for path in paths]
+    if paths:
+        history.remember(track_url, paths)
+    return paths
+
+
+def _with_spotify_details(song: dict, record: dict) -> dict | None:
+    """A pasted song's title, artist and length - from the record if an
+    earlier run already read them, otherwise from Spotify. None if Spotify
+    can't say, which skips the song this time and leaves it for the next."""
+    if song.get("title") or not song.get("id"):
+        return song
+    if record.get("title") and record.get("query"):
+        return dict(song, title=record["title"], artist=record.get("artist", ""),
+                    duration_sec=record.get("duration_sec"), query=record["query"])
+    try:
+        found = spotify.track(spotify.track_url(song["id"]))
+    except spotify.SpotifyUnavailable:
+        return None
+    return dict(song, **{k: found[k] for k in ("title", "artist", "duration_sec", "query")})
 
 
 def run(
@@ -837,9 +905,16 @@ def run(
     on_choose=None,
     sanitize: bool = True,
     number: bool = False,
+    bpm: bool = True,
+    steps=None,
+    folder_name: str = "",
+    take_listed: bool = True,
 ) -> dict:
     """Download url into output_dir, sanitize it, and isolate the requested
     instruments. Returns a result dict describing what happened.
+
+    url is a YouTube or Spotify link - a song or a playlist - or a pasted
+    copy of a Spotify playlist: every track link in the text, however many.
 
     instruments is any iterable of "drums"/"bass"/"harmony"/"vocals"; empty
     means the song only. interactive=False suppresses every question the
@@ -850,34 +925,39 @@ def run(
 
     on_review is the exception to that: given one, an ambiguous intro or
     outro is put to it rather than decided alone (see
-    song_sanitizer.review_flags), and the run waits on the answer. The GUI
-    passes one because it can ask - it just asks in a window. Nothing else
-    does, so every other caller is unchanged.
+    song_sanitizer.review_flags), and the run waits on the answer. on_choose
+    works the same way for a Spotify song with no obvious YouTube match (see
+    _resolve_one). Without them the best answer is taken - the app's Auto.
+
+    Every song is taken all the way through - matched, downloaded, tidied,
+    named for its tempo, numbered, filed - before the next is started, and
+    recorded in its folder's sources.Sources as it finishes. So a stop
+    halfway through 5,000 songs loses only the one in hand, and running the
+    same link (or the same pasted list) again picks up where it stopped
+    without asking the network about any song already done.
 
     number=True puts each song of a playlist's place in it in front of its
-    name ("004 - Song - Artist.mp3"), so the folder sorts in playlist
-    order. A single song is never numbered.
+    name ("004 - Song - Artist.mp3"). A single song is never numbered.
 
     sanitize=False leaves the download exactly as it came off YouTube: no
-    trimming, no renaming, no duplicate check, and no question asked about
-    either. A whole playlist's worth of small decisions is a lot to sit
-    through when what you want is the audio.
+    trimming, no renaming, no duplicate check. steps chooses among those
+    when it's on (song_sanitizer.ALL_STEPS). bpm puts the tempo in the name
+    either way.
 
-    on_choose works the same way, for Spotify links: given one, a match that
-    isn't obviously right is put to it rather than guessed at (see
-    _resolve_spotify). Without one the best match is taken and warned about.
+    A playlist lands in a folder of its own named after it - folder_name
+    for a pasted list, which has no name; failing that, the folder already
+    holding most of the list, so a paste carries on where it left off.
+    Asked for songs alone, that folder is just the songs; asked for stems
+    as well, each song gets a folder inside it.
 
-    A Spotify playlist or album is a queue of songs rather than one, and it
-    lands in a folder of its own named after the playlist. Asked for songs
-    alone, that folder is just the songs; asked for stems as well, each song
-    gets a folder inside it, since stems and MIDI need somewhere to live. A
-    song that can't be matched or downloaded is skipped and said so - one
-    song out of forty is not the run.
+    A Spotify playlist link lists at most spotify.EMBED_ROW_LIMIT songs.
+    take_listed=False stops before downloading any when the playlist is
+    longer and returns result["too_long"], for a page that can explain how
+    to paste the whole thing; the default takes what was listed and warns.
 
-    Cancelling: should_cancel is polled between stages and during the slow
-    demucs work. On cancel the run stops where it is and reports what it had
-    already finished; nothing already written is removed, since a completed
-    isolation is still perfectly good."""
+    Cancelling: should_cancel is polled between songs and stages and during
+    the slow demucs work. On cancel the run stops where it is and reports
+    what it had already finished; nothing already written is removed."""
     if on_event is None:
         def on_event(_event):
             pass
@@ -912,37 +992,36 @@ def run(
         return result
 
     # A Spotify link can't be downloaded from, but it can say what the songs
-    # are - so it's swapped for the YouTube links of the same recordings
-    # right here. One track or forty, what comes back is a list, and
-    # everything below it works through that list one ordinary url at a time
-    # exactly as it always has for one.
-    queue = [{"url": url, "title": None, "artist": None}]
-    if spotify.spotify_id(url):
-        found = _resolve_spotify(url, on_event, on_choose, cancelled)
-        queue, playlist_name = found["tracks"], found["name"]
-        # Counted before matching, not after: a playlist where YouTube only
-        # had one of the songs is still a playlist, and still its folder.
-        is_playlist = found.get("is_playlist", False)
-        if not queue:
-            if cancelled():
-                result["cancelled"] = True
-                on_event({"stage": "cancelled"})
-            else:
-                result["error"] = "Couldn't work out which song that Spotify link means."
+    # are, and each is matched to a YouTube upload when its turn comes. One
+    # song or five thousand, what comes back is a list, worked through one
+    # ordinary url at a time.
+    url = (url or "").strip()
+    if spotify.spotify_id(url) or len(spotify.track_ids(url)) > 1:
+        found = _spotify_queue(url, on_event, take_listed)
+        if found.get("too_long") and not take_listed:
+            result["too_long"] = found["too_long"]
             return result
-
+        if not found["songs"]:
+            result["error"] = found.get("error") or "Couldn't work out which song that Spotify link means."
+            return result
     else:
-        youtube_name = youtube_playlist_name(url)
-        is_playlist = youtube_name is not None
-        playlist_name = youtube_name or ""
+        found = _youtube_queue(url)
+    queue, playlist_name, is_playlist = found["songs"], found["name"], found["is_playlist"]
 
     # A playlist arrives as one thing and should land as one thing, so its
     # songs go in a folder named after it rather than scattered through the
     # downloads folder among everything else - whether it came from Spotify
     # or YouTube, and whether or not it has a name to go by.
     if is_playlist:
-        folder = playlist_name or time.strftime("Playlist %Y-%m-%d %H.%M")
-        output_dir = os.path.join(output_dir, _safe_folder_name(folder))
+        folder = None
+        name = (folder_name or "").strip() or playlist_name
+        if name:
+            folder = os.path.join(output_dir, _safe_folder_name(name))
+        else:
+            folder = sources.folder_holding(output_dir, [_key(song) for song in queue])
+        if folder is None:
+            folder = os.path.join(output_dir, _safe_folder_name(time.strftime("Playlist %Y-%m-%d %H.%M")))
+        output_dir = folder
         result["output_dir"] = output_dir
 
     # Whether each song gets a folder of its own. Stems and MIDI need one -
@@ -950,26 +1029,75 @@ def run(
     # downloaded just for the songs is a folder of songs, and burying each
     # one in a folder of its own would only make it harder to use.
     own_folder = bool(wanted) or not is_playlist
+    record = sources.Sources(output_dir)
 
-    total_tracks = len(queue)
+    total = len(queue)
+    already = sum(1 for song in queue if record.finished(_key(song)))
+    if already and total > 1:
+        on_event({"stage": "resuming", "done": already, "total": total})
+
     fatal = None
-    fresh_by_track = []
-    numbers = {}
-    for position, entry in enumerate(queue, start=1):
+    songs = []
+    for position, song in enumerate(queue, start=1):
         if cancelled():
             break
-        track_url = entry["url"]
+        key = _key(song)
+
+        done = record.finished(key)
+        if done:
+            if done not in songs:
+                songs.append(done)
+            result["skipped"] += 1
+            continue
+
+        # Spotify: what the song is, then which upload is it.
+        if song.get("spotify"):
+            song = _with_spotify_details(song, record.get(key))
+            if song is None:
+                on_event({"stage": "warning", "message": f"Spotify wouldn't say what song {position} is - skipped it this time."})
+                result["failed"] += 1
+                continue
+            record.record(key, title=song["title"], artist=song["artist"],
+                          duration_sec=song.get("duration_sec"), query=song["query"],
+                          number=song.get("number"),
+                          spotify_url=spotify.track_url(song["id"]) if song.get("id") else None)
+            if total > 1:
+                on_event({"stage": "resolving", "index": position, "total": total,
+                          "song": song["title"]})
+            match, why_not = _resolve_one(song, position, total, on_event, on_choose, cancelled)
+            if not match:
+                if why_not:
+                    on_event({"stage": "warning" if total > 1 else "error", "message": why_not})
+                    record.record(key, status="skipped", note=why_not)
+                    if total == 1:
+                        result["error"] = why_not
+                continue
+            record.record(key, youtube_url=match["url"], youtube_title=match["title"],
+                          channel=match["channel"], check=match["guessed"])
+            track_url = match["url"]
+            known_title = song["title"]
+            name = file_name_for(song["title"], song["artist"])
+            tags = (song["title"], song["artist"])
+        else:
+            track_url = song["youtube_url"]
+            known_title = song.get("youtube_title") or None
+            name = tags = None
+            if song.get("youtube_title"):
+                record.record(key, youtube_url=track_url, youtube_title=song["youtube_title"],
+                              channel=song.get("channel"), number=song.get("number"))
+
         try:
             download, status = _download_track(track_url, output_dir, on_event,
-                                               position, total_tracks, entry.get("title"))
+                                               position, total, known_title, name)
         except yt_dlp.utils.DownloadError as e:
-            if total_tracks == 1:
+            if total == 1:
                 # One link, one failure, nothing to carry on with.
                 on_event({"stage": "error", "message": str(e)})
                 result["error"] = str(e)
                 return result
             on_event({"stage": "warning",
-                      "message": f"Couldn't download {entry.get('title') or track_url}: {e}"})
+                      "message": f"Couldn't download {known_title or track_url}: {e}"})
+            record.record(key, status="failed", note=str(e))
             result["failed"] += 1
             fatal = str(e)
             continue
@@ -981,15 +1109,28 @@ def run(
         result["downloaded"] += download.downloaded
         result["failed"] += download.failed
         result["skipped"] += max((download.total or 0) - download.downloaded - download.failed, 0)
-        fresh_by_track.append((track_url, list(download.filenames)))
-        if number and is_playlist:
-            # A Spotify song's place on Spotify - so one YouTube didn't have
-            # leaves a gap rather than moving the rest up - and a YouTube
-            # playlist's own playlist_index for each of its songs.
-            for filename in download.filenames:
-                place = entry.get("number") or download.numbers.get(filename)
-                if place:
-                    numbers[filename] = place
+        fresh = list(download.filenames)
+        place = song.get("number") if number and is_playlist else None
+
+        if cancelled():
+            songs.extend(p for p in _keep_what_finished(track_url, fresh, output_dir, own_folder, place)
+                         if p not in songs)
+            break
+
+        if sanitize and fresh:
+            on_event({"stage": "sanitizing"})
+        finished = _finish_track(track_url, fresh, output_dir, on_event, interactive,
+                                 on_review, sanitize, own_folder, place, bpm=bpm,
+                                 name=name, tags=tags, steps=steps)
+        for path in finished:
+            if path not in songs:
+                songs.append(path)
+        if finished and not song.get("whole"):
+            fields = {"status": "done", "file": finished[0], "number": song.get("number")}
+            if not song.get("spotify"):
+                title, artist, _ = song_sanitizer._derive_title_artist(os.path.basename(finished[0]))
+                fields.update(title=instrument_isolator.song_title(title + ".mp3"), artist=artist)
+            record.record(key, **fields)
 
     on_event(
         {
@@ -1001,22 +1142,13 @@ def run(
         }
     )
 
+    result["songs"] = songs
+    result["outputs"] = list(songs)
+
     if cancelled():
-        result["songs"] = _keep_what_finished(fresh_by_track, output_dir, own_folder, numbers)
-        result["outputs"] = list(result["songs"])
         result["cancelled"] = True
         on_event({"stage": "cancelled"})
         return result
-
-    if sanitize and any(fresh for _url, fresh in fresh_by_track):
-        on_event({"stage": "sanitizing"})
-
-    songs = []
-    for track_url, fresh in fresh_by_track:
-        songs.extend(_finish_track(track_url, fresh, output_dir, on_event, interactive,
-                                   on_review, sanitize, own_folder, numbers))
-    result["songs"] = songs
-    result["outputs"] = list(songs)
 
     if not songs and fatal and not result.get("error"):
         result["error"] = fatal
@@ -1028,6 +1160,7 @@ def run(
 
     on_event({"stage": "done", "outputs": result["outputs"]})
     return result
+
 
 
 def _songs_under(folder: str) -> list[tuple[str, str]]:

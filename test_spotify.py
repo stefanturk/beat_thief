@@ -117,7 +117,8 @@ class TestReadingAWholeCollection(unittest.TestCase):
                                return_value=spotify._entity_from_html(_fixture("spotify_playlist_embed.html"))):
             found = spotify.collection("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M")
         self.assertEqual(found["name"], "Today\u2019s Top Hits")
-        self.assertEqual(len(found["songs"]), spotify.EMBED_ROW_LIMIT)
+        # Today's Top Hits is 50 songs long - under the page's limit.
+        self.assertEqual(len(found["songs"]), 50)
 
     def test_a_single_track_has_no_collection_name(self):
         """One song doesn't need a folder built for it."""
@@ -182,6 +183,68 @@ class TestWhenSpotifyChangesTheirPage(unittest.TestCase):
             with self.assertRaises(spotify.SpotifyUnavailable) as caught:
                 spotify._embed_entity("track", "nope")
         self.assertIn("private playlist", str(caught.exception))
+
+
+class TestPastedPlaylists(unittest.TestCase):
+    """⌘A ⌘C on a playlist in the Spotify app copies one link per song -
+    however many - which is the way past the link's 100."""
+
+    def test_every_track_link_in_order_once_each(self):
+        a, b = "4uLU6hMCjMI75M1A2tKUQC", "7GhIk7Il098yCjg4BQjzvb"
+        text = (f"https://open.spotify.com/track/{a}?si=abc\n"
+                f"https://open.spotify.com/intl-de/track/{b}\n"
+                f"spotify:track:{a}\n"
+                "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M\n")
+        self.assertEqual(spotify.track_ids(text), [a, b])
+
+    def test_nothing_pasted_is_nothing(self):
+        self.assertEqual(spotify.track_ids(""), [])
+        self.assertEqual(spotify.track_ids("https://www.youtube.com/watch?v=x"), [])
+
+
+class TestHowLongAPlaylistReallyIs(unittest.TestCase):
+    def test_read_from_the_pages_link_preview(self):
+        html = '<meta name="music:song_count" content="150"/>'
+        with mock.patch.object(spotify, "_fetch", return_value=html):
+            self.assertEqual(spotify.song_count("https://open.spotify.com/playlist/abc"), 150)
+
+    def test_unknown_when_the_page_does_not_say(self):
+        with mock.patch.object(spotify, "_fetch", return_value="<html></html>"):
+            self.assertIsNone(spotify.song_count("https://open.spotify.com/playlist/abc"))
+        with mock.patch.object(spotify, "_fetch", side_effect=OSError("offline")):
+            self.assertIsNone(spotify.song_count("https://open.spotify.com/playlist/abc"))
+
+    def test_a_track_has_no_count(self):
+        self.assertIsNone(spotify.song_count("https://open.spotify.com/track/abc"))
+
+    def test_the_link_lists_at_most_one_hundred(self):
+        self.assertEqual(spotify.EMBED_ROW_LIMIT, 100)
+
+
+class TestBeingToldToSlowDown(unittest.TestCase):
+    def test_a_429_is_waited_out(self):
+        import io
+        import urllib.error
+
+        class Page(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        replies = [urllib.error.HTTPError("u", 429, "Too Many", {"Retry-After": "1"}, None),
+                   Page(b"ok")]
+        with mock.patch("urllib.request.urlopen", side_effect=replies), \
+             mock.patch("time.sleep") as slept:
+            self.assertEqual(spotify._fetch("request"), "ok")
+        slept.assert_called_once()
+
+    def test_playlist_rows_carry_their_track_ids(self):
+        with mock.patch.object(spotify, "_embed_entity",
+                               return_value=spotify._entity_from_html(_fixture("spotify_playlist_embed.html"))):
+            found = spotify.collection("https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M")
+        self.assertEqual(found["songs"][0]["id"], "2FZcjBYK4dTt48q94pJbJD")
 
 
 if __name__ == "__main__":
