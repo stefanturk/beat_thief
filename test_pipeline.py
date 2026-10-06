@@ -1968,7 +1968,8 @@ class TestALongRunSurvivesProblems(PipelineTestCase):
             result = self._play()
         work = os.path.join(result["output_dir"], pipeline.WORK_DIR_NAME)
         self.assertEqual(set(seen), {work})
-        self.assertEqual(os.listdir(work), [])
+        # Emptied by putting each song away, and then removed.
+        self.assertFalse(os.path.exists(work))
 
     def test_what_a_killed_run_left_half_done_is_thrown_away(self):
         work = os.path.join(self.tmp_dir, "Misco", pipeline.WORK_DIR_NAME)
