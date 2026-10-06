@@ -31,6 +31,11 @@ import re
 MANIFEST_FILENAME = ".beat_thief_sources.json"
 CSV_FILENAME = "Sources.csv"
 
+# Sources.csv is for a person to open, not for resuming, so it's rewritten
+# every this many changes (and at the end of a run - see flush) rather than
+# after every one. At 5,000 songs each rewrite is a few megabytes.
+CSV_EVERY = 25
+
 CSV_COLUMNS = ["#", "Song", "Artist", "BPM", "File", "Matched YouTube title",
                "Channel", "YouTube link", "Spotify link", "Note"]
 
@@ -56,6 +61,9 @@ class Sources:
     def __init__(self, folder: str):
         self.folder = folder
         self.songs: dict[str, dict] = {}
+        # Changes since Sources.csv was last written - starting "due", so
+        # the first save writes it and the folder has one from song one.
+        self._unwritten = CSV_EVERY
         try:
             with open(os.path.join(folder, MANIFEST_FILENAME), encoding="utf-8") as f:
                 loaded = json.load(f)
@@ -86,30 +94,46 @@ class Sources:
         relative = os.path.relpath(path, self.folder)
         return next((key for key, song in self.songs.items() if song.get("file") == relative), None)
 
-    def record(self, key: str, **fields) -> None:
-        """Update one song and write both files straight away. A path in
-        "file" is stored relative to the folder, so the folder can be moved
-        or renamed without the record going stale."""
+    def record(self, key: str, save: bool = True, **fields) -> None:
+        """Update one song and write the record straight away - or, with
+        save=False, leave it for the next write (for what's only worth
+        keeping once the song is finished). A path in "file" is stored
+        relative to the folder, so the folder can be moved or renamed
+        without the record going stale."""
         if not key:
             return
         if fields.get("file") and os.path.isabs(fields["file"]):
             fields["file"] = os.path.relpath(fields["file"], self.folder)
         entry = self.songs.setdefault(key, {})
         entry.update({k: v for k, v in fields.items() if v is not None})
-        self.save()
+        if save:
+            self.save()
 
-    def save(self) -> None:
+    def save(self, csv: bool = False) -> None:
+        """Write the record (always) and Sources.csv (when it's due, or
+        csv=True)."""
+        # Not made if it isn't there: a playlist folder on a drive that's
+        # been unplugged must not quietly reappear on the internal disk.
+        # Whoever starts a run makes the folder first.
         try:
-            os.makedirs(self.folder, exist_ok=True)
             manifest = os.path.join(self.folder, MANIFEST_FILENAME)
             tmp = manifest + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"songs": self.songs}, f, indent=1, ensure_ascii=False)
+                json.dump({"songs": self.songs}, f, ensure_ascii=False, separators=(",", ":"))
             os.replace(tmp, manifest)
-            self._write_csv()
+            self._unwritten += 1
+            if csv or self._unwritten >= CSV_EVERY:
+                self._write_csv()
+                self._unwritten = 0
         except OSError:
             # Losing the record costs a re-check next time, not a song.
             pass
+
+    def flush(self) -> None:
+        """Bring Sources.csv up to date - at the end of a run, however it
+        ended."""
+        if self.songs:
+            self.save(csv=True)
 
     def _write_csv(self) -> None:
         rows = sorted(self.songs.items(),

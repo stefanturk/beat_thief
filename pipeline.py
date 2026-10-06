@@ -1182,6 +1182,7 @@ def run(
             break
         if status == "error" or (status == "skipped" and total == 1 and outcome.get("note")):
             # One link, one failure: nothing to carry on with.
+            record.flush()
             result["error"] = outcome["note"]
             on_event({"stage": "error", "message": outcome["note"]})
             return result
@@ -1204,6 +1205,7 @@ def run(
             break
         position += 1
 
+    record.flush()
     try:
         # Gone if it's empty - which it is unless this run was stopped.
         os.rmdir(os.path.join(output_dir, WORK_DIR_NAME))
@@ -1348,7 +1350,8 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
         song, why = _with_spotify_details(song, record.get(key))
         if song is None:
             return _failed(why, folder, f"Spotify wouldn't say what song {position} is: {why}")
-        record.record(key, title=song["title"], artist=song["artist"],
+        # Kept now, written with the song's result: one write per song.
+        record.record(key, save=False, title=song["title"], artist=song["artist"],
                       duration_sec=song.get("duration_sec"), query=song["query"],
                       number=song.get("number"),
                       spotify_url=spotify.track_url(song["id"]) if song.get("id") else None)
@@ -1366,7 +1369,7 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
             if total == 1 and outcome["status"] in (net.GONE, net.OTHER):
                 return {"status": "error", "note": why_not}
             return outcome
-        record.record(key, youtube_url=match["url"], youtube_title=match["title"],
+        record.record(key, save=False, youtube_url=match["url"], youtube_title=match["title"],
                       channel=match["channel"], check=match["guessed"],
                       candidates=match.get("candidates") if match["guessed"] else [])
         track_url = match["url"]
@@ -1378,7 +1381,7 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
         known_title = song.get("youtube_title") or None
         name = tags = None
         if song.get("youtube_title"):
-            record.record(key, youtube_url=track_url, youtube_title=song["youtube_title"],
+            record.record(key, save=False, youtube_url=track_url, youtube_title=song["youtube_title"],
                           channel=song.get("channel"), number=song.get("number"))
 
     place = song.get("number") if ctx.number and ctx.is_playlist else None
@@ -1464,9 +1467,9 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
                     record.record(owner, file=aside, note="Set aside as a duplicate")
 
     history.remember(track_url, [path])
-    _record_done(record, key, song, path, note="Set aside as a duplicate" if set_aside else "")
     if deferred:
-        record.record(key, trims=[{"end": f["end"], "cut_ms": f["cut_ms"]} for f in deferred])
+        record.record(key, save=False, trims=[{"end": f["end"], "cut_ms": f["cut_ms"]} for f in deferred])
+    _record_done(record, key, song, path, note="Set aside as a duplicate" if set_aside else "")
     if ctx.wanted and not set_aside:
         _isolate_songs([path], ctx.wanted, on_event, ctx.cancelled, ctx.should_cancel,
                        ctx.interactive, result)
@@ -1762,6 +1765,7 @@ def review_pending(folder: str, on_choose=None, on_review=None, on_event=None,
                 _apply_trim(path, trim, decision)
             else:
                 record.record(key, trims=[])
+    record.flush()
     return outcome
 
 

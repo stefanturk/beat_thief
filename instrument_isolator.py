@@ -596,6 +596,16 @@ def _prompt_tempo_choice(windows: list[tuple[float, float, float]]) -> float:
 
 
 _alignment_cache: dict[tuple[str, int, float], tuple[int, float]] = {}
+# Enough for every song a run is working on at once; a 5,000-song playlist
+# would otherwise keep all 5,000 for nothing.
+_ALIGNMENT_CACHE_SIZE = 64
+
+
+def _cache_alignment(key, alignment) -> None:
+    _alignment_cache.pop(key, None)
+    _alignment_cache[key] = alignment
+    while len(_alignment_cache) > _ALIGNMENT_CACHE_SIZE:
+        _alignment_cache.pop(next(iter(_alignment_cache)))
 
 _WHOLE_BPM_SNAP_TOLERANCE = 0.1  # a tempo this close to a whole number is almost certainly one, recorded to a click
 
@@ -655,7 +665,7 @@ def remember_alignment(mp3_path: str, alignment: tuple[int, float]) -> None:
     the isolators would read it all over again."""
     key = _alignment_key(mp3_path)
     if key is not None:
-        _alignment_cache[key] = alignment
+        _cache_alignment(key, alignment)
 
 
 def song_trim_ms(mp3_path: str) -> int:
@@ -749,7 +759,7 @@ def song_alignment(mp3_path: str, interactive: bool | None = None) -> tuple[int,
     tempo = _snap_tempo_to_whole_number_if_close(tempo)
 
     if cache_key is not None:
-        _alignment_cache[cache_key] = (cut_ms, tempo)
+        _cache_alignment(cache_key, (cut_ms, tempo))
     return cut_ms, tempo
 
 
