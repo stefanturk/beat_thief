@@ -39,6 +39,9 @@ WINDOW_SIZE = (560, 760)
 # doesn't reliably apply to a python3 subprocess, so an app defaulting there
 # would fail on every run. ~/Music isn't protected - and for a tool whose
 # output goes straight into a DAW, it's the more natural home anyway.
+# How many of a run's problems the page keeps to show.
+MAX_PROBLEMS = 50
+
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Music", "Beat Thief")
 
 
@@ -89,6 +92,13 @@ class Api:
             # A Spotify playlist longer than its link lists:
             # {"listed", "count", "name"} - see pipeline.run(take_listed).
             "too_long": None,
+            # Songs this run couldn't get, newest last - kept, since each
+            # one's message is otherwise gone the moment the next song
+            # starts. Capped: the full list is in the folder's Sources.csv.
+            "problems": [],
+            "problem_count": 0,
+            # The folder's Sources.csv, once a playlist run has one.
+            "sources_csv": "",
         }
 
     @staticmethod
@@ -218,6 +228,13 @@ class Api:
         if not path or not os.path.exists(path):
             return False
         subprocess.run(["open", path] if os.path.isdir(path) else ["open", "-R", path], check=False)
+        return True
+
+    def open_file(self, path: str) -> bool:
+        """Open a file in whatever opens it - Sources.csv in Numbers."""
+        if not path or not os.path.isfile(path):
+            return False
+        subprocess.run(["open", path], check=False)
         return True
 
     def open_output_dir(self, path: str = "") -> bool:
@@ -654,6 +671,7 @@ class Api:
             self._state["running"] = False
             self._state["outputs"] = result.get("outputs", [])
             self._state["cancelled"] = bool(result.get("cancelled"))
+            self._state["sources_csv"] = result.get("sources_csv") or ""
             if result.get("error"):
                 self._state["stage"] = "error"
                 self._state["error"] = result["error"]
@@ -670,7 +688,10 @@ class Api:
                     f"Spotify's link stops at {too_long['listed']} songs - this playlist may be longer.")
             elif result.get("cancelled"):
                 self._state["stage"] = "cancelled"
-                self._state["message"] = "Stopped. Anything already finished is saved."
+                self._state["message"] = ("Stopped. Anything already finished is saved - paste "
+                                          "the same link again to carry on."
+                                          if (result.get("total") or 0) > 1 else
+                                          "Stopped. Anything already finished is saved.")
             else:
                 self._state["stage"] = "done"
                 self._state["percent"] = 100
@@ -712,6 +733,18 @@ class Api:
             # Nothing was downloaded because there was nothing to download,
             # so neither counter means here what it means after a run.
             return "Done." if result.get("outputs") else "Nothing came back for that song."
+        total = result.get("total") or 0
+        if total > 1:
+            # A playlist: how many of its songs are here now, and what
+            # didn't work - so a run that met trouble doesn't just say Done.
+            have = (result.get("finished") or 0) + (result.get("already") or 0)
+            failed, to_check = result.get("failed") or 0, result.get("to_check") or 0
+            message = f"Done - all {total:,} songs." if have >= total else f"Done - {have:,} of {total:,} songs."
+            if failed:
+                message += f" {failed:,} couldn't be had - pasting it again tries them again."
+            if to_check:
+                message += f" {to_check:,} {'match is a guess' if to_check == 1 else 'matches are guesses'} worth checking."
+            return message
         if result.get("downloaded"):
             return "Done."
         if result.get("songs"):
@@ -728,6 +761,19 @@ class Api:
             self._state["percent"] = percent
             if stage == "error":
                 self._state["error"] = event.get("message", "")
+            if event.get("problem"):
+                self._state["problem_count"] += 1
+                self._state["problems"] = (self._state["problems"] + [event["message"]])[-MAX_PROBLEMS:]
+
+    @staticmethod
+    def _which_song(event) -> str:
+        index, total = event.get("index"), event.get("total")
+        return f" with song {index:,} of {total:,}" if index and total and total > 1 else ""
+
+    @staticmethod
+    def _so_far(event) -> float | None:
+        index, total = event.get("index"), event.get("total")
+        return (index - 1) / total * 100 if index and total and total > 1 else None
 
     @staticmethod
     def _describe(event) -> tuple[str | None, float | None]:
@@ -767,6 +813,18 @@ class Api:
             overall = ((index - 1) + (percent or 0) / 100) / total * 100
             of_it = f" ({round(percent)}%)" if stage == "downloading" and percent is not None else ""
             return f"Song {index} of {total} — {event['song']}{of_it}", overall
+        if stage == "offline":
+            where = Api._which_song(event)
+            return f"No internet - waiting to carry on{where}. It'll pick up by itself.", Api._so_far(event)
+        if stage == "blocked":
+            minutes, seconds = divmod(int(event.get("seconds") or 0), 60)
+            return (f"YouTube asked for a break - trying again in {minutes}:{seconds:02d}"
+                    f"{Api._which_song(event)}."), Api._so_far(event)
+        if stage == "disk-full":
+            free = event.get("free")
+            left = f" ({free / 1e9:.1f} GB left)" if free is not None else ""
+            return (f"Your disk is nearly full{left} - free up some space and it'll "
+                    "carry on by itself."), Api._so_far(event)
         if stage == "download-failed":
             return f"Couldn't download {event['song']}", None
         if stage == "download-summary":

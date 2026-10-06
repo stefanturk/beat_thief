@@ -226,7 +226,26 @@ def load_audio(path: str) -> AudioSegment:
 
 
 def export_audio(audio: AudioSegment, path: str) -> None:
-    audio.export(path, format="mp3", bitrate="320k")
+    """Write audio to path as an mp3, all or nothing.
+
+    pydub empties its target before it starts encoding, so writing straight
+    over a song meant a full disk or a killed app left that song empty, or
+    half there, under its own name - and a later run took it for finished.
+    Encoding beside it under a hidden name and swapping it in at the end
+    means path is only ever the old song or the whole new one."""
+    folder, name = os.path.split(path)
+    partial = os.path.join(folder, f".{name}.partial")
+    try:
+        audio.export(partial, format="mp3", bitrate="320k")
+        if os.path.getsize(partial) == 0:
+            raise OSError(f"Writing {name} produced an empty file")
+        os.replace(partial, path)
+    finally:
+        if os.path.exists(partial):
+            try:
+                os.remove(partial)
+            except OSError:
+                pass
 
 
 def _region_dbfs(audio: AudioSegment, start_ms: int, end_ms: int) -> float:
@@ -687,38 +706,30 @@ def sanitize_file(filename: str, output_dir: str, keep_name: bool = False,
         print(f"{filename}: already good, no changes needed.")
         return new_flags
 
-    preferred_stem = canonical_stem
-    self_collision = preferred_stem + ext == filename
-    if self_collision:
-        # The cleaned-up name is identical to the original, but we still need
-        # a modified copy (trim/normalize/pending review) — never overwrite
-        # the original while it still exists, so this one gets a
-        # distinguishing suffix.
-        preferred_stem = f"{canonical_stem} (sanitized)"
-
-    output_path = os.path.join(output_dir, preferred_stem + ext)
-    if os.path.exists(output_path):
+    output_path = os.path.join(output_dir, canonical_stem + ext)
+    # Same name as before: the tidied song simply replaces the original,
+    # which export_audio does in one step - there's never a moment with
+    # neither, or with both under two names.
+    replacing = output_path == path
+    if not replacing and os.path.exists(output_path):
         # Some other, unrelated song already has this exact cleaned-up name.
         # Never overwrite it — leave this file as it is.
         print(f"{filename}: '{os.path.basename(output_path)}' already exists, skipping to avoid overwriting it.")
         return []
     final_filename = os.path.basename(output_path)
 
+    # Read before the export, which may be over the very file they're in -
+    # pydub writes no tags of its own.
+    kept_tags = _read_tags(path) if keep_name else None
     export_audio(audio, output_path)
     if keep_name:
-        _copy_tags(path, output_path)
+        if any(kept_tags or ()):
+            write_id3_tags(output_path, *kept_tags)
     else:
         write_id3_tags(output_path, title, artist)
 
-    os.remove(path)
-    if self_collision:
-        # The original is gone now, so its name is free — drop the
-        # "(sanitized)" suffix and use the clean canonical name.
-        canonical_path = os.path.join(output_dir, canonical_stem + ext)
-        if not os.path.exists(canonical_path):
-            os.rename(output_path, canonical_path)
-            output_path = canonical_path
-            final_filename = os.path.basename(output_path)
+    if not replacing:
+        os.remove(path)
 
     if not new_flags and steps == ALL_STEPS:
         # Only mark it finished once there's nothing left pending review —
@@ -738,25 +749,25 @@ def sanitize_file(filename: str, output_dir: str, keep_name: bool = False,
     return new_flags
 
 
-def _copy_tags(source: str, destination: str) -> None:
-    """Carry title and artist across to a re-exported copy - which pydub
-    writes without any tags at all."""
+def _read_tags(path: str) -> tuple[str, str] | None:
+    """A song's title and artist tags, to carry across a re-export - which
+    pydub writes without any tags at all."""
     try:
-        tags = EasyID3(source)
-        title, artist = (tags.get("title") or [""])[0], (tags.get("artist") or [""])[0]
+        tags = EasyID3(path)
+        return (tags.get("title") or [""])[0], (tags.get("artist") or [""])[0]
     except Exception:
-        return
-    if title or artist:
-        write_id3_tags(destination, title, artist)
+        return None
 
 
-def _run_dedup(output_dir: str, new: list[str] | None = None) -> None:
+def _run_dedup(output_dir: str, new: list[str] | None = None) -> list[str]:
     """Move the smaller of each duplicate pair into Duplicates/. With new,
-    only pairs involving those files are looked for (see find_duplicate_pairs)."""
+    only pairs involving those files are looked for (see find_duplicate_pairs).
+    Returns the names of the files moved."""
     current_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
     duplicate_pairs = find_duplicate_pairs(current_files, against=new)
+    moved = []
     if not duplicate_pairs:
-        return
+        return moved
 
     duplicates_dir = os.path.join(output_dir, DUPLICATES_DIR_NAME)
     os.makedirs(duplicates_dir, exist_ok=True)
@@ -768,7 +779,9 @@ def _run_dedup(output_dir: str, new: list[str] | None = None) -> None:
         loser = f2 if os.path.getsize(path1) >= os.path.getsize(path2) else f1
         loser_path = os.path.join(output_dir, loser)
         shutil.move(loser_path, os.path.join(duplicates_dir, loser))
+        moved.append(loser)
         print(f"Moved duplicate to {DUPLICATES_DIR_NAME}/: {loser}")
+    return moved
 
 
 def sanitize_folder(output_dir: str) -> None:

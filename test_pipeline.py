@@ -120,6 +120,15 @@ class PipelineTestCase(unittest.TestCase):
         tempo = mock.patch("pipeline._read_alignment", return_value=None)
         self.mock_tempo = tempo.start()
         self.addCleanup(tempo.stop)
+        # Online and not asleep: a failing song asks whether the internet
+        # is there (net.online), and waiting it out sleeps. Neither belongs
+        # in a test unless it's the subject.
+        online = mock.patch("net.online", return_value=True)
+        self.mock_online = online.start()
+        self.addCleanup(online.stop)
+        naps = mock.patch("pipeline._sleep")
+        self.mock_sleep = naps.start()
+        self.addCleanup(naps.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -1699,14 +1708,13 @@ class TestBigPlaylists(PipelineTestCase):
         _FakeYoutubeDL.downloads = []
         self.events.clear()
         second = self._play()
-        # Song one was finished; song two was only downloaded when the stop
-        # came, so it's finished now (the archive finds it on disk) - and
-        # three is new.
-        self.assertNotIn([["https://www.youtube.com/watch?v=One"]], _FakeYoutubeDL.downloads)
-        self.assertIn(["https://www.youtube.com/watch?v=Three"], _FakeYoutubeDL.downloads)
+        # The stop came as song two finished downloading, and a song that's
+        # down is seen through to the end rather than left half-done - so
+        # only three is left.
+        self.assertEqual(_FakeYoutubeDL.downloads, [["https://www.youtube.com/watch?v=Three"]])
         self.assertEqual(len(second["songs"]), 3)
         resuming = [e for e in self.events if e["stage"] == "resuming"]
-        self.assertEqual(resuming, [{"stage": "resuming", "done": 1, "total": 3}])
+        self.assertEqual(resuming, [{"stage": "resuming", "done": 2, "total": 3}])
 
     def test_songs_already_finished_are_not_looked_up_again(self):
         self._play()
@@ -1829,3 +1837,187 @@ class TestBigPlaylists(PipelineTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestALongRunSurvivesProblems(PipelineTestCase):
+    """A 5,000-song run meets a lost connection, YouTube asking it to slow
+    down, a full disk and songs that are gone. The first three are waited
+    out and the same song tried again; only the last is passed over."""
+
+    PLAYLIST = "https://open.spotify.com/playlist/4jFldPjGeA3jiOj6U6PaIW"
+
+    def _song(self, title, n):
+        return {"title": title, "artist": "Someone", "duration_sec": 200.0,
+                "query": f"Someone {title}", "id": chr(64 + n) * 22}
+
+    def _matching(self, query, want_sec):
+        title = query.split(" ", 1)[1]
+        return [{"url": "https://www.youtube.com/watch?v=" + title, "title": title,
+                 "channel": "SomeoneVEVO", "duration": want_sec, "offset": 0.0}]
+
+    def _play(self, titles=("One", "Two", "Three"), failing=None, **kwargs):
+        """failing: {title: [error text for each attempt that should fail]}."""
+        failing = {t: list(errors) for t, errors in (failing or {}).items()}
+        _FakeYoutubeDL.by_url = {"https://www.youtube.com/watch?v=" + t: [{"title": t}] for t in titles}
+        real_download = _FakeYoutubeDL.download
+
+        def download(self_, urls):
+            title = urls[0].rsplit("=", 1)[1]
+            if failing.get(title):
+                self_.opts["logger"].error("ERROR: " + failing[title].pop(0))
+                _FakeYoutubeDL.downloads.append(urls)
+                return 1
+            return real_download(self_, urls)
+
+        songs = [self._song(t, n) for n, t in enumerate(titles, start=1)]
+        kwargs.setdefault("output_dir", self.tmp_dir)
+        kwargs.setdefault("on_event", self.events.append)
+        with mock.patch("spotify.collection", return_value={"name": "Misco", "songs": songs}), \
+             mock.patch("youtube_match.candidates", side_effect=self._matching), \
+             mock.patch.object(_FakeYoutubeDL, "download", download):
+            return pipeline.run(self.PLAYLIST, **kwargs)
+
+    def _names(self, result):
+        return sorted(os.path.basename(p) for p in result["songs"])
+
+    def test_a_lost_connection_waits_and_tries_the_same_song_again(self):
+        # Offline when song two fails, then back after one check.
+        self.mock_online.side_effect = [False, False, True]
+        result = self._play(failing={"Two": ["Unable to download webpage: <urlopen error "
+                                             "[Errno 8] nodename nor servname provided>"]})
+        self.assertIn("offline", self._stages())
+        self.assertEqual(self._names(result), ["One - Someone.mp3", "Three - Someone.mp3",
+                                               "Two - Someone.mp3"])
+        self.assertEqual(result["failed"], 0)
+        self.assertEqual({e["index"] for e in self.events if e["stage"] == "offline"}, {2})
+
+    def test_being_told_to_slow_down_waits_longer_each_time(self):
+        result = self._play(failing={"Two": ["HTTP Error 429: Too Many Requests",
+                                             "Sign in to confirm you're not a bot"]})
+        blocked = [e for e in self.events if e["stage"] == "blocked"]
+        self.assertEqual(blocked[0]["seconds"], pipeline.BLOCKED_WAITS_SEC[0])
+        self.assertIn(pipeline.BLOCKED_WAITS_SEC[1], [e["seconds"] for e in blocked])
+        slept = sum(c.args[0] for c in self.mock_sleep.call_args_list)
+        self.assertEqual(slept, pipeline.BLOCKED_WAITS_SEC[0] + pipeline.BLOCKED_WAITS_SEC[1])
+        self.assertEqual(len(result["songs"]), 3)
+
+    def test_a_song_that_is_gone_is_noted_and_the_run_carries_on(self):
+        result = self._play(failing={"Two": ["Video unavailable. This video is private"] * 2})
+        self.assertEqual(self._names(result), ["One - Someone.mp3", "Three - Someone.mp3"])
+        self.assertEqual(result["failed"], 1)
+        record = pipeline.sources.Sources(result["output_dir"])
+        two = record.get("spotify:" + "B" * 22)
+        self.assertEqual(two["status"], "failed")
+        self.assertIn("Video unavailable", two["note"])
+        self.assertTrue(any("Video unavailable" in p for p in result["problems"]))
+
+    def test_a_failure_nobody_can_explain_is_tried_once_more(self):
+        result = self._play(failing={"Two": ["something odd"]})
+        self.assertEqual(len(result["songs"]), 3)
+        self.assertEqual(result["failed"], 0)
+
+    def test_an_upload_that_is_gone_is_swapped_for_another_of_the_song(self):
+        def two_uploads(query, want_sec):
+            title = query.split(" ", 1)[1]
+            return [{"url": "https://www.youtube.com/watch?v=" + title, "title": title,
+                     "channel": "SomeoneVEVO", "duration": want_sec, "offset": 0.0},
+                    {"url": "https://www.youtube.com/watch?v=" + title + "Again", "title": title,
+                     "channel": "Someone - Topic", "duration": want_sec, "offset": 1.0}]
+
+        self._matching = two_uploads
+        _FakeYoutubeDL.downloads = []
+        result = self._play(failing={"Two": ["Video unavailable"] * 5})
+        self.assertIn(["https://www.youtube.com/watch?v=TwoAgain"], _FakeYoutubeDL.downloads)
+        self.assertEqual(result["failed"], 0)
+        record = pipeline.sources.Sources(result["output_dir"])
+        self.assertEqual(record.get("spotify:" + "B" * 22)["youtube_url"],
+                         "https://www.youtube.com/watch?v=TwoAgain")
+
+    def test_a_failure_twice_over_is_noted_and_passed(self):
+        result = self._play(failing={"Two": ["something odd", "still odd"]})
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(len(result["songs"]), 2)
+
+    def test_a_full_disk_waits_for_space_before_the_next_song(self):
+        with mock.patch("net.disk_nearly_full", side_effect=[False, True, True, False] + [False] * 20), \
+             mock.patch("net.free_bytes", return_value=500_000_000):
+            result = self._play()
+        disk = [e for e in self.events if e["stage"] == "disk-full"]
+        self.assertTrue(disk)
+        self.assertEqual(disk[0]["index"], 2)
+        self.assertEqual(len(result["songs"]), 3)
+
+    def test_a_folder_that_goes_away_stops_the_run_rather_than_writing_elsewhere(self):
+        playlist = os.path.join(self.tmp_dir, "Misco")
+        # The drive goes as the first song is being put in its folder.
+        with mock.patch("pipeline._place", side_effect=lambda *a, **k: shutil.rmtree(playlist) or
+                        (_ for _ in ()).throw(OSError("No such file or directory"))):
+            result = self._play()
+        self.assertIn("isn't there", result.get("error", ""))
+        self.assertFalse(os.path.exists(playlist))
+
+    def test_songs_are_made_in_the_work_folder_and_appear_finished(self):
+        seen = []
+        real_download = _FakeYoutubeDL.download
+
+        def download(self_, urls):
+            seen.append(os.path.dirname(self_.opts["outtmpl"]))
+            return real_download(self_, urls)
+
+        with mock.patch.object(_FakeYoutubeDL, "download", download):
+            result = self._play()
+        work = os.path.join(result["output_dir"], pipeline.WORK_DIR_NAME)
+        self.assertEqual(set(seen), {work})
+        self.assertEqual(os.listdir(work), [])
+
+    def test_what_a_killed_run_left_half_done_is_thrown_away(self):
+        work = os.path.join(self.tmp_dir, "Misco", pipeline.WORK_DIR_NAME)
+        os.makedirs(work)
+        with open(os.path.join(work, "Half - Done.mp3.part"), "wb") as f:
+            f.write(b"x")
+        self._play()
+        self.assertFalse(os.path.exists(os.path.join(work, "Half - Done.mp3.part")))
+
+    def test_a_song_left_in_the_folder_unrecorded_is_replaced_not_doubled(self):
+        folder = os.path.join(self.tmp_dir, "Misco")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "One - Someone.mp3"), "wb") as f:
+            f.write(b"left by a run killed before writing it down")
+        result = self._play()
+        self.assertEqual(self._names(result), ["One - Someone.mp3", "Three - Someone.mp3",
+                                               "Two - Someone.mp3"])
+        self.assertNotIn("One - Someone (2).mp3", os.listdir(folder))
+
+    def test_two_songs_with_one_name_both_keep_theirs(self):
+        songs = [self._song("Same", 1), dict(self._song("Same", 2))]
+        _FakeYoutubeDL.by_url = {"https://www.youtube.com/watch?v=Same": [{"title": "Same"}]}
+        with mock.patch("spotify.collection", return_value={"name": "Misco", "songs": songs}), \
+             mock.patch("youtube_match.candidates", side_effect=self._matching):
+            result = pipeline.run(self.PLAYLIST, output_dir=self.tmp_dir, on_event=self.events.append)
+        self.assertEqual(self._names(result), ["Same - Someone (2).mp3", "Same - Someone.mp3"])
+
+    def test_the_summary_says_what_happened(self):
+        self._play(failing={"Two": ["Video unavailable"] * 2})
+        self.events.clear()
+        self._play(failing={"Two": ["Video unavailable"] * 2})
+        summary = [e for e in self.events if e["stage"] == "download-summary"][-1]
+        self.assertEqual((summary["already"], summary["finished"], summary["total"]), (2, 0, 3))
+        self.assertEqual(summary["failed"], 1)
+
+    def test_a_retried_failure_is_retried_on_the_next_run(self):
+        self._play(failing={"Two": ["Video unavailable"] * 2})
+        _FakeYoutubeDL.downloads = []
+        result = self._play()
+        self.assertEqual(_FakeYoutubeDL.downloads, [["https://www.youtube.com/watch?v=Two"]])
+        self.assertEqual(len(result["songs"]), 3)
+
+
+class TestAWholeSongOrNothing(unittest.TestCase):
+    def test_an_empty_file_is_not_a_finished_song(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        record = pipeline.sources.Sources(folder)
+        open(os.path.join(folder, "Song.mp3"), "wb").close()
+        record.record("spotify:x", status="done", file=os.path.join(folder, "Song.mp3"))
+        self.assertEqual(record.finished("spotify:x"), "")
+        self.assertEqual(record.owner(os.path.join(folder, "Song.mp3")), "spotify:x")

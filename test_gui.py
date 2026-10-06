@@ -1505,3 +1505,59 @@ class TestChoosingAMatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestALongRunSaysWhatsHappening(unittest.TestCase):
+    """Waiting out a lost connection, a slow-down or a full disk has to say
+    so - otherwise it looks like the app froze - and the end of a run has
+    to say what it couldn't get, not just "Done"."""
+
+    def test_offline_says_it_is_waiting_and_will_carry_on(self):
+        message, percent = gui.Api._describe({"stage": "offline", "index": 1214, "total": 4870})
+        self.assertIn("No internet", message)
+        self.assertIn("1,214 of 4,870", message)
+        self.assertAlmostEqual(percent, 1213 / 4870 * 100)
+
+    def test_a_slow_down_counts_down(self):
+        message, _ = gui.Api._describe({"stage": "blocked", "seconds": 295, "index": 3, "total": 9})
+        self.assertIn("4:55", message)
+
+    def test_a_full_disk_says_how_much_is_left(self):
+        message, _ = gui.Api._describe({"stage": "disk-full", "free": 800_000_000})
+        self.assertIn("0.8 GB left", message)
+
+    def test_problems_are_kept_and_counted(self):
+        api = gui.Api()
+        for n in range(gui.MAX_PROBLEMS + 5):
+            api._on_event({"stage": "warning", "message": f"Song {n} is gone", "problem": True})
+        api._on_event({"stage": "warning", "message": "Took the best match"})
+        state = api.status()
+        self.assertEqual(state["problem_count"], gui.MAX_PROBLEMS + 5)
+        self.assertEqual(len(state["problems"]), gui.MAX_PROBLEMS)
+        self.assertEqual(state["problems"][-1], f"Song {gui.MAX_PROBLEMS + 4} is gone")
+
+    def test_the_end_of_a_playlist_adds_it_up(self):
+        message = gui.Api._done_message({"total": 4870, "finished": 3000, "already": 1829,
+                                         "failed": 41, "to_check": 17, "downloaded": 3000})
+        self.assertIn("4,829 of 4,870", message)
+        self.assertIn("41 couldn't be had", message)
+        self.assertIn("17 matches are guesses", message)
+
+    def test_a_whole_playlist_says_all(self):
+        message = gui.Api._done_message({"total": 12, "finished": 12, "downloaded": 12})
+        self.assertEqual(message, "Done - all 12 songs.")
+
+    def test_the_finished_run_points_at_sources_csv(self):
+        api = gui.Api(run_pipeline=lambda *a, **k: {
+            "outputs": [], "songs": ["/x.mp3"], "total": 2, "finished": 2,
+            "sources_csv": "/Music/Misco/Sources.csv"})
+        api.start("https://open.spotify.com/playlist/x", {"song": True})
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(api.status()["sources_csv"], "/Music/Misco/Sources.csv")
+
+    def test_the_page_shows_problems_and_the_csv(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        for needed in ('id="problems"', 'id="problems-list"', 'id="open-sources"',
+                       "state.problem_count", "state.sources_csv"):
+            self.assertIn(needed, html)

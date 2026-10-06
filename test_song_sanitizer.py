@@ -1064,3 +1064,45 @@ class TestKeepingANameAndChoosingSteps(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWritingASongIsAllOrNothing(unittest.TestCase):
+    """A full disk or a killed app mid-write used to leave a song empty or
+    half there under its own name - and a later run took it for finished."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp_dir, True)
+        self.path = os.path.join(self.tmp_dir, "Song - Artist.mp3")
+        sanitizer.export_audio(_tone(2000), self.path)
+        with open(self.path, "rb") as f:
+            self.original = f.read()
+
+    def test_a_failed_write_leaves_the_song_as_it_was(self):
+        def fill_the_disk(self_, out_f, *args, **kwargs):
+            with open(out_f, "wb") as f:
+                f.write(b"half")
+            raise OSError(28, "No space left on device")
+
+        with mock.patch("pydub.AudioSegment.export", fill_the_disk):
+            with self.assertRaises(OSError):
+                sanitizer.export_audio(_tone(3000), self.path)
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), self.original)
+        self.assertEqual(os.listdir(self.tmp_dir), ["Song - Artist.mp3"])
+
+    def test_an_empty_result_is_not_swapped_in(self):
+        def write_nothing(self_, out_f, *args, **kwargs):
+            open(out_f, "wb").close()
+
+        with mock.patch("pydub.AudioSegment.export", write_nothing):
+            with self.assertRaises(OSError):
+                sanitizer.export_audio(_tone(3000), self.path)
+        with open(self.path, "rb") as f:
+            self.assertEqual(f.read(), self.original)
+
+    def test_a_good_write_replaces_it(self):
+        sanitizer.export_audio(_tone(3000), self.path)
+        with open(self.path, "rb") as f:
+            self.assertNotEqual(f.read(), self.original)
+        self.assertEqual(os.listdir(self.tmp_dir), ["Song - Artist.mp3"])

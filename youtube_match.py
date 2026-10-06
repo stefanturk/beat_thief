@@ -83,16 +83,25 @@ def _search_opts() -> dict:
     }
 
 
+# Why the last search came back empty when it was an error rather than
+# YouTube having nothing to offer - so pipeline can tell "not found" from
+# "offline" or "asked to slow down" (see net.classify).
+last_error = ""
+
+
 def candidates(query: str, want_sec: float | None, limit: int = SEARCH_LIMIT) -> list[dict]:
     """What YouTube offers for this query, nearest the wanted duration first.
 
     Metadata only - nothing is downloaded here. A candidate with no duration
     reported keeps an offset of None and sorts last, rather than being
     dropped: it's still a real result, just one nothing is known about."""
+    global last_error
+    last_error = ""
     try:
         with yt_dlp.YoutubeDL(_search_opts()) as ydl:
             info = ydl.extract_info(f"ytsearch{int(limit)}:{query}", download=False)
-    except Exception:
+    except Exception as e:
+        last_error = str(e) or type(e).__name__
         return []
 
     found = []
