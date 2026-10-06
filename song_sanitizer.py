@@ -183,15 +183,29 @@ def normalize_for_compare(stem: str) -> str:
     return re.sub(r"\s+", " ", stripped).strip()
 
 
-def find_duplicate_pairs(filenames: list[str], threshold: float = DEDUP_THRESHOLD) -> list[tuple[str, str]]:
+def find_duplicate_pairs(filenames: list[str], threshold: float = DEDUP_THRESHOLD,
+                         against: list[str] | None = None) -> list[tuple[str, str]]:
+    """Every pair of names alike enough to be the same song.
+
+    With against, only pairs that include one of those names - what a run
+    that just added a song needs, since the rest of the folder was already
+    checked against itself when each of those songs arrived. That keeps a
+    5,000-song folder to 5,000 comparisons per new song, not 12 million."""
     normalized = [(f, normalize_for_compare(os.path.splitext(f)[0])) for f in filenames]
+    new = None if against is None else set(against)
     pairs = []
     for i in range(len(normalized)):
         for j in range(i + 1, len(normalized)):
             f1, n1 = normalized[i]
             f2, n2 = normalized[j]
-            ratio = difflib.SequenceMatcher(None, n1, n2).ratio()
-            if ratio >= threshold:
+            if new is not None and f1 not in new and f2 not in new:
+                continue
+            matcher = difflib.SequenceMatcher(None, n1, n2)
+            # The quick bounds are upper limits on ratio(), so a pair that
+            # fails them can't pass it - and they cost almost nothing.
+            if (matcher.real_quick_ratio() >= threshold
+                    and matcher.quick_ratio() >= threshold
+                    and matcher.ratio() >= threshold):
                 pairs.append((f1, f2))
     return pairs
 
@@ -736,9 +750,11 @@ def _copy_tags(source: str, destination: str) -> None:
         write_id3_tags(destination, title, artist)
 
 
-def _run_dedup(output_dir: str) -> None:
+def _run_dedup(output_dir: str, new: list[str] | None = None) -> None:
+    """Move the smaller of each duplicate pair into Duplicates/. With new,
+    only pairs involving those files are looked for (see find_duplicate_pairs)."""
     current_files = sorted(f for f in os.listdir(output_dir) if f.lower().endswith(".mp3"))
-    duplicate_pairs = find_duplicate_pairs(current_files)
+    duplicate_pairs = find_duplicate_pairs(current_files, against=new)
     if not duplicate_pairs:
         return
 
@@ -784,9 +800,9 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
                            keep_name: bool = False, steps=None) -> list[str]:
     """Sanitize exactly the given (just-downloaded) filenames, rather than
     rescanning every mp3 already in output_dir - reprocessing/reporting on
-    songs this run never touched is just noise. Duplicate detection still
-    runs against the whole folder (see _run_dedup), since a new download
-    can only be a duplicate of something already there, not of itself.
+    songs this run never touched is just noise. Duplicate detection checks
+    these downloads against the whole folder (see _run_dedup), but not the
+    rest of the folder against itself - that was done as each song arrived.
 
     Returns the resulting filenames actually left in output_dir for these
     downloads (accounting for any cleanup rename, and dropping the loser of
@@ -833,8 +849,8 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
         # else: sanitize_file left the original in place under a name that
         # collided with an unrelated existing song - nothing to chain onto.
 
-    if "duplicates" in steps:
-        _run_dedup(output_dir)
+    if "duplicates" in steps and final_filenames:
+        _run_dedup(output_dir, new=final_filenames)
     final_filenames = [f for f in final_filenames if os.path.exists(os.path.join(output_dir, f))]
 
     if all_flags:
