@@ -1691,3 +1691,39 @@ class TestAPlaylistSurvivesTheAppGoingAway(unittest.TestCase):
             self.assertIn(needed, html)
         launch = html[html.index('addEventListener("pywebviewready"'):]
         self.assertIn("offerResume()", launch[:400])
+
+
+class TestAskingAtTheEndFromTheApp(unittest.TestCase):
+    def test_ask_mode_asks_at_the_end_and_auto_never_asks(self):
+        for mode, later in (("ask", True), ("auto", False)):
+            calls = {}
+            api = gui.Api(run_pipeline=lambda url, **k: calls.update(k) or {"outputs": []})
+            api.start("https://open.spotify.com/playlist/x", {"song": True, "sanitize": mode})
+            _wait_until(lambda: not api.status()["running"])
+            self.assertEqual(calls["ask_later"], later, mode)
+
+    def test_guesses_left_by_auto_can_be_checked_after(self):
+        asked = {}
+
+        def review(folder, on_choose=None, on_review=None, on_event=None, should_cancel=None):
+            asked.update(folder=folder, on_choose=on_choose, on_review=on_review)
+            on_event({"stage": "checking", "index": 1, "total": 2, "song": "One"})
+            return {"asked": 2, "swapped": 1, "moved": {"/m/One.mp3": "/m/One (98 BPM).mp3"}}
+
+        api = gui.Api(run_pipeline=lambda url, **k: {"outputs": [], "to_check": 2, "output_dir": "/m",
+                                                     "total": 2, "finished": 2},
+                      review_pending=review)
+        api.start("https://open.spotify.com/playlist/x", {"song": True})
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual((api.status()["to_check"], api.status()["checks_in"]), (2, "/m"))
+        with mock.patch("pipeline.pending_questions", return_value=0):
+            api.check_guesses()
+            _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(asked["folder"], "/m")
+        self.assertIsNotNone(asked["on_choose"])
+        self.assertIn("1 song swapped", api.status()["message"])
+        self.assertEqual(api.status()["to_check"], 0)
+
+    def test_checking_says_which(self):
+        message, _ = gui.Api._describe({"stage": "checking", "index": 3, "total": 17, "song": "Two"})
+        self.assertEqual(message, "Checking 3 of 17 — Two")

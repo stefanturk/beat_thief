@@ -117,8 +117,10 @@ class Api:
     against fakes without downloading anything or importing pywebview."""
 
     def __init__(self, run_pipeline=pipeline.run, isolate_pipeline=pipeline.isolate,
-                 sanitize_existing=pipeline.sanitize_existing, choose_folder=None):
+                 sanitize_existing=pipeline.sanitize_existing, choose_folder=None,
+                 review_pending=pipeline.review_pending):
         self._run_pipeline = run_pipeline
+        self._review_pending = review_pending
         self._isolate_pipeline = isolate_pipeline
         self._sanitize_existing = sanitize_existing
         self._choose_folder = choose_folder or _choose_folder
@@ -167,6 +169,10 @@ class Api:
             "problem_count": 0,
             # The folder's Sources.csv, once a playlist run has one.
             "sources_csv": "",
+            # Guessed matches a finished run left to check, and in which
+            # folder - offered as "Check them" (see check_guesses).
+            "to_check": 0,
+            "checks_in": "",
         }
 
     @staticmethod
@@ -259,6 +265,43 @@ class Api:
             self._thread = threading.Thread(target=self._work_tidy, args=(folder,), daemon=True)
             self._thread.start()
         return state_snapshot
+
+    def check_guesses(self) -> dict:
+        """Put the matches a finished run guessed at to you, one by one -
+        the same questions Ask mode asks at the end of a playlist, for a run
+        that was on Auto (see pipeline.review_pending)."""
+        with self._lock:
+            folder = self._state.get("checks_in")
+            if not folder or (self._thread is not None and self._thread.is_alive()):
+                return dict(self._state)
+            self._cancel.clear()
+            self._state = self._idle_state()
+            self._state.update({"running": True, "stage": "checking", "message": "Getting ready...",
+                                "output_dir": folder})
+            state_snapshot = dict(self._state)
+            self._thread = threading.Thread(target=self._work_check, args=(folder,), daemon=True)
+            self._thread.start()
+        return state_snapshot
+
+    def _work_check(self, folder):
+        try:
+            outcome = self._review_pending(folder, on_choose=self._on_choose, on_review=self._on_review,
+                                           on_event=self._on_event, should_cancel=self._cancel.is_set)
+            left = pipeline.pending_questions(folder)
+        except BaseException as e:
+            with self._lock:
+                self._state.update(running=False, stage="error", error=str(e) or e.__class__.__name__)
+            return
+        with self._lock:
+            swapped = outcome.get("swapped") or 0
+            message = (f"Checked. {swapped} song{'' if swapped == 1 else 's'} swapped for a better upload."
+                       if swapped else "Checked.")
+            if left:
+                message += f" {left} still to check."
+            self._state.update(running=False, stage="done", percent=100, message=message,
+                               outputs=list(outcome.get("moved", {}).values()),
+                               to_check=left, checks_in=folder if left else "",
+                               cancelled=self._cancel.is_set())
 
     def is_playlist(self, url: str) -> bool:
         """Whether the page should offer to number the songs this link
@@ -803,6 +846,9 @@ class Api:
                     on_choose=self._on_choose if asking else None,
                     sanitize=sanitize != "off",
                     number=number,
+                    # A playlist in Ask mode keeps going, and puts its
+                    # questions to you at the end rather than at song 3.
+                    ask_later=asking,
                     **run_options,
                 )
         except BaseException as e:
@@ -819,6 +865,8 @@ class Api:
             self._state["outputs"] = result.get("outputs", [])
             self._state["cancelled"] = bool(result.get("cancelled"))
             self._state["sources_csv"] = result.get("sources_csv") or ""
+            self._state["to_check"] = result.get("to_check") or 0
+            self._state["checks_in"] = result.get("output_dir") or "" if result.get("to_check") else ""
             if result.get("error"):
                 self._state["stage"] = "error"
                 self._state["error"] = result["error"]
@@ -968,6 +1016,9 @@ class Api:
             overall = ((index - 1) + (percent or 0) / 100) / total * 100
             of_it = f" ({round(percent)}%)" if stage == "downloading" and percent is not None else ""
             return f"Song {index} of {total} — {event['song']}{of_it}", overall
+        if stage == "checking":
+            return (f"Checking {event['index']:,} of {event['total']:,} — {event['song']}",
+                    (event["index"] - 1) / event["total"] * 100 if event.get("total") else None)
         if stage == "offline":
             where = Api._which_song(event)
             return f"No internet - waiting to carry on{where}. It'll pick up by itself.", Api._so_far(event)

@@ -810,7 +810,8 @@ def sanitize_folder(output_dir: str) -> None:
 
 def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: bool = True,
                            review=None, renamed: dict | None = None,
-                           keep_name: bool = False, steps=None) -> list[str]:
+                           keep_name: bool = False, steps=None,
+                           deferred: list | None = None) -> list[str]:
     """Sanitize exactly the given (just-downloaded) filenames, rather than
     rescanning every mp3 already in output_dir - reprocessing/reporting on
     songs this run never touched is just noise. Duplicate detection checks
@@ -833,7 +834,9 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
     the returned names - for a caller that knows something about a
     download by the name yt-dlp gave it (its place in a playlist, say).
 
-    keep_name and steps are sanitize_file's."""
+    keep_name and steps are sanitize_file's. deferred, if given, collects
+    the unclear ends instead of resolving them in any way - see
+    pipeline.review_pending, which asks about them afterwards."""
     steps = _steps(steps)
     all_flags = []
     final_filenames = []
@@ -867,7 +870,12 @@ def sanitize_new_downloads(filenames: list[str], output_dir: str, interactive: b
     final_filenames = [f for f in final_filenames if os.path.exists(os.path.join(output_dir, f))]
 
     if all_flags:
-        if review is not None:
+        if deferred is not None:
+            # Asked about later, all together, rather than now - a long
+            # playlist that stops for each one stalls overnight. The
+            # unclear end is left exactly as it is until then.
+            deferred.extend(all_flags)
+        elif review is not None:
             review_flags(all_flags, output_dir, review)
         elif interactive:
             print(f"\n{len(all_flags)} song section(s) need your input.")

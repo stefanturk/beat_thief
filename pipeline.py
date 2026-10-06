@@ -658,7 +658,12 @@ def _resolve_one(song: dict, index, total, on_event, on_choose, cancelled,
                 f"took \"{found[0]['title']}\"."
             ),
         })
-        return described(best, True), None
+        guess = described(best, True)
+        # What else there was, so the guess can be put to somebody later
+        # (see review_pending) without searching YouTube again.
+        guess["candidates"] = [{k: c.get(k) for k in ("url", "title", "channel", "duration", "offset")}
+                               for c in youtube_match.worth_offering(found)]
+        return guess, None
 
     if cancelled():
         return None, None
@@ -839,7 +844,8 @@ def _numbered(output_dir: str, filename: str, number: int | None) -> str:
 
 
 def _tidy_fresh(fresh, output_dir, on_event, interactive, on_review, sanitize,
-                number=None, bpm=True, name=None, tags=None, steps=None) -> list[str]:
+                number=None, bpm=True, name=None, tags=None, steps=None,
+                deferred=None) -> list[str]:
     """Sanitize, tag, name for its tempo and number a song just downloaded
     into output_dir. Returns its filename(s) afterwards.
 
@@ -853,6 +859,7 @@ def _tidy_fresh(fresh, output_dir, on_event, interactive, on_review, sanitize,
                 review=on_review,
                 keep_name=bool(name),
                 steps=steps,
+                deferred=deferred,
             )
         except Exception as e:
             on_event({"stage": "warning", "message": f"Sanitizing hit a snag, but your downloads are safe: {e}"})
@@ -956,6 +963,7 @@ def run(
     steps=None,
     folder_name: str = "",
     take_listed: bool = True,
+    ask_later: bool = False,
 ) -> dict:
     """Download url into output_dir, sanitize it, and isolate the requested
     instruments. Returns a result dict describing what happened.
@@ -1104,7 +1112,11 @@ def run(
     if already and total > 1:
         on_event({"stage": "resuming", "done": already, "total": total})
 
+    # Asking later is for a playlist: one song's questions are best asked
+    # while it's the song in hand.
+    ask_later = ask_later and is_playlist and (on_choose is not None or on_review is not None)
     ctx = _Run(output_dir=output_dir, record=record, on_event=on_event, on_choose=on_choose,
+               ask_later=ask_later,
                on_review=on_review, interactive=interactive, sanitize=sanitize, number=number,
                bpm=bpm, steps=steps, own_folder=own_folder, is_playlist=is_playlist,
                wanted=wanted, cancelled=cancelled, should_cancel=should_cancel,
@@ -1231,6 +1243,18 @@ def run(
     if not is_playlist:
         _isolate_songs(result["songs"], wanted, on_event, cancelled, should_cancel, interactive, result)
 
+    if ask_later and not cancelled():
+        # The questions the run put off - every one this folder has, so a
+        # resumed run asks about the earlier part's too.
+        checked = review_pending(output_dir, on_choose, on_review, on_event, should_cancel)
+        result["songs"] = [checked["moved"].get(p, p) for p in result["songs"]]
+        result["outputs"] = [checked["moved"].get(p, p) for p in result["outputs"]]
+        result["to_check"] = pending_questions(output_dir)
+        if cancelled():
+            result["cancelled"] = True
+            on_event({"stage": "cancelled"})
+            return result
+
     if result["cancelled"]:
         return result
 
@@ -1331,8 +1355,8 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
         if total > 1:
             on_event({"stage": "resolving", "index": position, "total": total,
                       "song": song["title"]})
-        match, why_not = _resolve_one(song, position, total, on_event, ctx.on_choose, ctx.cancelled,
-                                      avoid)
+        match, why_not = _resolve_one(song, position, total, on_event,
+                                      None if ctx.ask_later else ctx.on_choose, ctx.cancelled, avoid)
         if not match:
             if not why_not:
                 return {"status": "cancelled"}
@@ -1343,7 +1367,8 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
                 return {"status": "error", "note": why_not}
             return outcome
         record.record(key, youtube_url=match["url"], youtube_title=match["title"],
-                      channel=match["channel"], check=match["guessed"])
+                      channel=match["channel"], check=match["guessed"],
+                      candidates=match.get("candidates") if match["guessed"] else [])
         track_url = match["url"]
         known_title = song["title"]
         name = file_name_for(song["title"], song["artist"])
@@ -1411,8 +1436,9 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
     # Duplicates are looked for once the song is among the others, below -
     # in the work folder it's alone.
     steps = song_sanitizer._steps(ctx.steps) - {"duplicates"}
+    deferred = [] if ctx.ask_later else None
     tidied = _tidy_fresh(fresh, where, on_event, ctx.interactive, ctx.on_review, ctx.sanitize,
-                         place, ctx.bpm, name, tags, steps)
+                         place, ctx.bpm, name, tags, steps, deferred=deferred)
     if not tidied:
         return _failed("", folder, f"Couldn't finish {known_title or track_url}")
 
@@ -1439,6 +1465,8 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
 
     history.remember(track_url, [path])
     _record_done(record, key, song, path, note="Set aside as a duplicate" if set_aside else "")
+    if deferred:
+        record.record(key, trims=[{"end": f["end"], "cut_ms": f["cut_ms"]} for f in deferred])
     if ctx.wanted and not set_aside:
         _isolate_songs([path], ctx.wanted, on_event, ctx.cancelled, ctx.should_cancel,
                        ctx.interactive, result)
@@ -1651,3 +1679,155 @@ def isolate(song_paths, instruments=(), on_event=None, should_cancel=None, inter
 
     on_event({"stage": "done", "outputs": result["outputs"]})
     return result
+
+
+def _waiting_question(entry: dict) -> bool:
+    return entry.get("status") == "done" and bool(
+        (entry.get("check") and entry.get("candidates")) or entry.get("trims"))
+
+
+def pending_questions(folder: str) -> int:
+    """How many songs in this folder have a question put off for later: a
+    guessed match with others to pick from, or an unclear start or end."""
+    return sum(1 for entry in sources.Sources(folder).songs.values() if _waiting_question(entry))
+
+
+def review_pending(folder: str, on_choose=None, on_review=None, on_event=None,
+                   should_cancel=None) -> dict:
+    """Ask the questions a playlist run put off (see run(ask_later)), one
+    song at a time: which upload is right where the run guessed, and where
+    an unclear start or end really is.
+
+    Picking a different upload replaces the song with that one, under the
+    same name and number. Each answer is written down as it's given, so
+    stopping halfway keeps every answer so far and the rest are asked next
+    time. Returns {"asked", "swapped", "moved": {old path: new path}}."""
+    if on_event is None:
+        def on_event(_event):
+            pass
+
+    def cancelled() -> bool:
+        return should_cancel is not None and should_cancel()
+
+    record = sources.Sources(folder)
+    waiting = [key for key, entry in record.songs.items() if _waiting_question(entry)]
+    outcome = {"asked": 0, "swapped": 0, "moved": {}}
+    for index, key in enumerate(waiting, start=1):
+        if cancelled():
+            break
+        entry = record.get(key)
+        path = record.finished(key)
+        if not path:
+            continue
+        on_event({"stage": "checking", "index": index, "total": len(waiting),
+                  "song": entry.get("title") or os.path.basename(path)})
+
+        if entry.get("check") and entry.get("candidates") and on_choose is not None:
+            answer = on_choose({
+                "query": entry.get("query") or entry.get("title") or "",
+                "title": entry.get("title") or "",
+                "artist": entry.get("artist") or "",
+                "want_sec": entry.get("duration_sec"),
+                "candidates": entry["candidates"],
+                "current": entry.get("youtube_url"),
+                "index": index,
+                "total": len(waiting),
+            }) or {}
+            if cancelled():
+                break
+            outcome["asked"] += 1
+            picked = answer.get("url")
+            if picked and picked != entry.get("youtube_url"):
+                new_path = _swap_upload(folder, record, key, entry, picked, path, on_event, on_review)
+                if new_path:
+                    outcome["swapped"] += 1
+                    outcome["moved"][path] = new_path
+                    path = new_path
+                    entry = record.get(key)
+            elif picked:
+                record.record(key, check=False, candidates=[])
+            else:
+                record.record(key, check=False, candidates=[],
+                              note="None of YouTube's uploads looked right - kept the best guess")
+
+        if entry.get("trims") and on_review is not None:
+            for trim in entry["trims"]:
+                if cancelled():
+                    break
+                decision = on_review({"path": path, "filename": os.path.basename(path),
+                                      "end": trim["end"], "cut_ms": trim["cut_ms"]}) or {}
+                if cancelled():
+                    break
+                outcome["asked"] += 1
+                _apply_trim(path, trim, decision)
+            else:
+                record.record(key, trims=[])
+    return outcome
+
+
+def _apply_trim(path: str, trim: dict, decision: dict) -> None:
+    """Fade (or leave) one unclear end of a finished song - keeping the
+    tempo tag, which re-encoding the audio would otherwise drop."""
+    action = "fade" if decision.get("action") == "fade" else "keep"
+    if action == "keep":
+        return
+    try:
+        cut_ms = int(decision.get("cut_ms", trim["cut_ms"]))
+        song_sanitizer.apply_review(path, trim["end"], cut_ms, action)
+        match = sources._BPM_IN_NAME.search(os.path.basename(path))
+        if match:
+            song_sanitizer.write_tempo_tag(path, match.group(1))
+        song_sanitizer._mark_as_sanitized(path)
+    except Exception as e:
+        print(f"  Could not apply the fade to {os.path.basename(path)}: {e}")
+
+
+def _swap_upload(folder, record, key, entry, url, old_path, on_event, on_review) -> str:
+    """Replace a song with a different YouTube upload of it, made the way
+    the run would have made it, and return where it ended up ("" if the
+    new one couldn't be had - the old one stays)."""
+    old_name = os.path.basename(old_path)
+    title, artist = entry.get("title") or "", entry.get("artist") or ""
+    name = file_name_for(title, artist) if entry.get("spotify_url") and title else None
+    number = entry.get("number") if _NUMBER_RE.match(old_name) else None
+    bpm = bool(sources._BPM_IN_NAME.search(old_name))
+    own_folder = os.path.dirname(old_path) != folder
+    work = os.path.join(folder, WORK_DIR_NAME)
+    try:
+        os.makedirs(work, exist_ok=True)
+        download = _Download(url, work, on_event, use_archive=False, known_title=title or None, name=name)
+        download.run()
+    except (yt_dlp.utils.DownloadError, OSError) as e:
+        on_event({"stage": "warning", "message": f"Couldn't download that one ({e}) - kept the first."})
+        return ""
+    fresh = [f for f in download.filenames if os.path.exists(os.path.join(work, f))]
+    if not fresh:
+        on_event({"stage": "warning", "message": "Couldn't download that one - kept the first."})
+        return ""
+    # Somebody is here answering, so an unclear end is asked about now.
+    tidied = _tidy_fresh(fresh, work, on_event, False, on_review, True, number, bpm, name,
+                         (title, artist) if name else None)
+    if not tidied:
+        return ""
+    try:
+        new_path = _place(os.path.join(work, tidied[0]), folder, key, record, own_folder)
+    except OSError as e:
+        on_event({"stage": "warning", "message": f"Couldn't save the new one ({e}) - kept the first."})
+        return ""
+    if new_path != old_path:
+        try:
+            os.remove(old_path)
+            old_dir = os.path.dirname(old_path)
+            if own_folder and old_dir != os.path.dirname(new_path) and not os.listdir(old_dir):
+                os.rmdir(old_dir)
+        except OSError:
+            pass
+    chosen = next((c for c in entry.get("candidates") or [] if c.get("url") == url), {})
+    record.record(key, file=new_path, youtube_url=url, youtube_title=chosen.get("title", ""),
+                  channel=chosen.get("channel", ""), check=False, candidates=[], trims=[])
+    history.remember(url, [new_path])
+    try:
+        os.rmdir(work)
+    except OSError:
+        pass
+    return new_path
