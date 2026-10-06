@@ -19,15 +19,19 @@ default. The terminal front end keeps both prompts."""
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import threading
+import time
 
 import audition
 import beat_loop
 import instrument_isolator
 import pipeline
 import pulse
+import sources
 
 UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
 
@@ -41,6 +45,66 @@ WINDOW_SIZE = (560, 760)
 # output goes straight into a DAW, it's the more natural home anyway.
 # How many of a run's problems the page keeps to show.
 MAX_PROBLEMS = 50
+
+# A playlist that was still going when the app quit, crashed or lost its
+# power - so the next launch can offer to carry on with it (see
+# Api.unfinished). Beside history.json, in Application Support.
+RUN_STATE_PATH = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
+                              "Beat Thief", "unfinished_run.json")
+# How often (in songs) the saved progress is brought up to date. It's only
+# for the banner's "stopped at": the folder's own record is what resumes.
+RUN_STATE_EVERY = 10
+
+# Whether a run holds off idle sleep (see _keep_awake). Off in tests.
+KEEP_AWAKE = True
+
+
+def _keep_awake():
+    """Hold off idle sleep for as long as this app is running a job -
+    `caffeinate -i -w <this process>`, so even a crash lets the Mac sleep
+    again. A closed lid still sleeps; a run picks up after it wakes."""
+    if not KEEP_AWAKE or not shutil.which("caffeinate"):
+        return None
+    try:
+        return subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+
+
+def _let_sleep(process) -> None:
+    if process is not None:
+        try:
+            process.terminate()
+        except OSError:
+            pass
+
+
+def _save_run(state: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(RUN_STATE_PATH), exist_ok=True)
+        tmp = RUN_STATE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+        os.replace(tmp, RUN_STATE_PATH)
+    except OSError:
+        pass
+
+
+def _load_run() -> dict | None:
+    try:
+        with open(RUN_STATE_PATH, encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return state if isinstance(state, dict) and state.get("url") else None
+
+
+def _forget_run() -> None:
+    try:
+        os.remove(RUN_STATE_PATH)
+    except OSError:
+        pass
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Music", "Beat Thief")
 
@@ -73,6 +137,10 @@ class Api:
         # obvious: the worker blocks, the page answers through resolve_match.
         self._choice_answered = threading.Event()
         self._choice_decision = None
+        # The link and options of the run in hand, and - once it turns out
+        # to be a playlist - what's saved about it for the next launch.
+        self._started = None
+        self._saved = None
 
     @staticmethod
     def _idle_state() -> dict:
@@ -161,6 +229,8 @@ class Api:
             self._state = self._idle_state()
             self._state.update({"running": True, "stage": "starting", "message": "Getting ready..."})
             state_snapshot = dict(self._state)
+            self._started = None if song else {"url": url, "options": dict(options)}
+            self._saved = None
 
         output_dir = options.get("output_dir") or DEFAULT_OUTPUT
 
@@ -229,6 +299,70 @@ class Api:
             return False
         subprocess.run(["open", path] if os.path.isdir(path) else ["open", "-R", path], check=False)
         return True
+
+    def unfinished(self) -> dict | None:
+        """The playlist a run was still working through when the app last
+        quit, crashed or lost power - {"name", "done", "total"} - or None.
+
+        How far it got is counted from the playlist folder's own record, so
+        it's right however the run ended. A folder that's gone (an external
+        drive not plugged in) isn't offered: there'd be nowhere to carry
+        on into."""
+        with self._lock:
+            if self._state.get("running"):
+                return None
+        saved = _load_run()
+        if not saved or not os.path.isdir(saved.get("folder") or ""):
+            return None
+        record = sources.Sources(saved["folder"])
+        done = sum(1 for key in record.songs if record.finished(key))
+        total = saved.get("total") or 0
+        if total and done >= total:
+            _forget_run()
+            return None
+        return {"name": saved.get("name") or os.path.basename(saved["folder"]),
+                "done": done, "total": total}
+
+    def resume_unfinished(self) -> dict:
+        """Carry on with unfinished(): the same link (or the same pasted
+        list) with the same options, which skips every song already done."""
+        saved = _load_run()
+        if not saved:
+            return self._fail("There's nothing to carry on with.")
+        return self.start(saved["url"], dict(saved.get("options") or {}))
+
+    def forget_unfinished(self) -> bool:
+        _forget_run()
+        return True
+
+    def quit_warning(self) -> str:
+        """What to say when the window is closed mid-run, or "" if nothing's
+        running. A playlist says where it got to and that it'll pick up."""
+        with self._lock:
+            state = dict(self._state)
+        if not state.get("running"):
+            return ""
+        index, total = state.get("index"), state.get("total")
+        if index and total and total > 1:
+            return (f"Beat Thief is on song {index:,} of {total:,}. Quit anyway? "
+                    "Everything finished is saved, and it'll offer to carry on next time.")
+        return "Beat Thief is still working. Quit anyway?"
+
+    def _remember_progress(self, event) -> None:
+        """Keep the saved run (RUN_STATE_PATH) and the quit warning up to
+        date as a playlist goes."""
+        stage = event["stage"]
+        if stage == "folder" and self._started:
+            self._saved = dict(self._started, folder=event["output_dir"], name=event.get("name"),
+                               total=event.get("total"), done=0, started=time.time())
+            _save_run(self._saved)
+        index, total = event.get("index"), event.get("total") or event.get("queue_total")
+        if index and total and stage in ("resolving", "found", "offline", "blocked", "disk-full"):
+            with self._lock:
+                self._state["index"], self._state["total"] = index, total
+            if self._saved and index % RUN_STATE_EVERY == 0 and self._saved.get("done") != index - 1:
+                self._saved["done"] = index - 1
+                _save_run(self._saved)
 
     def open_file(self, path: str) -> bool:
         """Open a file in whatever opens it - Sources.csv in Numbers."""
@@ -628,7 +762,20 @@ class Api:
             self._state["choice"] = None
         return decision
 
-    def _work(self, url, output_dir, instruments, song="", number=False, run_options=None):
+    def _work(self, *args, **kwargs):
+        """A run, with the Mac kept awake for it - and, once it's over, the
+        saved playlist forgotten if it got all the way through."""
+        awake = _keep_awake()
+        try:
+            self._do_work(*args, **kwargs)
+        finally:
+            _let_sleep(awake)
+        with self._lock:
+            stage = self._state.get("stage")
+        if self._saved and stage in ("done", "too-long"):
+            _forget_run()
+
+    def _do_work(self, url, output_dir, instruments, song="", number=False, run_options=None):
         run_options = dict(run_options or {})
         sanitize = run_options.pop("sanitize", "auto")
         # Ask puts every doubt to the page - which recording, where the song
@@ -698,6 +845,13 @@ class Api:
                 self._state["message"] = self._done_message(result, bool(song))
 
     def _work_tidy(self, folder):
+        awake = _keep_awake()
+        try:
+            self._do_work_tidy(folder)
+        finally:
+            _let_sleep(awake)
+
+    def _do_work_tidy(self, folder):
         try:
             result = self._sanitize_existing(
                 folder,
@@ -753,6 +907,7 @@ class Api:
 
     def _on_event(self, event):
         stage = event["stage"]
+        self._remember_progress(event)
         message, percent = self._describe(event)
         with self._lock:
             if message is not None:
@@ -894,7 +1049,7 @@ def main() -> None:
     _name_the_menu_bar()
 
     api = Api()
-    webview.create_window(
+    window = webview.create_window(
         APP_NAME,
         UI_FILE,
         js_api=api,
@@ -902,7 +1057,25 @@ def main() -> None:
         height=WINDOW_SIZE[1],
         min_size=(420, 520),
     )
+    window.events.closing += lambda: _may_close(api)
     webview.start()
+
+
+def _may_close(api) -> bool:
+    """Asked as the window closes: False keeps it open. Mid-run, closing
+    is checked with whoever's closing it - a 5,000-song playlist shouldn't
+    stop because of a stray ⌘Q, though it would carry on next time.
+
+    Called on the main thread, where pywebview's own confirmation dialog
+    would wait on the main thread forever, so the alert is put up directly."""
+    warning = api.quit_warning()
+    if not warning:
+        return True
+    try:
+        from webview.platforms.cocoa import BrowserView
+        return bool(BrowserView.display_confirmation_dialog("Quit", "Keep going", warning))
+    except Exception:
+        return True
 
 
 if __name__ == "__main__":

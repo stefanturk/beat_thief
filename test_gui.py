@@ -18,6 +18,27 @@ import beat_writer
 import gui
 
 
+_module_patches = []
+
+
+def setUpModule():
+    # Every run started here would otherwise hold the real Mac awake, and
+    # a playlist run would write the real "carry on with this" file that
+    # the app offers on its next launch.
+    scratch = tempfile.mkdtemp()
+    _module_patches.extend([
+        mock.patch("gui.KEEP_AWAKE", False),
+        mock.patch("gui.RUN_STATE_PATH", os.path.join(scratch, "unfinished_run.json")),
+    ])
+    for patch in _module_patches:
+        patch.start()
+
+
+def tearDownModule():
+    for patch in _module_patches:
+        patch.stop()
+
+
 def _wait_until(predicate, timeout=2.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -1561,3 +1582,112 @@ class TestALongRunSaysWhatsHappening(unittest.TestCase):
         for needed in ('id="problems"', 'id="problems-list"', 'id="open-sources"',
                        "state.problem_count", "state.sources_csv"):
             self.assertIn(needed, html)
+
+
+class TestAPlaylistSurvivesTheAppGoingAway(unittest.TestCase):
+    """Quit, crashed or out of battery mid-playlist: the next launch offers
+    to carry on, the Mac stays awake while it works, and a stray ⌘Q asks
+    first."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.folder = os.path.join(self.tmp, "Eighties")
+        os.makedirs(self.folder)
+
+    def _playlist_run(self, finish=True, songs_done=2, total=5, url="https://open.spotify.com/playlist/x"):
+        def pipeline(link, on_event=None, **kwargs):
+            on_event({"stage": "folder", "output_dir": self.folder, "name": "Eighties", "total": total})
+            record = gui.sources.Sources(self.folder)
+            for n in range(1, songs_done + 1):
+                path = os.path.join(self.folder, f"Song {n}.mp3")
+                with open(path, "wb") as f:
+                    f.write(b"mp3")
+                record.record(f"spotify:{n}", status="done", file=path)
+                on_event({"stage": "found", "index": n, "queue_total": total, "song": f"Song {n}"})
+            if not finish:
+                raise SystemExit("the power went")
+            return {"outputs": [], "songs": [], "total": total, "finished": songs_done}
+
+        api = gui.Api(run_pipeline=pipeline)
+        api.start(url, {"song": True, "sanitize": "ask", "folder_name": "Eighties"})
+        _wait_until(lambda: not api.status()["running"])
+        return api
+
+    def test_a_run_that_stopped_partway_is_offered_next_launch(self):
+        self._playlist_run(finish=False)
+        offered = gui.Api().unfinished()
+        self.assertEqual(offered, {"name": "Eighties", "done": 2, "total": 5})
+
+    def test_resuming_starts_the_same_link_with_the_same_options(self):
+        self._playlist_run(finish=False)
+        calls = {}
+        api = gui.Api(run_pipeline=lambda url, **k: calls.update(k, url=url) or {"outputs": []})
+        api.resume_unfinished()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(calls["url"], "https://open.spotify.com/playlist/x")
+        self.assertEqual(calls["folder_name"], "Eighties")
+        self.assertIsNotNone(calls["on_choose"])   # still Ask
+
+    def test_a_finished_playlist_is_not_offered(self):
+        self._playlist_run(finish=True, songs_done=5, total=5)
+        self.assertIsNone(gui.Api().unfinished())
+        self.assertFalse(os.path.exists(gui.RUN_STATE_PATH))
+
+    def test_forgetting_it_stops_the_offer(self):
+        self._playlist_run(finish=False)
+        api = gui.Api()
+        api.forget_unfinished()
+        self.assertIsNone(api.unfinished())
+
+    def test_a_folder_that_isnt_there_is_not_offered(self):
+        self._playlist_run(finish=False)
+        shutil.rmtree(self.folder)
+        self.assertIsNone(gui.Api().unfinished())
+
+    def test_a_single_song_is_never_saved_for_later(self):
+        gui._forget_run()
+        api = gui.Api(run_pipeline=lambda url, **k: {"outputs": []})
+        api.start("https://youtu.be/x", {"song": True})
+        _wait_until(lambda: not api.status()["running"])
+        self.assertFalse(os.path.exists(gui.RUN_STATE_PATH))
+
+    def test_the_mac_is_kept_awake_while_working_and_let_go_after(self):
+        process = mock.Mock()
+        with mock.patch("gui.KEEP_AWAKE", True), \
+             mock.patch("shutil.which", return_value="/usr/bin/caffeinate"), \
+             mock.patch("subprocess.Popen", return_value=process) as popen:
+            api = gui.Api(run_pipeline=lambda url, **k: {"outputs": []})
+            api.start("https://youtu.be/x", {"song": True})
+            _wait_until(lambda: not api.status()["running"])
+            _wait_until(lambda: process.terminate.called)
+        args = popen.call_args.args[0]
+        self.assertEqual(args[:3], ["caffeinate", "-i", "-w"])
+        self.assertEqual(args[3], str(os.getpid()))
+        process.terminate.assert_called_once()
+
+    def test_closing_mid_playlist_says_where_it_got_to(self):
+        release = threading.Event()
+
+        def pipeline(link, on_event=None, **kwargs):
+            on_event({"stage": "found", "index": 1214, "queue_total": 4870, "song": "x"})
+            release.wait(2)
+            return {"outputs": []}
+
+        api = gui.Api(run_pipeline=pipeline)
+        api.start("https://open.spotify.com/playlist/x", {"song": True})
+        _wait_until(lambda: api.status().get("index") == 1214)
+        self.assertIn("song 1,214 of 4,870", api.quit_warning())
+        release.set()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(api.quit_warning(), "")
+        self.assertTrue(gui._may_close(api))
+
+    def test_the_page_offers_to_resume_on_launch(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        for needed in ('id="resume"', "api.unfinished()", "api.resume_unfinished()",
+                       "api.forget_unfinished()"):
+            self.assertIn(needed, html)
+        launch = html[html.index('addEventListener("pywebviewready"'):]
+        self.assertIn("offerResume()", launch[:400])

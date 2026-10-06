@@ -168,6 +168,24 @@
   .label-row { display: flex; align-items: baseline; justify-content: space-between; }
   .howto-open { font-size: 11px; }
 
+  .resume {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 18px; padding: 9px 10px 9px 14px;
+    background: var(--raised); border: 1px solid var(--edge); border-left: 3px solid var(--violet);
+    border-radius: var(--radius); font-size: 12.5px; color: var(--dim);
+  }
+  .resume[hidden] { display: none; }
+  .resume-text { flex: 1; min-width: 0; }
+  .resume-text strong { color: var(--ink); font-weight: 500; }
+  .resume-go {
+    padding: 5px 12px; border-radius: 6px; border: none; cursor: pointer;
+    background: var(--violet); color: #15131c; font: inherit; font-weight: 600; font-size: 12px;
+  }
+  .resume-forget {
+    background: none; border: none; color: var(--dim); cursor: pointer; font-size: 13px; padding: 2px 4px;
+  }
+  .resume-forget:hover { color: var(--ink); }
+
   /* Off · Auto · Ask, small enough to sit in the Song row. */
   .sanitize { position: relative; display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--dim); }
   .sanitize[data-off="true"] { opacity: 0.4; }
@@ -767,6 +785,17 @@
   </header>
 
   <main>
+    <!--
+      A playlist the app was still working through when it last quit,
+      crashed or lost power (see Api.unfinished). One click carries on;
+      nothing starts by itself.
+    -->
+    <div class="resume" id="resume" hidden>
+      <span class="resume-text" id="resume-text"></span>
+      <button class="resume-go" id="resume-go" type="button">Resume</button>
+      <button class="resume-forget" id="resume-forget" type="button" title="Don't offer this again" aria-label="Don't offer this again">✕</button>
+    </div>
+
     <section>
       <div class="label-row">
         <p class="label">Link</p>
@@ -2612,6 +2641,7 @@
     options.number = !el("number-wrap").hidden && el("number").checked;
     if (pastedText) options.folder_name = el("folder-name").value.trim();
     el("howto").hidden = true;
+    el("resume").hidden = true;
     delete el("howto").dataset.shownFor;
 
     // Neither Beat nor Midi is something a run can produce - both need you
@@ -2955,7 +2985,35 @@
     else nudgeStart(direction);
   });
 
+  // The playlist that was still going when the app last closed.
+  function offerResume() {
+    window.pywebview.api.unfinished().then((left) => {
+      el("resume").hidden = !left;
+      if (!left) return;
+      const name = document.createElement("strong");
+      name.textContent = left.name;
+      const where = left.total
+        ? " stopped at " + left.done.toLocaleString() + " of " + left.total.toLocaleString() + " songs."
+        : " didn't finish.";
+      el("resume-text").replaceChildren(name, document.createTextNode(where));
+    }).catch(() => { el("resume").hidden = true; });
+  }
+
+  el("resume-go").addEventListener("click", () => {
+    el("resume").hidden = true;
+    lastStage = null;
+    window.pywebview.api.resume_unfinished().then((state) => {
+      render(state);
+      if (state.running && !polling) polling = setInterval(poll, 250);
+    }).catch(complain);
+  });
+  el("resume-forget").addEventListener("click", () => {
+    el("resume").hidden = true;
+    window.pywebview.api.forget_unfinished();
+  });
+
   window.addEventListener("pywebviewready", () => {
+    offerResume();
     poll();
     // Song armed, nothing green, nothing selected - the state a pasted
     // link starts from.

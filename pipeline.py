@@ -1095,6 +1095,11 @@ def run(
     record = sources.Sources(output_dir)
 
     total = len(queue)
+    if is_playlist:
+        # Where this playlist is going - for an app that offers to carry on
+        # with it after a crash or a quit.
+        on_event({"stage": "folder", "output_dir": output_dir,
+                  "name": os.path.basename(output_dir), "total": total})
     already = sum(1 for song in queue if record.finished(_key(song)))
     if already and total > 1:
         on_event({"stage": "resuming", "done": already, "total": total})
