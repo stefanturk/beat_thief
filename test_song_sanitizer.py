@@ -165,6 +165,28 @@ class TestFindDuplicatePairs(unittest.TestCase):
         files = ["Song One - Artist.mp3", "Song Two - Other Artist.mp3"]
         self.assertEqual(sanitizer.find_duplicate_pairs(files), [])
 
+    def test_against_only_pairs_that_include_a_new_song(self):
+        # The two old copies were already dealt with when they arrived; a
+        # new song is only checked against what's there.
+        files = ["Old Song - Artist.mp3", "Old Song  - Artist.mp3",
+                 "New Song - Band.mp3", "New Song - Band!.mp3"]
+        pairs = sanitizer.find_duplicate_pairs(files, against=["New Song - Band.mp3"])
+        self.assertEqual(pairs, [("New Song - Band.mp3", "New Song - Band!.mp3")])
+
+    def test_against_nothing_new_finds_nothing(self):
+        files = ["Song Name - Artist.mp3", "Song Name  - Artist.mp3"]
+        self.assertEqual(sanitizer.find_duplicate_pairs(files, against=[]), [])
+
+    def test_one_new_song_in_a_big_folder_is_quick(self):
+        import random, string, time
+        rng = random.Random(1)
+        words = lambda: " ".join("".join(rng.choices(string.ascii_lowercase, k=rng.randint(3, 9)))
+                                 for _ in range(4))
+        files = [words() + ".mp3" for _ in range(5000)]
+        started = time.monotonic()
+        sanitizer.find_duplicate_pairs(files, against=[files[-1]])
+        self.assertLess(time.monotonic() - started, 2.0)
+
 
 class TestAnalyzeCutCandidates(unittest.TestCase):
     def test_detects_silent_intro(self):

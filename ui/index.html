@@ -186,9 +186,12 @@
   .seg-small button.on { position: relative; border-color: var(--violet); color: var(--violet); background: var(--violet-dim); }
   .seg-small button:disabled { cursor: default; }
   .gear {
-    padding: 0 2px; background: none; border: none; color: var(--dim);
-    font-size: 13px; line-height: 1; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px; margin: -6px 0; padding: 0;
+    background: none; border: none; border-radius: 50%; color: var(--dim);
+    line-height: 0; cursor: pointer;
   }
+  .gear:hover:not(:disabled) { background: var(--raised); }
   .gear:hover, .gear[aria-expanded="true"] { color: var(--violet); }
   .gear:disabled { cursor: default; }
   .steps-pop {
@@ -814,7 +817,7 @@
             <span class="seg seg-small" id="sanitize-mode" role="radiogroup" aria-label="Sanitize">
               <button type="button" data-mode="off" title="Keep each song exactly as downloaded.">Off</button><button type="button" data-mode="auto" class="on" title="Tidy each song using the best guess, and never stop to ask.">Auto</button><button type="button" data-mode="ask" title="Tidy each song, and ask when it isn't sure: which recording, where the song starts.">Ask</button>
             </span>
-            <button type="button" class="gear" id="sanitize-gear" title="Which parts of sanitizing to do" aria-expanded="false">⚙</button>
+            <button type="button" class="gear" id="sanitize-gear" title="Which parts of sanitizing to do" aria-expanded="false" aria-label="Sanitize settings"><svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></button>
             <span class="steps-pop" id="sanitize-steps" hidden>
               <label><input type="checkbox" data-step="trim" checked> Trim silence &amp; intros</label>
               <label><input type="checkbox" data-step="volume" checked> Even out volume</label>
