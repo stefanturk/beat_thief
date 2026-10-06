@@ -2022,3 +2022,129 @@ class TestAWholeSongOrNothing(unittest.TestCase):
         record.record("spotify:x", status="done", file=os.path.join(folder, "Song.mp3"))
         self.assertEqual(record.finished("spotify:x"), "")
         self.assertEqual(record.owner(os.path.join(folder, "Song.mp3")), "spotify:x")
+
+
+class TestAskingAtTheEnd(PipelineTestCase):
+    """Ask mode on a playlist keeps going and puts its questions at the
+    end - an overnight run used to stall at the first unclear song."""
+
+    PLAYLIST = "https://open.spotify.com/playlist/4jFldPjGeA3jiOj6U6PaIW"
+    TITLES = ("One", "Two", "Three")
+
+    def _song(self, title, n):
+        return {"title": title, "artist": "Someone", "duration_sec": 200.0,
+                "query": f"Someone {title}", "id": chr(64 + n) * 22}
+
+    def _unsure(self, query, want_sec):
+        title = query.split(" ", 1)[1]
+        return [{"url": f"https://www.youtube.com/watch?v={title}{n}", "title": f"{title} {label}",
+                 "channel": "Someone", "duration": want_sec + 3.0, "offset": 3.0}
+                for n, label in enumerate(("Official Video", "2022 Remaster"))]
+
+    def _play(self, on_choose=None, on_review=None, **kwargs):
+        self.order = []
+        real_download = _FakeYoutubeDL.download
+
+        def download(self_, urls):
+            self.order.append(("download", urls[0].rsplit("=", 1)[1]))
+            return real_download(self_, urls)
+
+        def choose(request):
+            self.order.append(("ask", request["title"]))
+            return on_choose(request) if on_choose else {"url": request["candidates"][0]["url"]}
+
+        songs = [self._song(t, n) for n, t in enumerate(self.TITLES, start=1)]
+        with mock.patch("spotify.collection", return_value={"name": "Misco", "songs": songs}), \
+             mock.patch("youtube_match.candidates", side_effect=self._unsure), \
+             mock.patch.object(_FakeYoutubeDL, "download", download):
+            return pipeline.run(self.PLAYLIST, output_dir=self.tmp_dir, on_event=self.events.append,
+                                on_choose=choose, on_review=on_review, ask_later=True, **kwargs)
+
+    def _record(self, result):
+        return pipeline.sources.Sources(result["output_dir"])
+
+    def test_every_song_is_downloaded_before_anything_is_asked(self):
+        self._play()
+        kinds = [kind for kind, _ in self.order]
+        self.assertEqual(kinds, ["download"] * 3 + ["ask"] * 3)
+
+    def test_keeping_the_guess_clears_the_question(self):
+        result = self._play()
+        self.assertEqual(result["to_check"], 0)
+        entry = self._record(result).get("spotify:" + "A" * 22)
+        self.assertFalse(entry["check"])
+        self.assertEqual(entry["youtube_url"], "https://www.youtube.com/watch?v=One0")
+
+    def test_picking_another_upload_swaps_the_song_for_it(self):
+        def second(request):
+            return {"url": request["candidates"][1]["url"]}
+
+        result = self._play(on_choose=second)
+        self.assertIn(("download", "One1"), self.order)
+        entry = self._record(result).get("spotify:" + "A" * 22)
+        self.assertEqual(entry["youtube_url"], "https://www.youtube.com/watch?v=One1")
+        self.assertEqual(entry["youtube_title"], "One 2022 Remaster")
+        self.assertEqual(sorted(f for f in os.listdir(result["output_dir"]) if f.endswith(".mp3")),
+                         ["One - Someone.mp3", "Three - Someone.mp3", "Two - Someone.mp3"])
+        self.assertEqual(history.url_for(os.path.join(result["output_dir"], "One - Someone.mp3")),
+                         "https://www.youtube.com/watch?v=One1")
+
+    def test_none_of_these_keeps_the_guess_and_says_so(self):
+        result = self._play(on_choose=lambda request: {"url": None})
+        entry = self._record(result).get("spotify:" + "B" * 22)
+        self.assertFalse(entry["check"])
+        self.assertIn("best guess", entry["note"])
+        self.assertEqual(len(result["songs"]), 3)
+
+    def test_stopping_during_the_questions_keeps_them_for_next_time(self):
+        stop = []
+
+        def stop_at_the_second(request):
+            if request["index"] == 2:
+                stop.append(True)
+            return {"url": request["candidates"][0]["url"]}
+
+        result = self._play(on_choose=stop_at_the_second, should_cancel=lambda: bool(stop))
+        self.assertTrue(result["cancelled"])
+        self.assertEqual(pipeline.pending_questions(result["output_dir"]), 2)
+
+    def test_an_unclear_end_is_left_alone_then_asked_about(self):
+        def tidy(filenames, output_dir, deferred=None, **_):
+            if deferred is not None:
+                deferred.append({"filename": filenames[0], "end": "start", "cut_ms": 4000})
+            return list(filenames)
+
+        self.mock_sanitize.side_effect = tidy
+        reviews = []
+
+        def review(flag):
+            reviews.append((os.path.basename(flag["path"]), flag["end"], flag["cut_ms"]))
+            return {"action": "fade", "cut_ms": 3500}
+
+        with mock.patch("song_sanitizer.apply_review") as applied, \
+             mock.patch("song_sanitizer._mark_as_sanitized"):
+            result = self._play(on_review=review)
+        self.assertEqual(reviews[0], ("One - Someone.mp3", "start", 4000))
+        self.assertEqual(len(reviews), 3)
+        applied.assert_any_call(os.path.join(result["output_dir"], "One - Someone.mp3"), "start", 3500, "fade")
+        self.assertEqual(self._record(result).get("spotify:" + "A" * 22)["trims"], [])
+
+    def test_one_song_is_still_asked_about_while_its_the_song_in_hand(self):
+        song = {"title": "One", "artist": "Someone", "duration_sec": 200.0, "query": "Someone One"}
+        asked = []
+        with mock.patch("spotify.track", return_value=song), \
+             mock.patch("youtube_match.candidates", side_effect=self._unsure):
+            pipeline.run("https://open.spotify.com/track/" + "A" * 22, output_dir=self.tmp_dir,
+                         on_choose=lambda r: asked.append(len(_FakeYoutubeDL.downloads)) or
+                         {"url": r["candidates"][0]["url"]}, ask_later=True)
+        self.assertEqual(asked, [0])
+
+    def test_a_guess_on_auto_keeps_what_else_there_was(self):
+        songs = [self._song(t, n) for n, t in enumerate(self.TITLES, start=1)]
+        with mock.patch("spotify.collection", return_value={"name": "Misco", "songs": songs}), \
+             mock.patch("youtube_match.candidates", side_effect=self._unsure):
+            result = pipeline.run(self.PLAYLIST, output_dir=self.tmp_dir)
+        self.assertEqual(result["to_check"], 3)
+        self.assertEqual(pipeline.pending_questions(result["output_dir"]), 3)
+        entry = self._record(result).get("spotify:" + "A" * 22)
+        self.assertEqual([c["title"] for c in entry["candidates"]], ["One Official Video", "One 2022 Remaster"])

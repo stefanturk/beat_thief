@@ -935,6 +935,7 @@
           <summary id="problems-count"></summary>
           <ul id="problems-list"></ul>
         </details>
+        <button class="text-button" id="check-guesses" type="button" hidden></button>
         <button class="text-button" id="open-sources" type="button" hidden>Open Sources.csv</button>
       </div>
     </section>
@@ -1120,7 +1121,10 @@
     }
     el("open-sources").dataset.path = state.sources_csv || "";
     el("open-sources").hidden = !(state.sources_csv && !state.running);
-    el("after").hidden = el("problems").hidden && el("open-sources").hidden;
+    const toCheck = state.to_check || 0;
+    el("check-guesses").hidden = !(toCheck && state.checks_in && !state.running);
+    el("check-guesses").textContent = toCheck === 1 ? "Check the 1 guess" : "Check the " + toCheck.toLocaleString() + " guesses";
+    el("after").hidden = el("problems").hidden && el("open-sources").hidden && el("check-guesses").hidden;
   }
 
   // Songs are listed rather than loose files so "go back for another stem"
@@ -2553,6 +2557,8 @@
         off.textContent = "  (" + (c.offset < 1 ? "spot on" : "±" + Math.round(c.offset) + "s") + ")";
         meta.appendChild(off);
       }
+      // Asked after the run: this one's the guess already in the folder.
+      if (choice.current && c.url === choice.current) meta.appendChild(document.createTextNode(" · in use now"));
       button.appendChild(meta);
 
       button.addEventListener("click", () => {
@@ -2869,6 +2875,13 @@
     el("howto").hidden = false;
   }
 
+  el("check-guesses").addEventListener("click", () => {
+    lastStage = null;
+    window.pywebview.api.check_guesses().then((state) => {
+      render(state);
+      if (state.running && !polling) polling = setInterval(poll, 250);
+    }).catch(complain);
+  });
   el("open-sources").addEventListener("click", () => {
     const path = el("open-sources").dataset.path;
     if (path) window.pywebview.api.open_file(path);
