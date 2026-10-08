@@ -1,11 +1,9 @@
-yt-dlp
+yt-dlp[default]
 pydub
 mutagen
-demucs
-torch<2.6
-torchaudio<2.6
 soundfile
 librosa
 scipy
+numpy<2
 pretty_midi
 pywebview

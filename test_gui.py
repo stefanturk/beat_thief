@@ -29,6 +29,8 @@ def setUpModule():
     _module_patches.extend([
         mock.patch("gui.KEEP_AWAKE", False),
         mock.patch("gui.RUN_STATE_PATH", os.path.join(scratch, "unfinished_run.json")),
+        # Whatever this Mac has installed: the tests below arm stems.
+        mock.patch("instrument_isolator.splitter_installed", return_value=True),
     ])
     for patch in _module_patches:
         patch.start()
@@ -325,6 +327,46 @@ class TestApiStart(unittest.TestCase):
         release.set()
         _wait_until(lambda: not api.status()["running"])
         self.assertEqual(runs, ["https://example.com/first"])
+
+
+class TestSongsOnly(unittest.TestCase):
+    """setup.sh can leave the instrument splitter out. Songs still have to
+    download, and nothing armed from before may turn into a crash."""
+
+    def test_the_page_can_ask(self):
+        with mock.patch("instrument_isolator.splitter_installed", return_value=False):
+            self.assertFalse(gui.Api().splitter_installed())
+
+    def test_stems_armed_without_the_splitter_are_dropped_and_the_song_still_comes(self):
+        calls = {}
+        api = gui.Api(run_pipeline=lambda url, **k: calls.update(k) or {"outputs": []})
+        with mock.patch("instrument_isolator.splitter_installed", return_value=False):
+            api.start("https://example.com/song", {"song": True, "drums": True})
+            _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["instruments"], [])
+
+    def test_stems_from_a_stash_song_say_what_is_missing(self):
+        api = gui.Api(isolate_pipeline=lambda *a, **k: self.fail("can't split"))
+        with mock.patch("instrument_isolator.splitter_installed", return_value=False):
+            state = api.start("", {"source": "/songs/Track/Track.mp3", "bass": True})
+
+        self.assertIn("setup", state["error"])
+
+    def test_the_app_starts_with_no_torch_or_demucs(self):
+        # In a fresh interpreter, so modules this one already imported
+        # don't hide an import of torch that would fail on a songs-only Mac.
+        import subprocess
+        import sys
+        code = ("import sys\n"
+                "for name in ('torch', 'torchaudio', 'demucs'): sys.modules[name] = None\n"
+                "import gui, pipeline, instrument_isolator\n"
+                "import importlib.util as u; u.find_spec = lambda name, *a: None\n"
+                "instrument_isolator._splitter_installed = None\n"
+                "assert not instrument_isolator.splitter_installed()\n")
+        result = subprocess.run([sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
 
 
 class TestApiStatus(unittest.TestCase):

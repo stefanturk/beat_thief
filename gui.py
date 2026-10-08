@@ -225,6 +225,12 @@ class Api:
         number = options.get("number") is True
 
         instruments = [name for name in pipeline.INSTRUMENT_ORDER if options.get(name)]
+        # The page greys the squares out on a songs-only install, but a run
+        # saved before then (the resume banner) can still carry them.
+        if instruments and not instrument_isolator.splitter_installed():
+            if song:
+                return self._fail("Splitting into instruments isn't installed. Run setup again and say yes to add it.")
+            instruments = []
         if song and not instruments:
             return self._fail("Nothing armed - pick what to take.")
 
@@ -302,6 +308,10 @@ class Api:
                                outputs=list(outcome.get("moved", {}).values()),
                                to_check=left, checks_in=folder if left else "",
                                cancelled=self._cancel.is_set())
+
+    def splitter_installed(self) -> bool:
+        """Whether stems can be made here - False after a songs-only setup."""
+        return instrument_isolator.splitter_installed()
 
     def is_playlist(self, url: str) -> bool:
         """Whether the page should offer to number the songs this link
@@ -1077,7 +1087,7 @@ def _name_the_menu_bar() -> None:
     """Make the macOS menu bar say "Beat Thief" rather than "Python".
 
     The menu bar takes its name from the running executable's bundle, and
-    that executable is /usr/bin/python3 - so it reads "Python" no matter what
+    that executable is the app's python3 - so it reads "Python" no matter what
     the .app around it is called. Overwriting the loaded bundle's info
     dictionary before AppKit builds the menu is the standard way to fix this
     for a Python app; there's no supported API for it. Failing is harmless,

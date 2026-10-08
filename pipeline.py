@@ -1045,7 +1045,7 @@ def run(
     if shutil.which("ffmpeg") is None:
         message = (
             "ffmpeg isn't installed (or isn't on this app's PATH), so downloads "
-            "can't be converted to mp3. Install it with: brew install ffmpeg"
+            "can't be converted to mp3. Run setup.sh again to put it back."
         )
         on_event({"stage": "error", "message": message})
         result["error"] = message

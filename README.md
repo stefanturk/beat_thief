@@ -4,21 +4,25 @@ Download all songs from a YouTube Music (or YouTube) playlist as MP3s.
 
 ## Setup
 
-1. Install ffmpeg (required for MP3 conversion):
-   ```
-   brew install ffmpeg
-   ```
-2. Install Python dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
+`./setup.sh` does all of it, on any Mac from the last several years —
+Intel on macOS 10.15 or later, Apple Silicon on macOS 12 or later. No
+Homebrew and no password: it downloads its own Python 3.12 and ffmpeg into
+`~/Library/Application Support/Beat Thief`, checks each download against a
+pinned SHA-256, installs the packages into that Python, and builds the app.
+
+It asks one question: whether to install the **instrument splitter** too
+(torch and demucs — stems, beat loops, MIDI). That's another 2GB. Say no
+and Beat Thief still downloads, tidies and names songs with their tempo;
+the stem squares in the window are greyed out. Run `./setup.sh` again any
+time and say yes to add it. `--songs-only` and `--with-splitter` skip the
+question.
 
 ### Giving it to someone else
 
-Send the whole folder, not `Beat Thief.app`. The app is a 5MB launcher —
-yt-dlp, demucs, torch and the window itself live in your Python's packages
-folder, and ffmpeg is a separate program — so on a Mac that has none of
-that, the app opens a dialog saying it couldn't start and nothing else.
+Send the whole folder, not `Beat Thief.app`. The app is a small launcher —
+Python, yt-dlp, the window and ffmpeg live in Application Support — so on a
+Mac that has none of that, the app opens a dialog saying it couldn't start
+and nothing else.
 
 Have them paste this one line into Terminal:
 
@@ -31,16 +35,15 @@ It goes first because on a Mac that has never built anything there is no
 `git` either — that arrives with the Xcode command line tools, which the
 script prompts for and then asks them to run the line again.
 
-It checks Python, installs ffmpeg via Homebrew, installs the requirements,
-confirms each one imports, and builds the app into their `~/Applications`.
-Ten minutes, most of it downloading torch. It's safe to run again — every
-step checks whether it's already done — and it clears the quarantine flag
-macOS puts on anything that arrived by Drive or AirDrop, which otherwise
-refuses to run the script at all.
+Songs only takes about a minute; with the splitter, ten. It's safe to run
+again — every step checks whether it's already done — and it clears the
+quarantine flag macOS puts on anything that arrived by Drive or AirDrop,
+which otherwise refuses to run the script at all.
 
 They keep the folder: the app is a snapshot of the code in it. When there's
-a new version they run `./update.sh`, which pulls and rebuilds in seconds —
-the packages and ffmpeg are already there, so nothing is downloaded twice.
+a new version they run `./update.sh`, which pulls, takes the newest yt-dlp
+(YouTube changes often enough that an old one stops finding songs) and
+rebuilds, in seconds.
 
 A zip works too (`git archive --format=zip --prefix=beat_thief/ -o \
 ~/Desktop/beat_thief.zip HEAD`), but an unzipped copy has no git to pull

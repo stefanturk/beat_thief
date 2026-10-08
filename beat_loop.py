@@ -61,7 +61,6 @@ from typing import NamedTuple
 import numpy as np
 
 import beat_writer
-import drum_transcriber
 import groove_reader
 import instrument_isolator
 
@@ -290,6 +289,10 @@ def build(
     # away, so that moving the loop's start onto a kick can take the bars it
     # needs from what actually follows (see _SPARE_BARS).
     spare = _SPARE_BARS * beat_writer.BEATS_PER_BAR * 60.0 / tempo if tempo > 0 else 0.0
+
+    # Here rather than at the top: it brings torch, which a songs-only
+    # install doesn't have, and the app imports this module to list loops.
+    import drum_transcriber
 
     phase("Cutting the section...")
     # A song's own hi-hat/ride, not Officially Missing You's - see
