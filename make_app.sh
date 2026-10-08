@@ -28,30 +28,38 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="${1:-$HOME/Applications}"
 APP="$DEST/Beat Thief.app"
-# Which Python the app will run. Overridable because setup.sh installs the
-# packages into /usr/bin/python3 specifically, and a Homebrew python arriving
-# later would take over `command -v` while having none of them - an app built
-# against it starts and immediately can't import yt_dlp.
+# Where setup.sh puts Beat Thief's own Python and ffmpeg.
+RUNTIME="$HOME/Library/Application Support/Beat Thief"
+# Which Python the app will run: the one setup.sh installed the packages
+# into, when there is one. Any other python3 on the PATH has none of them -
+# an app built against it starts and immediately can't import yt_dlp.
+if [ -z "${PYTHON:-}" ] && [ -x "$RUNTIME/python/bin/python3" ]; then
+    PYTHON="$RUNTIME/python/bin/python3"
+fi
 PYTHON="${PYTHON:-$(command -v python3)}"
 
-# /usr/bin/python3 is a universal binary, and launched from an app bundle
-# macOS picks its x86_64 slice - which then can't load this machine's arm64
-# numpy/torch, failing with a confusing "don't import numpy from its source
-# directory" message. Pin the architecture this build was made on. Recorded
-# now rather than checked at launch, because a process started under Rosetta
-# reports the wrong answer for its own machine.
-ARCH="$(uname -m)"
+# A universal python3 (/usr/bin/python3 is one) launched from an app bundle
+# can run as its x86_64 slice - which then can't load arm64 numpy/torch,
+# failing with a confusing "don't import numpy from its source directory".
+# So pin the architecture, asked of the Python itself: setup.sh's is built
+# for exactly one, and a Rosetta Terminal's `uname -m` would name the wrong
+# one for it.
+ARCH="$("$PYTHON" -c 'import platform; print(platform.machine())')"
 
 # An app launched from Finder inherits a bare PATH (/usr/bin:/bin:/usr/sbin:
-# /sbin) - not the one your shell has. ffmpeg lives in /opt/homebrew/bin, so
-# without this yt-dlp downloads the video fine and then silently fails to
-# convert it to mp3, leaving a stray .mp4 and an app that says nothing came
-# back. Bake in wherever ffmpeg actually is on this machine.
-FFMPEG="$(command -v ffmpeg || true)"
+# /sbin) - not the one your shell has. Without ffmpeg on it, yt-dlp downloads
+# the video fine and then silently fails to convert it to mp3, leaving a
+# stray .mp4 and an app that says nothing came back. Bake in wherever ffmpeg
+# actually is on this machine: setup.sh's copy first, else the shell's.
+if [ -x "$RUNTIME/bin/ffmpeg" ]; then
+    FFMPEG="$RUNTIME/bin/ffmpeg"
+else
+    FFMPEG="$(command -v ffmpeg || true)"
+fi
 if [ -z "$FFMPEG" ]; then
-    echo "Warning: ffmpeg isn't on your PATH. Install it with: brew install ffmpeg" >&2
+    echo "Warning: ffmpeg isn't installed. Run ./setup.sh to put it in place." >&2
     echo "The app will download songs but won't be able to convert them to mp3." >&2
-    FFMPEG_DIR="/opt/homebrew/bin"
+    FFMPEG_DIR="$RUNTIME/bin"
 else
     FFMPEG_DIR="$(dirname "$FFMPEG")"
 fi
@@ -172,7 +180,7 @@ LOG="\$HOME/Library/Logs/beat_thief.log"
 mkdir -p "\$(dirname "\$LOG")"
 echo "--- \$(date) ---" >> "\$LOG"
 
-export PATH="$FFMPEG_DIR:/opt/homebrew/bin:/usr/local/bin:\$PATH"
+export PATH="$FFMPEG_DIR:$RUNTIME/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH"
 
 cd "\$(dirname "\$0")/../Resources" || exit 1
 # -u because the log is a file, not a terminal: without it Python buffers
@@ -197,6 +205,15 @@ chmod +x "$APP/Contents/MacOS/Beat Thief"
 codesign --force --deep --sign - "$APP" 2>/dev/null || true
 
 echo "Built $APP"
+if [ "$PYTHON" != "$RUNTIME/python/bin/python3" ] && [ ! -x "$RUNTIME/python/bin/python3" ]; then
+    # An update from before Beat Thief brought its own Python runs the old
+    # update.sh to the end (see the note in update.sh), which builds against
+    # the Mac's Python as it always did. The new one switches over.
+    echo
+    echo "Beat Thief now installs its own Python, which keeps downloads working."
+    echo "Run ./update.sh once more to switch over (a few minutes, one time)."
+    echo
+fi
 echo "Double-click it, or drag it to your Dock."
 echo
 echo "It holds a copy of the code, so re-run this after editing any .py or"

@@ -40,9 +40,37 @@ if ! git pull --ff-only; then
     exit 1
 fi
 
-say "2. Rebuilding the app"
+# Everything above this line has to stay byte-for-byte what it was. The
+# copy of this script that's running is the old one and `git pull` just
+# rewrote the file under it. macOS's bash has usually read a short script
+# whole by now and finishes the old lines (which is why the first update
+# after a change to this file only takes effect on the next one - see the
+# note make_app.sh prints). But one it hasn't finished reading goes on from
+# the same byte offset in the new file, and if the part before here moved,
+# that would start mid-line.
+
+RUNTIME="$HOME/Library/Application Support/Beat Thief"
+PY="$RUNTIME/python/bin/python3"
+
+# Installs from before Beat Thief brought its own Python used the Mac's,
+# which can't run a current yt-dlp. Setup moves them over once (keeping the
+# instrument splitter if they had it) and builds the app itself.
+if ! "$PY" --version >/dev/null 2>&1; then
+    say "Beat Thief now brings its own Python - one-time setup"
+    if /usr/bin/python3 -c "import torch, demucs" >/dev/null 2>&1; then
+        exec "$REPO/setup.sh" --with-splitter
+    fi
+    exec "$REPO/setup.sh"
+fi
+
+say "2. Updating yt-dlp and the other packages"
+# YouTube changes often enough that a yt-dlp from a few months ago stops
+# finding songs, so every update takes the newest one.
+"$PY" -m pip install --quiet --prefer-binary --upgrade -r "$REPO/requirements.txt"
+
+say "3. Rebuilding the app"
 # Same Python setup.sh installed the packages into - see the note there.
-PYTHON=/usr/bin/python3 "$REPO/make_app.sh"
+PYTHON="$PY" "$REPO/make_app.sh"
 
 say "Up to date."
 note "Beat Thief is in your Applications folder, same as before. If it was"

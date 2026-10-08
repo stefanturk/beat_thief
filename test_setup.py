@@ -1,12 +1,13 @@
 """Guards on setup.sh, the script a new Mac runs once.
 
-Nobody here runs it - it installs Homebrew and two gigabytes of torch. What
-can be checked cheaply is that it doesn't drift away from the things it
-depends on: the requirements file it installs, and the build script it
-finishes with. Both have moved before while something pointing at them
-didn't.
+Nobody here runs it - it downloads a Python, ffmpeg and (if asked) two
+gigabytes of torch. What can be checked cheaply is that it doesn't drift
+away from the things it depends on: the requirements files it installs, and
+the build script it finishes with. Both have moved before while something
+pointing at them didn't.
 """
 
+import hashlib
 import os
 import re
 import unittest
@@ -26,11 +27,19 @@ def _setup() -> str:
     return _read(SETUP)
 
 
+REQUIREMENTS = ("requirements.txt", "requirements-splitter.txt")
+
+
 def _required_packages() -> set[str]:
-    """The distribution names in requirements.txt, version pins dropped."""
-    with open(os.path.join(REPO, "requirements.txt")) as f:
-        lines = [line.strip() for line in f if line.strip()]
-    return {re.split(r"[<>=!]", line)[0].strip() for line in lines}
+    """The distribution names in both requirements files, version pins and
+    extras dropped."""
+    names = set()
+    for name in REQUIREMENTS:
+        with open(os.path.join(REPO, name)) as f:
+            lines = [line.strip() for line in f
+                     if line.strip() and not line.strip().startswith("#")]
+        names |= {re.split(r"[<>=!\[;]", line)[0].strip() for line in lines}
+    return names
 
 
 # What the import name in setup.sh's check is called on PyPI, for the ones
@@ -43,7 +52,9 @@ class TestSetupInstallsWhatItChecksFor(unittest.TestCase):
         # The check loop exists to name the piece that failed to install. A
         # module that isn't in requirements.txt at all would fail that check
         # on every machine, for good, and read as a broken install.
-        modules = re.search(r"for module in (.+?); do", _setup()).group(1).split()
+        modules = " ".join(re.findall(r'modules="(?:\$modules )?([^"]+)"', _setup())).split()
+        self.assertIn("yt_dlp", modules)
+        self.assertIn("torch", modules)
         installed = _required_packages()
 
         missing = {m for m in modules
@@ -52,19 +63,60 @@ class TestSetupInstallsWhatItChecksFor(unittest.TestCase):
         self.assertEqual(missing, set(),
                          "setup.sh checks for these but never installs them")
 
-    def test_it_installs_from_the_requirements_file(self):
-        self.assertIn("requirements.txt", _setup())
+    def test_it_installs_from_both_requirements_files(self):
+        for name in REQUIREMENTS:
+            with self.subTest(name=name):
+                self.assertIn(f'-r "$REPO/{name}"', _setup())
+
+    def test_the_splitter_is_not_in_the_songs_only_list(self):
+        # The whole point of asking: torch and demucs are the 2GB.
+        with open(os.path.join(REPO, "requirements.txt")) as f:
+            songs = f.read()
+        for heavy in ("torch", "demucs"):
+            self.assertNotIn(heavy, songs)
+
+
+class TestSetupNeedsNoHomebrew(unittest.TestCase):
+    """Homebrew stopped supporting Intel Macs, and on one it stopped the
+    whole install at ffmpeg. Setup fetches its own instead."""
+
+    def test_it_never_installs_homebrew_or_anything_with_it(self):
+        self.assertNotIn("brew install", _setup())
+        self.assertNotIn("Homebrew/install", _setup())
+
+    def test_every_download_is_checked_against_a_known_sha(self):
+        # A fetch without a hash would run whatever the server sent.
+        calls = re.findall(r"^\s*fetch (.+)$", _setup(), re.M)
+        self.assertGreaterEqual(len(calls), 2)
+        for call in calls:
+            with self.subTest(call=call):
+                self.assertRegex(call, r"(_SHA|sha_var)", "fetch takes url, sha, path")
+
+    def test_it_picks_downloads_by_the_hardware_not_the_terminal(self):
+        # A Rosetta Terminal says x86_64 on Apple Silicon.
+        self.assertIn("hw.optional.arm64", _setup())
+        for build in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
+            self.assertIn(build, _setup())
+
+
+RUNTIME_LINE = 'RUNTIME="$HOME/Library/Application Support/Beat Thief"'
 
 
 class TestSetupAndTheBuildAgreeOnPython(unittest.TestCase):
-    """setup.sh puts the packages in /usr/bin/python3 and builds the app
-    against that same one by name. If make_app.sh stopped honouring the
-    override, the app would be built against whichever python3 Homebrew
-    happened to leave on the PATH - which has none of the packages, and
-    fails at launch rather than here."""
+    """setup.sh puts the packages in its own Python and builds the app
+    against that same one by name. If the scripts disagreed about where it
+    is, the app would be built against whichever python3 happened to be on
+    the PATH - which has none of the packages, and fails at launch rather
+    than here."""
+
+    def test_all_three_agree_where_the_runtime_lives(self):
+        for script in (SETUP, UPDATE, os.path.join(REPO, "make_app.sh")):
+            with self.subTest(script=os.path.basename(script)):
+                self.assertIn(RUNTIME_LINE, _read(script))
 
     def test_setup_names_the_python_it_builds_against(self):
-        self.assertIn("PYTHON=/usr/bin/python3", _setup())
+        self.assertIn('PY="$RUNTIME/python/bin/python3"', _setup())
+        self.assertIn('PYTHON="$PY" "$REPO/make_app.sh"', _setup())
 
     def test_make_app_lets_it_be_overridden(self):
         with open(os.path.join(REPO, "make_app.sh")) as f:
@@ -133,9 +185,22 @@ class TestTheOneLineInstallerPointsSomewhereReal(unittest.TestCase):
 
 class TestUpdateRebuildsTheSameWaySetupDid(unittest.TestCase):
     def test_it_builds_against_the_python_setup_installed_into(self):
-        # Same trap as setup.sh's: a Homebrew python3 that arrived with
-        # ffmpeg would win `command -v` and have none of the packages.
-        self.assertIn("PYTHON=/usr/bin/python3", _read(UPDATE))
+        # Same trap as setup.sh's: any other python3 on the PATH would win
+        # `command -v` and have none of the packages.
+        self.assertIn('PYTHON="$PY" "$REPO/make_app.sh"', _read(UPDATE))
+
+    def test_it_takes_the_newest_yt_dlp_every_time(self):
+        self.assertIn('pip install --quiet --prefer-binary --upgrade -r "$REPO/requirements.txt"', _read(UPDATE))
+
+    def test_the_part_an_old_copy_is_still_running_never_changes(self):
+        # update.sh rewrites itself with `git pull` while bash is reading it,
+        # and bash carries on from the same byte offset in the new file. If
+        # anything above the marker moves, every install that updates from
+        # here on starts executing mid-line.
+        script = _read(UPDATE)
+        prefix = script[:script.index("# Everything above this line")]
+        self.assertEqual(hashlib.sha256(prefix.encode()).hexdigest(),
+                         "96e41b02f5b24e56e2d6d1f7b1efddfa023299447549fe42c4db841714989c1b")
 
     def test_it_refuses_to_merge(self):
         # A plain `git pull` on a copy somebody has edited either stops in a

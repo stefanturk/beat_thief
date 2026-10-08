@@ -108,7 +108,7 @@ class _Printer:
             if "ffprobe" in message.lower() or "ffmpeg" in message.lower():
                 print(
                     "Error: ffmpeg is required but wasn't found.\n"
-                    "Install it with: brew install ffmpeg\n"
+                    "Run ./setup.sh again to put it back.\n"
                     "See README.md for setup instructions.",
                     file=sys.stderr,
                 )

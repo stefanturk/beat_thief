@@ -5,6 +5,7 @@ Nothing in here is specific to any one instrument."""
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -22,6 +23,21 @@ from pydub import AudioSegment
 import song_sanitizer
 
 _BAR_WIDTH = 30
+
+_splitter_installed: bool | None = None
+
+
+def splitter_installed() -> bool:
+    """Whether demucs and torch are here to split songs into stems.
+
+    setup.sh can be told "songs only", which leaves out the 2GB that only
+    the stems, beat loops and MIDI need. Looked for rather than imported:
+    importing torch takes seconds, and finding it is all this needs."""
+    global _splitter_installed
+    if _splitter_installed is None:
+        _splitter_installed = all(importlib.util.find_spec(name) is not None
+                                  for name in ("torch", "demucs"))
+    return _splitter_installed
 
 # demucs's own tqdm progress bar (ncols=120, so each rendered frame is over
 # 100 characters wide) renders as e.g.

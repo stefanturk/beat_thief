@@ -1,0 +1,9 @@
+# The instrument splitter: stems, beat loops and MIDI. About 2GB, and
+# optional - setup.sh asks. requirements.txt is everything else.
+# On an Intel Mac these resolve to torch 2.2.2, the last Intel build; it
+# needs numpy<2, which requirements.txt pins for everyone.
+torch<2.6
+torchaudio<2.6
+# 4.1.0 (July 2026) needs sphn, which has no Intel build, and brings new
+# dependencies besides; 4.0.1 is the version every stem so far was made with.
+demucs==4.0.1

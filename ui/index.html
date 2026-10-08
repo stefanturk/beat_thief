@@ -282,6 +282,10 @@
   #take-listed { color: var(--violet); }
 
   .stem-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  /* Installed without the instrument splitter: the squares are still there,
+     so it's clear what it would add, but nothing in them can be armed. */
+  .stem-grid[data-off="true"] .pad { opacity: 0.35; cursor: default; }
+  .stem-grid[data-off="true"] .pad:hover { border-color: var(--edge); }
   /* Each stem's loop goes under the stem it's cut from. */
   #pad-beat { grid-column: 1; grid-row: 2; }
   #pad-bass_beat { grid-column: 2; grid-row: 2; }
@@ -1276,7 +1280,13 @@
     }
   }
 
+  // False when setup was told songs only: there's no torch or demucs, so
+  // nothing past the Song square can be made (gui.Api.splitter_installed).
+  // Assumed there until asked, so a full install never flickers grey.
+  let splitter = true;
+
   function togglePad(thing) {
+    if (!splitter && thing !== "song") return;
     if (!canArm(thing)) return;            // green isn't a state you click out of
     if (isArmed(thing)) {
       if (lockedOn(thing)) return;         // and neither is something held on
@@ -1336,6 +1346,7 @@
       ? (armed.length ? "Taking " + armed.map((t) => (have(t) ? "another " : "") + LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
                       : "Nothing armed — click a square to take something from " + selected.title + ".")
       : "All four stems rebuild the song.";
+    if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Run setup again and say yes to add it.";
   }
 
   let lastLibrary = null;
@@ -3034,6 +3045,11 @@
   });
 
   window.addEventListener("pywebviewready", () => {
+    window.pywebview.api.splitter_installed().then((installed) => {
+      splitter = installed !== false;
+      document.querySelector(".stem-grid").dataset.off = splitter ? "false" : "true";
+      if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Run setup again and say yes to add it.";
+    });
     offerResume();
     poll();
     // Song armed, nothing green, nothing selected - the state a pasted
