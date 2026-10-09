@@ -548,57 +548,71 @@ def library(limit: int = 20) -> list[dict]:
     for entry in history.entries():
         if len(songs) >= limit:
             break
-        song_path = entry["song"]
         # A song that isn't on disk any more has nothing to offer, and
         # listing it would cost one of the slots a real song wants. Filtered
         # here rather than trimmed first, so a run of dead entries can't
         # crowd out the songs behind them.
-        if not os.path.exists(song_path):
-            continue
-
-        song_dir = instrument_isolator.song_output_dir(song_path)
-        files = [song_path]
-        try:
-            names = sorted(os.listdir(song_dir)) if os.path.isdir(song_dir) else []
-        except OSError:
-            # macOS blocks apps outside their own sandbox from reading
-            # ~/Downloads, ~/Desktop and ~/Documents without a permission
-            # grant that a python3 subprocess can't reliably get (see
-            # make_app.sh) - so a song the terminal front end downloaded to
-            # ~/Downloads can exist and still not be listable from here.
-            # One unreadable folder used to take the whole library down
-            # with it; now it's treated the same as a song that isn't on
-            # disk, since none of its stems could be reached from here
-            # either.
-            continue
-        for name in names:
-            # Skip the .source.json markers the isolators keep for their
-            # own "is this still up to date" checks - not output anyone
-            # asked for. The mp3 lives in here too now, so it would
-            # otherwise be listed twice.
-            path = os.path.join(song_dir, name)
-            if name.startswith(".") or path == song_path:
-                continue
-            files.append(path)
-
-        have = _what_a_song_has(song_path, files)
-        songs.append(
-            {
-                "title": instrument_isolator.song_title(song_path),
-                "url": entry.get("url", ""),
-                "song": song_path,
-                # Where everything for this song lives - the mp3, the stems
-                # and the MIDI. What a front end wants to open, since the
-                # stems get dragged out of it together.
-                "dir": song_dir if os.path.isdir(song_dir) else "",
-                "have": have,
-                # The other stems can be looped over the newest drum loop's
-                # bars without marking them again.
-                "span": has_loop_span(have),
-                "files": files,
-            }
-        )
+        song = _library_entry(entry["song"], entry.get("url", ""))
+        if song is not None:
+            songs.append(song)
     return songs
+
+
+def library_song(song_path: str) -> dict | None:
+    """One song as library() would list it, however long ago it was taken -
+    a playlist's beat pickers want songs from further back than the newest
+    twenty. None if it isn't on disk."""
+    url = next((entry.get("url", "") for entry in history.entries()
+                if entry["song"] == song_path), "")
+    return _library_entry(song_path, url)
+
+
+def _library_entry(song_path: str, url: str) -> dict | None:
+    """A song with its link and whatever files exist for it right now, or
+    None if there's nothing on disk to offer."""
+    if not os.path.exists(song_path):
+        return None
+
+    song_dir = instrument_isolator.song_output_dir(song_path)
+    files = [song_path]
+    try:
+        names = sorted(os.listdir(song_dir)) if os.path.isdir(song_dir) else []
+    except OSError:
+        # macOS blocks apps outside their own sandbox from reading
+        # ~/Downloads, ~/Desktop and ~/Documents without a permission
+        # grant that a python3 subprocess can't reliably get (see
+        # make_app.sh) - so a song the terminal front end downloaded to
+        # ~/Downloads can exist and still not be listable from here.
+        # One unreadable folder used to take the whole library down
+        # with it; now it's treated the same as a song that isn't on
+        # disk, since none of its stems could be reached from here
+        # either.
+        return None
+    for name in names:
+        # Skip the .source.json markers the isolators keep for their
+        # own "is this still up to date" checks - not output anyone
+        # asked for. The mp3 lives in here too now, so it would
+        # otherwise be listed twice.
+        path = os.path.join(song_dir, name)
+        if name.startswith(".") or path == song_path:
+            continue
+        files.append(path)
+
+    have = _what_a_song_has(song_path, files)
+    return {
+        "title": instrument_isolator.song_title(song_path),
+        "url": url,
+        "song": song_path,
+        # Where everything for this song lives - the mp3, the stems
+        # and the MIDI. What a front end wants to open, since the
+        # stems get dragged out of it together.
+        "dir": song_dir if os.path.isdir(song_dir) else "",
+        "have": have,
+        # The other stems can be looped over the newest drum loop's
+        # bars without marking them again.
+        "span": has_loop_span(have),
+        "files": files,
+    }
 
 
 def _safe_folder_name(name: str) -> str:

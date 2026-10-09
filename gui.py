@@ -658,6 +658,15 @@ class Api:
             # worth breaking the window over.
             return []
 
+    def library_song(self, song_path: str):
+        """One song as the library lists it, found by its path - a picker
+        for the 25th song of a playlist wants it after it's dropped out of
+        the newest twenty. None if it can't be found."""
+        try:
+            return pipeline.library_song(song_path)
+        except Exception:
+            return None
+
     def default_output_dir(self) -> str:
         return DEFAULT_OUTPUT
 
@@ -1083,16 +1092,20 @@ class Api:
         songs = result.get("songs") or []
         if stage != "done" or not songs:
             return
+        # A playlist is one entry but many songs: each gets its loops and
+        # its turn in the picker.
         stems = entry.get("after", {}).get("loop_stems") or []
-        if stems:
-            looped = self.loop_stems(songs[0], stems)
+        for song in songs if stems else []:
+            if self._cancel.is_set():
+                break
+            looped = self.loop_stems(song, stems)
             if looped.get("error"):
                 with self._lock:
                     self._state["problem_count"] += 1
                     self._state["problems"] = (self._state["problems"] + [looped["error"]])[-MAX_PROBLEMS:]
         if entry.get("after", {}).get("beat"):
             with self._lock:
-                self._beat_waiting.append(songs[0])
+                self._beat_waiting.extend(songs)
 
     def _end_of_queue(self) -> None:
         """Everything queued is done: ask the questions put off till now,

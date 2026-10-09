@@ -2937,10 +2937,13 @@
   // Songs whose beat is still to be picked, now the queue is done.
   let beatsToPick = [];
 
-  function pickNextBeat() {
+  async function pickNextBeat() {
     while (beatsToPick.length) {
       const path = beatsToPick.shift();
-      const fresh = (lastLibrary || []).find((s) => s.song === path);
+      // A long playlist's early songs have dropped out of the newest
+      // twenty the library lists, so those are asked for by path.
+      const fresh = (lastLibrary || []).find((s) => s.song === path)
+        || await pywebview.api.library_song(path);
       if (fresh && fresh.have && fresh.have.drums) { openPicker(fresh); return; }
       el("message").dataset.openable = "false";
       el("message").textContent =

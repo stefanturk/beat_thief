@@ -677,6 +677,24 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
         self.assertIn("stem.wav", listed)
         self.assertNotIn(".drums_source.json", listed)
 
+    def test_a_song_past_the_newest_twenty_can_still_be_looked_up(self):
+        # A playlist of 30 with Beat armed opens a picker for every song,
+        # and the first ten are no longer among the newest twenty.
+        songs = []
+        for i in range(30):
+            path = os.path.join(self.tmp_dir, f"Song {i}", f"Song {i}.mp3")
+            os.makedirs(os.path.dirname(path))
+            with open(path, "wb") as f:
+                f.write(b"x")
+            history.remember(f"https://example.com/{i}", [path])
+            songs.append(path)
+
+        self.assertNotIn(songs[0], [song["song"] for song in pipeline.library()])
+        found = pipeline.library_song(songs[0])
+        self.assertEqual(found["song"], songs[0])
+        self.assertEqual(found["url"], "https://example.com/0")
+        self.assertIsNone(pipeline.library_song(os.path.join(self.tmp_dir, "gone.mp3")))
+
     def test_a_song_with_nothing_isolated_yet_still_lists_its_mp3(self):
         self._run()
 
