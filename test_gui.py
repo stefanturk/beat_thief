@@ -2063,6 +2063,42 @@ class TestTheQueue(unittest.TestCase):
             _wait_until(lambda: not api.status()["running"])
         loop.assert_called_once_with("/Music/Beat Thief/One/One (98.0 BPM).mp3", ["bass"])
 
+    def test_a_picker_can_look_up_a_song_the_library_list_has_dropped(self):
+        with mock.patch("pipeline.library_song", return_value={"song": "/a.mp3"}) as found:
+            self.assertEqual(gui.Api().library_song("/a.mp3"), {"song": "/a.mp3"})
+        found.assert_called_once_with("/a.mp3")
+        with mock.patch("pipeline.library_song", side_effect=OSError("gone")):
+            self.assertIsNone(gui.Api().library_song("/a.mp3"))
+
+    def test_the_picker_queue_looks_songs_up_by_path(self):
+        markup = open(os.path.join(os.path.dirname(gui.__file__), "ui", "index.html")).read()
+        self.assertIn("pywebview.api.library_song(", markup)
+
+    def _playlist(self, url, **kwargs):
+        self.runs.append((url, kwargs))
+        songs = [f"/Music/Beat Thief/Playlist Mix/{t}/{t} (98.0 BPM).mp3" for t in ("A", "B", "C")]
+        return {"outputs": songs, "songs": songs, "downloaded": 3, "total": 3,
+                "output_dir": "/Music/Beat Thief/Playlist Mix"}
+
+    def test_every_song_in_a_playlist_gets_its_beat_picker(self):
+        api = gui.Api(run_pipeline=self._playlist)
+        api.start("https://youtube.com/playlist?list=Mix",
+                  {"song": True, "drums": True, "after": {"beat": True}})
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(api.status()["beat_waiting"],
+                         [f"/Music/Beat Thief/Playlist Mix/{t}/{t} (98.0 BPM).mp3"
+                          for t in ("A", "B", "C")])
+
+    def test_every_song_in_a_playlist_gets_its_stem_loops(self):
+        api = gui.Api(run_pipeline=self._playlist)
+        with mock.patch.object(gui.Api, "loop_stems", return_value={"loops": []}) as loop:
+            api.start("https://youtube.com/playlist?list=Mix",
+                      {"song": True, "bass": True, "after": {"loop_stems": ["bass"]}})
+            _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(loop.call_args_list,
+                         [mock.call(f"/Music/Beat Thief/Playlist Mix/{t}/{t} (98.0 BPM).mp3", ["bass"])
+                          for t in ("A", "B", "C")])
+
     @mock.patch("gui.subprocess.run")
     def test_the_done_line_opens_the_songs_folder(self, run):
         folder = tempfile.mkdtemp()
