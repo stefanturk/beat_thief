@@ -462,6 +462,34 @@
   }
   body[data-state="running"] #bar[data-indeterminate="true"]::after { animation: sweep 1.5s ease-in-out infinite; }
 
+  /* The song in hand, step by step: what's done, what's going, what's
+     next - so a playlist's long middle never reads as one vague
+     "working". Under it, a hairline for that step's own percentage,
+     which used to take over the main bar and make it jump back. */
+  .steps {
+    display: flex; flex-wrap: wrap; justify-content: center;
+    gap: 3px 12px; margin-top: 11px;
+    font-family: var(--display); font-size: 10px; letter-spacing: 0.12em;
+    text-transform: uppercase; color: #4a4d55;
+  }
+  .steps[hidden], .step-track[hidden] { display: none; }
+  .steps span[data-state="done"] { color: var(--dim); }
+  .steps span[data-state="done"]::before { content: "✓ "; }
+  .steps span[data-state="now"] { color: var(--violet); }
+  .steps span[data-state="now"]::before { content: "● "; }
+  .steps .then { color: #4a4d55; text-transform: none; letter-spacing: 0.02em; }
+  .step-track { height: 2px; margin: 7px auto 0; max-width: 60%; }
+  #step-bar {
+    height: 100%; width: 0; background: var(--violet); opacity: 0.6;
+    transition: width 0.25s linear;
+  }
+  #step-bar[data-indeterminate="true"] { width: 100%; }
+  #step-bar[data-indeterminate="true"]::after {
+    content: ""; display: block; height: 100%; width: 40%;
+    background: linear-gradient(90deg, transparent, var(--violet), transparent);
+    animation: sweep 1.5s ease-in-out infinite;
+  }
+
   @keyframes sheen { to { transform: translateX(100%); } }
   @keyframes sweep { from { transform: translateX(-100%); } to { transform: translateX(350%); } }
 
@@ -929,6 +957,8 @@
       <div id="unit"></div>
       <p id="message">Paste a link to get started.</p>
       <div class="track"><div id="bar"></div></div>
+      <div class="steps" id="steps" hidden></div>
+      <div class="track step-track" id="step-track" hidden><div id="step-bar"></div></div>
       <!--
         What a long run couldn't get, kept rather than flashing past one
         message at a time - and the folder's Sources.csv, which has the
@@ -1077,8 +1107,10 @@
     if (known) el("bar").style.width = percent + "%";
     else if (!state.running) el("bar").style.width = "0";
 
+    renderSteps(state);
+
     if (state.running) {
-      setFigure(known ? Math.round(percent) + "%" : "···", state.stage.replace(/-/g, " "), false);
+      setFigure(known ? Math.round(percent) + "%" : "···", whereAt(state), false);
     } else if (body.dataset.state === "done") {
       const tempo = tempoOf(state.outputs || []);
       if (tempo) setFigure(tempo, "BPM — click to copy", true);
@@ -1103,6 +1135,39 @@
     el("go").textContent = state.running ? "Stop" : "Steal it";
     el("go").dataset.mode = state.running ? "cancel" : "go";
     if (state.output_dir) setDestination(state.output_dir);
+  }
+
+  // Under the figure while a run goes: the time left and which song of how
+  // many, or what it's doing when there's neither yet.
+  function whereAt(state) {
+    const parts = [];
+    if (state.eta) parts.push(state.eta);
+    if (state.total > 1) parts.push("song " + state.index.toLocaleString() + " of " + state.total.toLocaleString());
+    return parts.length ? parts.join(" · ") : state.stage.replace(/-/g, " ");
+  }
+
+  // This song's steps, and a hairline for the one in hand.
+  function renderSteps(state) {
+    const steps = state.running ? (state.steps || []) : [];
+    const strip = el("steps");
+    strip.hidden = steps.length === 0;
+    strip.replaceChildren(...steps.map((step) => {
+      const span = document.createElement("span");
+      span.textContent = step.name;
+      span.dataset.state = step.state;
+      return span;
+    }));
+    if (steps.length && state.then) {
+      const then = document.createElement("span");
+      then.className = "then";
+      then.textContent = "then " + state.then;
+      strip.append(then);
+    }
+    const stepKnown = state.step_percent !== null && state.step_percent !== undefined;
+    const busy = steps.some((step) => step.state === "now");
+    el("step-track").hidden = !busy;
+    el("step-bar").dataset.indeterminate = stepKnown ? "false" : "true";
+    el("step-bar").style.width = stepKnown ? state.step_percent + "%" : "";
   }
 
   // What a run couldn't get, and where the whole story is.
