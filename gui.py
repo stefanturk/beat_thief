@@ -32,12 +32,14 @@ import instrument_isolator
 import pipeline
 import progress
 import pulse
+import song_queue
 import sources
+import spotify
 
 UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
 
 APP_NAME = "Beat Thief"
-WINDOW_SIZE = (560, 760)
+WINDOW_SIZE = (560, 840)
 
 # Not the CLI's ~/Downloads/Song Downloads: macOS blocks apps from writing to
 # Downloads (as it does Desktop and Documents) without a permission grant that
@@ -58,6 +60,35 @@ RUN_STATE_EVERY = 10
 
 # Whether a run holds off idle sleep (see _keep_awake). Off in tests.
 KEEP_AWAKE = True
+
+# The songs waiting their turn (see song_queue), kept beside the rest.
+QUEUE_PATH = song_queue.QUEUE_PATH
+# Whether a queued link's real name is looked up to show in place of the
+# link. Off in tests - it goes to YouTube or Spotify.
+LOOK_UP_TITLES = True
+
+
+def _look_up_title(url: str) -> str:
+    """What a queued link is called - the song, or the playlist - or "" if
+    that can't be had quickly. Metadata only."""
+    try:
+        if len([line for line in url.splitlines() if line.strip()]) > 1:
+            return ""
+        found = spotify.spotify_id(url)
+        if found:
+            if found[0] == "track":
+                song = spotify.track(url)
+                return " - ".join(part for part in (song.get("title"), song.get("artist")) if part)
+            return spotify.collection(url).get("name") or ""
+        info = pipeline._probe_info(url)
+        return (info or {}).get("title") or ""
+    except Exception:
+        return ""
+
+
+def _is_playlist(url: str) -> bool:
+    """A playlist link, or a pasted list of more than one song."""
+    return pipeline.is_playlist_link(url) or len(spotify.track_ids(url or "")) > 1
 
 
 def _keep_awake():
@@ -147,6 +178,18 @@ class Api:
         # The run in hand's progress.RunProgress, or None for a run that
         # isn't worked through song by song (checking guesses).
         self._progress = None
+        # The songs waiting behind the one in hand. Stop keeps them, with
+        # the one in hand back at the front, until Resume or Clear.
+        self._queue = song_queue.SongQueue(QUEUE_PATH)
+        self._queue_paused = len(self._queue) > 0
+        # Since the last Steal it: what finished ({"label", "folder",
+        # "have", "total"}), which folders have questions put off to the
+        # end ((folder, keys)), and which songs' beats are to be picked
+        # once the queue is done.
+        self._finished = []
+        self._deferred = []
+        self._beat_waiting = []
+        self._entries_run = 0
 
     @staticmethod
     def _idle_state() -> dict:
@@ -186,6 +229,11 @@ class Api:
             "eta": "",
             "index": None,
             "total": None,
+            # What was finished last, for the done line that opens it:
+            # {"label", "folder", "others"}.
+            "finished": None,
+            # Songs whose beat is to be picked now the queue is done.
+            "beat_waiting": [],
         }
 
     @staticmethod
@@ -206,12 +254,42 @@ class Api:
         It's "source" rather than "song" because the rest of options is one
         armed/not flag per square, and one of the squares is called Song -
         a single key can't be both a boolean and a path."""
-        options = options or {}
+        entry, error = self._entry_from(url, options)
+        with self._lock:
+            busy = self._thread is not None and self._thread.is_alive()
+            if busy and error:
+                return dict(self._snapshot(), queue_error=error)
+            if busy:
+                # Already stealing: this one waits its turn, with the
+                # settings it has now.
+                entry_id = self._queue.add(entry)
+                self._queue_paused = False
+                self._look_up_label(entry_id, entry)
+                return self._snapshot()
+        if error:
+            return self._fail(error)
+        with self._lock:
+            self._finished, self._deferred, self._beat_waiting = [], [], []
+            self._entries_run = 0
+            self._state = self._idle_state()
+            # A queue that was stopped stays stopped: this song goes now,
+            # and the stopped ones wait for Resume.
+            paused = len(self._queue) > 0
+            self._queue.begin(entry)
+            snapshot = self._launch(entry)
+            self._queue_paused = paused
+            return dict(snapshot, queue_paused=False)
+
+    @staticmethod
+    def _parse(url: str, options: dict) -> tuple[dict, str]:
+        """What a link and the page's options mean for a run, or why they
+        can't be run: ({"url", "song", "instruments", "number",
+        "run_options", "output_dir"}, error)."""
         source = options.get("source")
         song = source.strip() if isinstance(source, str) else ""
         url = (url or "").strip()
         if not song and not url:
-            return self._fail("Paste a link first.")
+            return {}, "Paste a link first."
 
         # Off, Auto or Ask. Auto unless the page says otherwise, so a caller
         # that predates the switch - or a page that fails to send it - keeps
@@ -242,34 +320,93 @@ class Api:
         # saved before then (the resume banner) can still carry them.
         if instruments and not instrument_isolator.splitter_installed():
             if song:
-                return self._fail("Splitting into instruments isn't installed. Run setup again and say yes to add it.")
+                return {}, "Splitting into instruments isn't installed. Run setup again and say yes to add it."
             instruments = []
         if song and not instruments:
-            return self._fail("Nothing armed - pick what to take.")
+            return {}, "Nothing armed - pick what to take."
+        return {"url": url, "song": song, "instruments": instruments, "number": number,
+                "run_options": run_options,
+                "output_dir": options.get("output_dir") or DEFAULT_OUTPUT}, ""
 
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return dict(self._state)
-            self._cancel.clear()
-            self._state = self._idle_state()
-            self._state.update({"running": True, "stage": "starting", "message": "Getting ready..."})
-            state_snapshot = dict(self._state)
-            self._started = None if song else {"url": url, "options": dict(options)}
-            self._saved = None
-            self._progress = progress.RunProgress(
-                progress.steps_for(sanitize != "off", run_options["bpm"], instruments,
-                                   download=not song),
-                then="your questions" if sanitize == "ask" and not song else "")
+    def _entry_from(self, url: str, options: dict | None) -> tuple[dict, str]:
+        """A queue entry (see song_queue) for this link and options - what
+        the page had set when it was added - or why it can't be one."""
+        options = dict(options or {})
+        after = options.pop("after", None) or {}
+        _, error = self._parse(url, options)
+        if error:
+            return {}, error
+        source = options.get("source") if isinstance(options.get("source"), str) else ""
+        url = (url or "").strip()
+        label = song_queue.short_label(url, source.strip())
+        pasted = len(spotify.track_ids(url)) if not source else 0
+        if pasted > 1:
+            # A pasted playlist is called what its folder will be.
+            label = (options.get("folder_name") or "").strip() or f"{pasted:,} pasted songs"
+        return {
+            "url": url,
+            "options": options,
+            "label": label,
+            "after": {"beat": after.get("beat") is True,
+                      "loop_stems": [s for s in after.get("loop_stems") or []
+                                     if s in pipeline.INSTRUMENT_ORDER]},
+        }, ""
 
-        output_dir = options.get("output_dir") or DEFAULT_OUTPUT
+    def _look_up_label(self, entry_id: str, entry: dict) -> None:
+        """Swap a queued link's stand-in label for its real name, behind."""
+        if not LOOK_UP_TITLES or entry["options"].get("source"):
+            return
 
-        self._thread = threading.Thread(
-            target=self._work,
-            args=(url, output_dir, instruments, song, number, run_options),
-            daemon=True,
-        )
+        def look():
+            title = _look_up_title(entry["url"])
+            if title:
+                self._queue.relabel(entry_id, title)
+
+        threading.Thread(target=look, daemon=True).start()
+
+    def _launch(self, entry: dict) -> dict:
+        """Start the worker on entry, with the lock held. Returns the state
+        the page should show straight away."""
+        self._cancel.clear()
+        self._queue_paused = False
+        self._begin_entry(entry)
+        snapshot = self._snapshot()
+        self._thread = threading.Thread(target=self._work, args=(entry,), daemon=True)
         self._thread.start()
-        return state_snapshot
+        return snapshot
+
+    def _begin_entry(self, entry: dict) -> None:
+        """Set the window up for entry, with the lock held: a fresh status
+        line and progress, keeping what the queue has met so far."""
+        parsed, _ = self._parse(entry["url"], entry["options"])
+        kept = {key: self._state.get(key) for key in ("problems", "problem_count", "outputs",
+                                                       "to_check", "checks_in", "sources_csv")}
+        self._state = self._idle_state()
+        self._state.update({key: value for key, value in kept.items() if value})
+        self._state.update({"running": True, "stage": "starting", "message": "Getting ready..."})
+        song = parsed.get("song")
+        self._started = None if song else {"url": parsed["url"], "options": dict(entry["options"])}
+        self._saved = None
+        sanitize = parsed["run_options"]["sanitize"]
+        self._progress = progress.RunProgress(
+            progress.steps_for(sanitize != "off", parsed["run_options"]["bpm"], parsed["instruments"],
+                               download=not song),
+            then="your questions" if sanitize == "ask" and not song else "")
+
+    def _snapshot(self) -> dict:
+        """The state plus the queue, for the page. With the lock held."""
+        state = dict(self._state)
+        entries = self._queue.entries()
+        up_next = entries[0] if entries else None
+        last = self._queue.last_added()
+        state.update(
+            queue=[{"id": e["id"], "label": e.get("label") or ""} for e in entries],
+            up_next=up_next.get("label", "") if up_next else "",
+            last_added=(last.get("label", "") if last and up_next and last["id"] != up_next["id"]
+                        else ""),
+            queue_paused=bool(entries) and self._queue_paused and not state.get("running"),
+        )
+        return state
 
     def tidy_folder(self) -> dict:
         """Ask which folder, then sanitize every song in it where it sits
@@ -341,7 +478,7 @@ class Api:
     def status(self) -> dict:
         """The current state, polled by the page a few times a second."""
         with self._lock:
-            return dict(self._state)
+            return self._snapshot()
 
     def cancel(self) -> dict:
         """Ask the run to stop. The pipeline checks between stages and during
@@ -359,7 +496,50 @@ class Api:
         with self._lock:
             if self._state["running"]:
                 self._state["message"] = "Stopping..."
-            return dict(self._state)
+            return self._snapshot()
+
+    # --- the queue -----------------------------------------------------
+
+    def queue_list(self) -> list:
+        return [{"id": e["id"], "label": e.get("label") or ""} for e in self._queue.entries()]
+
+    def queue_remove(self, entry_id: str) -> dict:
+        self._queue.remove(entry_id)
+        return self.status()
+
+    def queue_move(self, entry_id: str, delta: int) -> dict:
+        self._queue.move(entry_id, delta)
+        return self.status()
+
+    def queue_clear(self) -> dict:
+        """Throw the waiting songs away - and with them, a playlist that was
+        one of them and is saved for carrying on (see unfinished)."""
+        urls = {e.get("url") for e in self._queue.entries()}
+        self._queue.clear()
+        saved = _load_run()
+        if saved and saved.get("url") in urls:
+            _forget_run()
+        return self.status()
+
+    def queue_resume(self) -> dict:
+        """Carry on with the queue after a Stop, or one left from last time."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return self._snapshot()
+            entry = self._queue.pop_next()
+            if entry is None:
+                return self._snapshot()
+            if self._state.get("stage") not in ("cancelled", "stopped"):
+                # Nothing of this session to carry on: a queue from last time.
+                self._finished, self._deferred, self._beat_waiting = [], [], []
+                self._entries_run = 0
+            return self._launch(entry)
+
+    def open_folder(self, path: str) -> bool:
+        """Open the folder a song was saved in - the done line's click."""
+        if path and os.path.isfile(path):
+            path = os.path.dirname(path)
+        return self.reveal(path)
 
     def reveal(self, path: str) -> bool:
         """Show what a song produced in Finder, ready to drag into a DAW - a
@@ -383,6 +563,9 @@ class Api:
         with self._lock:
             if self._state.get("running"):
                 return None
+        waiting = len(self._queue)
+        if waiting:
+            return {"kind": "queue", "count": waiting}
         saved = _load_run()
         if not saved or not os.path.isdir(saved.get("folder") or ""):
             return None
@@ -392,7 +575,7 @@ class Api:
         if total and done >= total:
             _forget_run()
             return None
-        return {"name": saved.get("name") or os.path.basename(saved["folder"]),
+        return {"kind": "playlist", "name": saved.get("name") or os.path.basename(saved["folder"]),
                 "done": done, "total": total}
 
     def resume_unfinished(self) -> dict:
@@ -414,10 +597,15 @@ class Api:
             state = dict(self._state)
         if not state.get("running"):
             return ""
+        waiting = len(self._queue)
+        more = f", with {waiting:,} more queued" if waiting else ""
         index, total = state.get("index"), state.get("total")
         if index and total and total > 1:
-            return (f"Beat Thief is on song {index:,} of {total:,}. Quit anyway? "
+            return (f"Beat Thief is on song {index:,} of {total:,}{more}. Quit anyway? "
                     "Everything finished is saved, and it'll offer to carry on next time.")
+        if waiting:
+            return (f"Beat Thief is still working{more}. Quit anyway? "
+                    "It'll offer to carry on with the queue next time.")
         return "Beat Thief is still working. Quit anyway?"
 
     def _remember_progress(self, event) -> None:
@@ -842,26 +1030,137 @@ class Api:
             self._state["choice"] = None
         return decision
 
-    def _work(self, *args, **kwargs):
-        """A run, with the Mac kept awake for it - and, once it's over, the
-        saved playlist forgotten if it got all the way through."""
+    def _work(self, entry):
+        """Steal entry, then every song queued behind it, one at a time -
+        with the Mac kept awake for all of it. Stop puts the song in hand
+        back at the front of the queue and leaves the rest waiting."""
         awake = _keep_awake()
         try:
-            self._do_work(*args, **kwargs)
+            while entry is not None:
+                result = self._run_entry(entry)
+                with self._lock:
+                    stage = self._state.get("stage")
+                if stage == "cancelled" or self._cancel.is_set():
+                    self._queue.put_back_current()
+                    with self._lock:
+                        self._queue_paused = True
+                        if len(self._queue) > 1 or self._finished:
+                            self._state["message"] = "Stopped. Anything already finished is saved."
+                    break
+                self._queue.finish_current()
+                if self._saved and stage in ("done", "too-long"):
+                    _forget_run()
+                self._after_entry(entry, result or {})
+                with self._lock:
+                    # A queue stopped before this song was started stays
+                    # stopped until Resume.
+                    entry = None if self._queue_paused else self._queue.pop_next()
+                    if entry is not None:
+                        self._begin_entry(entry)
+            else:
+                self._end_of_queue()
         finally:
             _let_sleep(awake)
-        with self._lock:
-            stage = self._state.get("stage")
-        if self._saved and stage in ("done", "too-long"):
-            _forget_run()
+            with self._lock:
+                self._state["running"] = False
 
-    def _do_work(self, url, output_dir, instruments, song="", number=False, run_options=None):
-        run_options = dict(run_options or {})
+    def _after_entry(self, entry: dict, result: dict) -> None:
+        """What's left to do for one entry once it's run: note what it
+        finished, loop its stems, and line its beat up for picking."""
+        with self._lock:
+            self._entries_run += 1
+            stage = self._state.get("stage")
+            summary = result.get("summary")
+            if summary:
+                self._finished.append(summary)
+            if result.get("waiting"):
+                self._deferred.append((result["output_dir"], list(result["waiting"])))
+            if stage == "error" and self._state.get("error"):
+                # Not the end of the queue: the songs behind it still go.
+                problem = f"{entry.get('label') or entry['url']}: {self._state['error']}"
+                self._state["problem_count"] += 1
+                self._state["problems"] = (self._state["problems"] + [problem])[-MAX_PROBLEMS:]
+        songs = result.get("songs") or []
+        if stage != "done" or not songs:
+            return
+        stems = entry.get("after", {}).get("loop_stems") or []
+        if stems:
+            looped = self.loop_stems(songs[0], stems)
+            if looped.get("error"):
+                with self._lock:
+                    self._state["problem_count"] += 1
+                    self._state["problems"] = (self._state["problems"] + [looped["error"]])[-MAX_PROBLEMS:]
+        if entry.get("after", {}).get("beat"):
+            with self._lock:
+                self._beat_waiting.append(songs[0])
+
+    def _end_of_queue(self) -> None:
+        """Everything queued is done: ask the questions put off till now,
+        then say what finished."""
+        if self._deferred and not self._cancel.is_set():
+            with self._lock:
+                self._state.update(stage="checking", message="Your questions...", percent=None,
+                                   steps=[], step_percent=None, eta="", index=None, total=None)
+                self._progress = None
+            for folder, keys in self._deferred:
+                if self._cancel.is_set():
+                    break
+                try:
+                    self._review_pending(folder, on_choose=self._on_choose, on_review=self._on_review,
+                                         on_event=self._on_event, should_cancel=self._cancel.is_set,
+                                         keys=keys)
+                except BaseException as e:
+                    with self._lock:
+                        self._state["problem_count"] += 1
+                        self._state["problems"] = (self._state["problems"] + [str(e)])[-MAX_PROBLEMS:]
+            self._deferred = []
+        with self._lock:
+            if self._cancel.is_set():
+                self._state.update(stage="cancelled", cancelled=True,
+                                   message="Stopped. The questions not yet answered are kept - "
+                                           "Check them asks them again.")
+                return
+            last_stage = self._state.get("stage")
+            if self._entries_run > 1 and self._finished:
+                # A queue: whatever the last one did, the done line is what
+                # finished - its problems are listed below it.
+                last_stage = "done"
+                self._state.update(stage="done", error="", too_long=None)
+            if last_stage == "checking":
+                last_stage = "done"
+                self._state["stage"] = "done"
+            if last_stage == "done":
+                self._state["percent"] = 100
+                self._state["message"] = self._done_message(self._finished) or self._state["message"]
+                if self._finished:
+                    last = self._finished[-1]
+                    self._state["finished"] = {"label": last["label"], "folder": last["folder"],
+                                               "others": len(self._finished) - 1}
+                self._state["beat_waiting"] = list(self._beat_waiting)
+
+    def _run_entry(self, entry):
+        """Run one entry to the end, leaving its outcome in the state (all
+        but "running", which the queue clears once it's empty). Returns the
+        pipeline's result, with "summary" for the done line, or None if it
+        raised."""
+        parsed, error = self._parse(entry["url"], entry["options"])
+        if error:
+            with self._lock:
+                self._state.update(stage="error", error=error)
+            return None
+        url, song, instruments = parsed["url"], parsed["song"], parsed["instruments"]
+        run_options = dict(parsed["run_options"])
         sanitize = run_options.pop("sanitize", "auto")
         # Ask puts every doubt to the page - which recording, where the song
         # starts. Auto and Off ask nothing: the best match and the
         # algorithm's own trim, so a long playlist can run unattended.
         asking = sanitize == "ask"
+        # A playlist in Ask mode keeps going and asks at the end - and so
+        # does a song with others queued behind it, so the queue isn't held
+        # up waiting on you. Those questions come after the last song of
+        # the queue. One song on its own asks while it's the song in hand.
+        later = "queue" if asking and (_is_playlist(url) or len(self._queue) or self._entries_run) \
+            else asking
         try:
             if song:
                 result = self._isolate_pipeline(
@@ -874,7 +1173,7 @@ class Api:
             else:
                 result = self._run_pipeline(
                     url,
-                    output_dir=output_dir,
+                    output_dir=parsed["output_dir"],
                     instruments=instruments,
                     on_event=self._on_event,
                     should_cancel=self._cancel.is_set,
@@ -882,28 +1181,27 @@ class Api:
                     on_review=self._on_review if asking else None,
                     on_choose=self._on_choose if asking else None,
                     sanitize=sanitize != "off",
-                    number=number,
-                    # A playlist in Ask mode keeps going, and puts its
-                    # questions to you at the end rather than at song 3.
-                    ask_later=asking,
+                    number=parsed["number"],
+                    ask_later=later,
                     **run_options,
                 )
         except BaseException as e:
             # Includes Cancelled and anything a dependency throws: a worker
             # thread dying silently would leave the page spinning forever.
             with self._lock:
-                self._state["running"] = False
                 self._state["stage"] = "error"
                 self._state["error"] = str(e) or e.__class__.__name__
-            return
+            return None
 
+        result = dict(result or {})
         with self._lock:
-            self._state["running"] = False
-            self._state["outputs"] = result.get("outputs", [])
+            outputs = list(self._state.get("outputs") or []) if self._entries_run else []
+            self._state["outputs"] = outputs + [p for p in result.get("outputs", []) if p not in outputs]
             self._state["cancelled"] = bool(result.get("cancelled"))
-            self._state["sources_csv"] = result.get("sources_csv") or ""
-            self._state["to_check"] = result.get("to_check") or 0
-            self._state["checks_in"] = result.get("output_dir") or "" if result.get("to_check") else ""
+            self._state["sources_csv"] = result.get("sources_csv") or self._state.get("sources_csv") or ""
+            if result.get("to_check"):
+                self._state["to_check"] = result["to_check"]
+                self._state["checks_in"] = result.get("output_dir") or ""
             if result.get("error"):
                 self._state["stage"] = "error"
                 self._state["error"] = result["error"]
@@ -918,6 +1216,11 @@ class Api:
                     f"This playlist has {count:,} songs - Spotify's link only gives {too_long['listed']}."
                     if count else
                     f"Spotify's link stops at {too_long['listed']} songs - this playlist may be longer.")
+                if len(self._queue):
+                    self._state["problem_count"] += 1
+                    self._state["problems"] = (self._state["problems"] + [
+                        f"{entry.get('label') or url}: {self._state['message']} "
+                        "Paste the whole list to take it all."])[-MAX_PROBLEMS:]
             elif result.get("cancelled"):
                 self._state["stage"] = "cancelled"
                 self._state["message"] = ("Stopped. Anything already finished is saved - paste "
@@ -927,7 +1230,10 @@ class Api:
             else:
                 self._state["stage"] = "done"
                 self._state["percent"] = 100
-                self._state["message"] = self._done_message(result, bool(song))
+                result["summary"] = self._summary(result, entry, bool(song))
+                self._state["message"] = (self._done_message([result["summary"]]) if result["summary"]
+                                          else self._nothing_message(result, bool(song)))
+        return result
 
     def _work_tidy(self, folder):
         awake = _keep_awake()
@@ -967,27 +1273,44 @@ class Api:
                                           if count else "No songs in that folder.")
 
     @staticmethod
-    def _done_message(result: dict, from_stash: bool = False) -> str:
-        if from_stash:
-            # Nothing was downloaded because there was nothing to download,
-            # so neither counter means here what it means after a run.
-            return "Done." if result.get("outputs") else "Nothing came back for that song."
+    def _summary(result: dict, entry: dict, from_stash: bool = False) -> dict | None:
+        """What one finished entry was, for the done line - {"label",
+        "folder", "have", "total"} - or None if nothing came of it."""
         total = result.get("total") or 0
         if total > 1:
-            # A playlist: how many of its songs are here now, and what
-            # didn't work - so a run that met trouble doesn't just say Done.
+            folder = result.get("output_dir") or ""
             have = (result.get("finished") or 0) + (result.get("already") or 0)
-            failed, to_check = result.get("failed") or 0, result.get("to_check") or 0
-            message = f"Done - all {total:,} songs." if have >= total else f"Done - {have:,} of {total:,} songs."
-            if failed:
-                message += f" {failed:,} couldn't be had - pasting it again tries them again."
-            if to_check:
-                message += f" {to_check:,} {'match is a guess' if to_check == 1 else 'matches are guesses'} worth checking."
-            return message
-        if result.get("downloaded"):
-            return "Done."
-        if result.get("songs"):
-            return "Done (you already had this one downloaded)."
+            return {"label": os.path.basename(folder.rstrip(os.sep)) or entry.get("label") or "the playlist",
+                    "folder": folder, "have": have, "total": total}
+        songs = result.get("songs") or []
+        if from_stash and not result.get("outputs"):
+            return None
+        if not songs:
+            return None
+        return {"label": instrument_isolator.song_title(songs[0]), "folder": os.path.dirname(songs[0]),
+                "have": 1, "total": 1}
+
+    @staticmethod
+    def _done_message(finished: list) -> str:
+        """The done line: the last thing finished, how many more did, and
+        that it's ready for the next. Nothing else - what went wrong is
+        listed under it, and the song is a click away."""
+        if not finished:
+            return ""
+        last = finished[-1]
+        name = last["label"]
+        if last.get("total", 1) > 1:
+            have, total = last.get("have") or 0, last["total"]
+            name += f" — all {total:,} songs" if have >= total else f" — {have:,} of {total:,} songs"
+        others = len(finished) - 1
+        if others:
+            name += f" (and {others:,} other{'' if others == 1 else 's'})"
+        return f"Finished {name} — ready for another song."
+
+    @staticmethod
+    def _nothing_message(result: dict, from_stash: bool = False) -> str:
+        if from_stash:
+            return "Nothing came back for that song."
         return "Nothing came back for that link."
 
     def _on_event(self, event):

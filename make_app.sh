@@ -69,6 +69,7 @@ SOURCES=(
     gui.py
     pipeline.py
     sources.py
+    song_queue.py
     net.py
     spotify.py
     youtube_match.py

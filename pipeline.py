@@ -963,7 +963,7 @@ def run(
     steps=None,
     folder_name: str = "",
     take_listed: bool = True,
-    ask_later: bool = False,
+    ask_later: bool | str = False,
 ) -> dict:
     """Download url into output_dir, sanitize it, and isolate the requested
     instruments. Returns a result dict describing what happened.
@@ -1012,7 +1012,13 @@ def run(
 
     Cancelling: should_cancel is polled between songs and stages and during
     the slow demucs work. On cancel the run stops where it is and reports
-    what it had already finished; nothing already written is removed."""
+    what it had already finished; nothing already written is removed.
+
+    ask_later=True keeps a playlist in Ask mode going and puts its questions
+    at the end (see review_pending). ask_later="queue" puts them off even
+    for a single song, and doesn't ask them at all: the app's queue asks
+    after its last song. Either way result["waiting"] is the keys of this
+    run's songs with a question left, for review_pending(keys=...)."""
     if on_event is None:
         def on_event(_event):
             pass
@@ -1032,6 +1038,7 @@ def run(
         "outputs": [],
         "cancelled": False,
         "output_dir": output_dir,
+        "waiting": [],
     }
 
     def cancelled() -> bool:
@@ -1113,8 +1120,10 @@ def run(
         on_event({"stage": "resuming", "done": already, "total": total})
 
     # Asking later is for a playlist: one song's questions are best asked
-    # while it's the song in hand.
-    ask_later = ask_later and is_playlist and (on_choose is not None or on_review is not None)
+    # while it's the song in hand - unless other songs are queued behind it.
+    for_queue = ask_later == "queue"
+    ask_later = bool(ask_later) and (is_playlist or for_queue) and (
+        on_choose is not None or on_review is not None)
     ctx = _Run(output_dir=output_dir, record=record, on_event=on_event, on_choose=on_choose,
                ask_later=ask_later,
                on_review=on_review, interactive=interactive, sanitize=sanitize, number=number,
@@ -1213,6 +1222,8 @@ def run(
         pass
 
     result["total"] = total
+    result["waiting"] = [key for key in dict.fromkeys(_key(song) for song in queue)
+                         if _waiting_question(record.get(key))]
     result["to_check"] = sum(1 for entry in record.songs.values()
                              if entry.get("check") and entry.get("status") == "done")
     result["sources_csv"] = (os.path.join(output_dir, sources.CSV_FILENAME)
@@ -1245,7 +1256,7 @@ def run(
     if not is_playlist:
         _isolate_songs(result["songs"], wanted, on_event, cancelled, should_cancel, interactive, result)
 
-    if ask_later and not cancelled():
+    if ask_later and not for_queue and not cancelled():
         # The questions the run put off - every one this folder has, so a
         # resumed run asks about the earlier part's too.
         checked = review_pending(output_dir, on_choose, on_review, on_event, should_cancel)
@@ -1696,7 +1707,7 @@ def pending_questions(folder: str) -> int:
 
 
 def review_pending(folder: str, on_choose=None, on_review=None, on_event=None,
-                   should_cancel=None) -> dict:
+                   should_cancel=None, keys=None) -> dict:
     """Ask the questions a playlist run put off (see run(ask_later)), one
     song at a time: which upload is right where the run guessed, and where
     an unclear start or end really is.
@@ -1704,7 +1715,10 @@ def review_pending(folder: str, on_choose=None, on_review=None, on_event=None,
     Picking a different upload replaces the song with that one, under the
     same name and number. Each answer is written down as it's given, so
     stopping halfway keeps every answer so far and the rest are asked next
-    time. Returns {"asked", "swapped", "moved": {old path: new path}}."""
+    time. Returns {"asked", "swapped", "moved": {old path: new path}}.
+
+    keys narrows it to those songs - a queue's own, rather than every guess
+    the folder has been left with."""
     if on_event is None:
         def on_event(_event):
             pass
@@ -1713,7 +1727,8 @@ def review_pending(folder: str, on_choose=None, on_review=None, on_event=None,
         return should_cancel is not None and should_cancel()
 
     record = sources.Sources(folder)
-    waiting = [key for key, entry in record.songs.items() if _waiting_question(entry)]
+    waiting = [key for key, entry in record.songs.items() if _waiting_question(entry)
+               and (keys is None or key in keys)]
     outcome = {"asked": 0, "swapped": 0, "moved": {}}
     for index, key in enumerate(waiting, start=1):
         if cancelled():

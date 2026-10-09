@@ -29,6 +29,10 @@ def setUpModule():
     _module_patches.extend([
         mock.patch("gui.KEEP_AWAKE", False),
         mock.patch("gui.RUN_STATE_PATH", os.path.join(scratch, "unfinished_run.json")),
+        # Nor the real queue - each Api's is its own, in memory - and no
+        # looking queued links up online.
+        mock.patch("gui.QUEUE_PATH", None),
+        mock.patch("gui.LOOK_UP_TITLES", False),
         # Whatever this Mac has installed: the tests below arm stems.
         mock.patch("instrument_isolator.splitter_installed", return_value=True),
     ])
@@ -299,7 +303,7 @@ class TestApiStart(unittest.TestCase):
         api.start("", {"source": "/songs/Track/Track.mp3", "bass": True})
         _wait_until(lambda: not api.status()["running"])
 
-        self.assertEqual(api.status()["message"], "Done.")
+        self.assertEqual(api.status()["message"], "Finished Track — ready for another song.")
 
     def test_the_gui_always_runs_non_interactively(self):
         calls = {}
@@ -311,7 +315,7 @@ class TestApiStart(unittest.TestCase):
         # A window can't answer a terminal prompt, so it must never provoke one.
         self.assertIs(calls["interactive"], False)
 
-    def test_a_second_start_while_running_is_ignored(self):
+    def test_a_second_start_while_running_waits_its_turn(self):
         release = threading.Event()
         runs = []
 
@@ -322,11 +326,13 @@ class TestApiStart(unittest.TestCase):
 
         api = gui.Api(run_pipeline=slow_pipeline)
         api.start("https://example.com/first")
-        api.start("https://example.com/second")
+        state = api.start("https://example.com/second")
+        self.assertTrue(state["running"])
+        self.assertEqual(runs, ["https://example.com/first"])
 
         release.set()
         _wait_until(lambda: not api.status()["running"])
-        self.assertEqual(runs, ["https://example.com/first"])
+        self.assertEqual(runs, ["https://example.com/first", "https://example.com/second"])
 
 
 class TestSongsOnly(unittest.TestCase):
@@ -1323,14 +1329,14 @@ class TestUiFile(unittest.TestCase):
             with self.subTest(method=name):
                 self.assertTrue(callable(getattr(gui.Api, name, None)))
 
-    def test_the_picker_offers_16_32_64_bars_or_by_ear(self):
+    def test_the_picker_offers_4_8_16_bars_or_by_ear(self):
         with open(gui.UI_FILE) as page:
             html = page.read()
         chips = re.findall(r'data-bars="(\d+)"', html)
 
-        self.assertEqual(chips, ["16", "32", "64", "0"])
-        self.assertIn("let barsWanted = 16;", html)
-        self.assertRegex(html, r'data-bars="16" class="on"')
+        self.assertEqual(chips, ["4", "8", "16", "0"])
+        self.assertIn("let barsWanted = 4;", html)
+        self.assertRegex(html, r'data-bars="4" class="on"')
 
     def test_s_swaps_the_drums_and_the_song(self):
         with open(gui.UI_FILE) as page:
@@ -1646,16 +1652,20 @@ class TestALongRunSaysWhatsHappening(unittest.TestCase):
         self.assertEqual(len(state["problems"]), gui.MAX_PROBLEMS)
         self.assertEqual(state["problems"][-1], f"Song {gui.MAX_PROBLEMS + 4} is gone")
 
+    def _playlist_done(self, result):
+        summary = gui.Api._summary(dict(result, output_dir="/Music/Eighties"), {"url": "x"})
+        return gui.Api._done_message([summary])
+
     def test_the_end_of_a_playlist_adds_it_up(self):
-        message = gui.Api._done_message({"total": 4870, "finished": 3000, "already": 1829,
-                                         "failed": 41, "to_check": 17, "downloaded": 3000})
-        self.assertIn("4,829 of 4,870", message)
-        self.assertIn("41 couldn't be had", message)
-        self.assertIn("17 matches are guesses", message)
+        # What went wrong is in the problems list and Sources.csv - the
+        # done line only says what finished.
+        message = self._playlist_done({"total": 4870, "finished": 3000, "already": 1829,
+                                       "failed": 41, "to_check": 17, "downloaded": 3000})
+        self.assertEqual(message, "Finished Eighties — 4,829 of 4,870 songs — ready for another song.")
 
     def test_a_whole_playlist_says_all(self):
-        message = gui.Api._done_message({"total": 12, "finished": 12, "downloaded": 12})
-        self.assertEqual(message, "Done - all 12 songs.")
+        message = self._playlist_done({"total": 12, "finished": 12, "downloaded": 12})
+        self.assertEqual(message, "Finished Eighties — all 12 songs — ready for another song.")
 
     def test_the_finished_run_points_at_sources_csv(self):
         api = gui.Api(run_pipeline=lambda *a, **k: {
@@ -1706,7 +1716,7 @@ class TestAPlaylistSurvivesTheAppGoingAway(unittest.TestCase):
     def test_a_run_that_stopped_partway_is_offered_next_launch(self):
         self._playlist_run(finish=False)
         offered = gui.Api().unfinished()
-        self.assertEqual(offered, {"name": "Eighties", "done": 2, "total": 5})
+        self.assertEqual(offered, {"kind": "playlist", "name": "Eighties", "done": 2, "total": 5})
 
     def test_resuming_starts_the_same_link_with_the_same_options(self):
         self._playlist_run(finish=False)
@@ -1784,7 +1794,9 @@ class TestAPlaylistSurvivesTheAppGoingAway(unittest.TestCase):
 
 class TestAskingAtTheEndFromTheApp(unittest.TestCase):
     def test_ask_mode_asks_at_the_end_and_auto_never_asks(self):
-        for mode, later in (("ask", True), ("auto", False)):
+        # A playlist's questions wait for the end of the queue - which,
+        # with nothing queued behind it, is the end of the playlist.
+        for mode, later in (("ask", "queue"), ("auto", False)):
             calls = {}
             api = gui.Api(run_pipeline=lambda url, **k: calls.update(k) or {"outputs": []})
             api.start("https://open.spotify.com/playlist/x", {"song": True, "sanitize": mode})
@@ -1816,3 +1828,279 @@ class TestAskingAtTheEndFromTheApp(unittest.TestCase):
     def test_checking_says_which(self):
         message, _ = gui.Api._describe({"stage": "checking", "index": 3, "total": 17, "song": "Two"})
         self.assertEqual(message, "Checking 3 of 17 — Two")
+
+
+class TestTheQueue(unittest.TestCase):
+    """Steal it while a song is going adds to a queue; the queue runs one
+    song at a time with the settings each was added with."""
+
+    def setUp(self):
+        self.runs = []
+        self.gates = {}
+
+    def _pipeline(self, url, **kwargs):
+        self.runs.append((url, kwargs))
+        gate = self.gates.get(url)
+        if gate is not None:
+            gate.wait(timeout=2)
+        title = url.rsplit("/", 1)[1]
+        if kwargs["should_cancel"]():
+            return {"cancelled": True, "outputs": []}
+        song = f"/Music/Beat Thief/{title}/{title} (98.0 BPM).mp3"
+        return {"outputs": [song], "songs": [song], "downloaded": 1, "total": 1,
+                "output_dir": "/Music/Beat Thief"}
+
+    def _api(self, **kwargs):
+        return gui.Api(run_pipeline=self._pipeline, **kwargs)
+
+    def _hold(self, *urls):
+        for url in urls:
+            self.gates[url] = threading.Event()
+
+    def test_adding_while_running_shows_up_next_and_last_added(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        api.start("https://youtu.be/Two", {"song": True})
+        state = api.start("https://youtu.be/Three", {"song": True})
+        self.assertEqual([e["label"] for e in state["queue"]], ["YouTube Two", "YouTube Three"])
+        self.assertEqual(state["up_next"], "YouTube Two")
+        self.assertEqual(state["last_added"], "YouTube Three")
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+
+    def test_last_added_is_left_out_when_it_is_up_next(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        state = api.start("https://youtu.be/Two", {"song": True})
+        self.assertEqual((state["up_next"], state["last_added"]), ("YouTube Two", ""))
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+
+    def test_each_runs_in_turn_with_its_own_settings(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        api.start("https://youtu.be/Two", {"song": True, "drums": True})
+        api.start("https://youtu.be/Three", {"song": True, "bass": True})
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual([(u.rsplit("/", 1)[1], k["instruments"]) for u, k in self.runs],
+                         [("One", []), ("Two", ["drums"]), ("Three", ["bass"])])
+
+    def test_the_done_line_names_the_last_song_and_how_many_others(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        api.start("https://youtu.be/Two", {"song": True})
+        api.start("https://youtu.be/Hey Ya!", {"song": True})
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        state = api.status()
+        self.assertEqual(state["message"], "Finished Hey Ya! (and 2 others) — ready for another song.")
+        self.assertNotIn("BPM", state["message"])
+        self.assertEqual(state["finished"], {"label": "Hey Ya!", "folder": "/Music/Beat Thief/Hey Ya!",
+                                             "others": 2})
+
+    def test_one_song_alone_says_so(self):
+        api = self._api()
+        api.start("https://youtu.be/Hey Ya!", {"song": True})
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(api.status()["message"], "Finished Hey Ya! — ready for another song.")
+
+    def test_stop_keeps_the_queue_with_the_song_in_hand_at_the_front(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        api.start("https://youtu.be/Two", {"song": True})
+        api.cancel()
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        state = api.status()
+        self.assertEqual(state["stage"], "cancelled")
+        self.assertTrue(state["queue_paused"])
+        self.assertEqual([e["label"] for e in state["queue"]], ["YouTube One", "YouTube Two"])
+
+        self.gates.clear()
+        api.queue_resume()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual([u.rsplit("/", 1)[1] for u, _ in self.runs], ["One", "One", "Two"])
+        self.assertEqual(api.status()["queue"], [])
+        self.assertIn("Finished Two", api.status()["message"])
+
+    def test_steal_it_after_a_stop_goes_alone_and_the_queue_stays_stopped(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        api.start("https://youtu.be/Two", {"song": True})
+        api.cancel()
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        api.start("https://youtu.be/New", {"song": True})
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual([u.rsplit("/", 1)[1] for u, _ in self.runs], ["One", "New"])
+        self.assertTrue(api.status()["queue_paused"])
+        self.assertEqual(len(api.status()["queue"]), 2)
+
+    def test_the_queue_can_be_edited_while_it_runs(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        for name in ("Two", "Three", "Four"):
+            api.start(f"https://youtu.be/{name}", {"song": True})
+        ids = [e["id"] for e in api.queue_list()]
+        api.queue_remove(ids[0])
+        state = api.queue_move(ids[2], -1)
+        self.assertEqual([e["label"] for e in state["queue"]], ["YouTube Four", "YouTube Three"])
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual([u.rsplit("/", 1)[1] for u, _ in self.runs], ["One", "Four", "Three"])
+
+    def test_clearing_throws_the_waiting_songs_away(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        api.start("https://youtu.be/Two", {"song": True})
+        api.queue_clear()
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual([u.rsplit("/", 1)[1] for u, _ in self.runs], ["One"])
+
+    def test_a_link_that_cannot_be_queued_says_why_without_stopping_anything(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        state = api.start("  ", {"song": True})
+        self.assertTrue(state["running"])
+        self.assertIn("link", state["queue_error"].lower())
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+
+    def test_one_that_fails_does_not_stop_the_rest(self):
+        def pipeline(url, **kwargs):
+            if url.endswith("Bad"):
+                return {"error": "Video unavailable", "outputs": []}
+            return self._pipeline(url, **kwargs)
+
+        self._hold("https://youtu.be/One")
+        api = gui.Api(run_pipeline=pipeline)
+        api.start("https://youtu.be/One", {"song": True})
+        api.start("https://youtu.be/Bad", {"song": True})
+        api.start("https://youtu.be/Two", {"song": True})
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        state = api.status()
+        self.assertEqual(state["stage"], "done")
+        self.assertIn("Finished Two (and 1 other)", state["message"])
+        self.assertTrue(any("Video unavailable" in p for p in state["problems"]))
+
+    def test_ask_mode_questions_wait_for_the_end_of_the_queue(self):
+        order = []
+
+        def pipeline(url, **kwargs):
+            order.append(("run", url.rsplit("/", 1)[1], kwargs["ask_later"]))
+            result = self._pipeline(url, **kwargs)
+            return dict(result, waiting=[f"key:{url}"])
+
+        def review(folder, keys=None, **kwargs):
+            order.append(("ask", keys))
+            return {"asked": 1, "swapped": 0, "moved": {}}
+
+        self._hold("https://youtu.be/One")
+        api = gui.Api(run_pipeline=pipeline, review_pending=review)
+        api.start("https://youtu.be/One", {"song": True, "sanitize": "ask"})
+        api.start("https://youtu.be/Two", {"song": True, "sanitize": "ask"})
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        # One was alone when it started, so it asked as it went; Two had
+        # One ahead of it, so its question waited for the end.
+        self.assertEqual(order[0], ("run", "One", True))
+        self.assertEqual(order[1], ("run", "Two", "queue"))
+        self.assertEqual(order[2:], [("ask", ["key:https://youtu.be/One"]),
+                                     ("ask", ["key:https://youtu.be/Two"])])
+        self.assertIn("Finished Two", api.status()["message"])
+
+    def test_beat_armed_songs_wait_for_the_picker_until_the_queue_is_done(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True, "drums": True, "after": {"beat": True}})
+        api.start("https://youtu.be/Two", {"song": True, "drums": True, "after": {"beat": True}})
+        self.assertEqual(api.status()["beat_waiting"], [])
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(api.status()["beat_waiting"],
+                         ["/Music/Beat Thief/One/One (98.0 BPM).mp3",
+                          "/Music/Beat Thief/Two/Two (98.0 BPM).mp3"])
+
+    def test_stem_loops_are_cut_once_the_song_is_done(self):
+        api = self._api()
+        with mock.patch.object(gui.Api, "loop_stems", return_value={"loops": []}) as loop:
+            api.start("https://youtu.be/One", {"song": True, "bass": True,
+                                               "after": {"loop_stems": ["bass"]}})
+            _wait_until(lambda: not api.status()["running"])
+        loop.assert_called_once_with("/Music/Beat Thief/One/One (98.0 BPM).mp3", ["bass"])
+
+    @mock.patch("gui.subprocess.run")
+    def test_the_done_line_opens_the_songs_folder(self, run):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.assertTrue(gui.Api().open_folder(folder))
+        run.assert_called_once_with(["open", folder], check=False)
+
+    def test_closing_mid_queue_says_how_many_are_waiting(self):
+        self._hold("https://youtu.be/One")
+        api = self._api()
+        api.start("https://youtu.be/One", {"song": True})
+        api.start("https://youtu.be/Two", {"song": True})
+        self.assertIn("1 more queued", api.quit_warning())
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+
+    def test_a_queue_left_by_quitting_is_offered_next_launch(self):
+        path = os.path.join(tempfile.mkdtemp(), "queue.json")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        with mock.patch("gui.QUEUE_PATH", path):
+            self._hold("https://youtu.be/One")
+            api = self._api()
+            api.start("https://youtu.be/One", {"song": True})
+            api.start("https://youtu.be/Two", {"song": True})
+            # The app goes away mid-song: a fresh Api is the next launch.
+            again = self._api()
+            self.assertEqual(again.unfinished(), {"kind": "queue", "count": 2})
+            self.assertTrue(again.status()["queue_paused"])
+            self.gates.clear()
+            self.runs.clear()
+            again.queue_resume()
+            _wait_until(lambda: not again.status()["running"])
+            self.assertEqual([u.rsplit("/", 1)[1] for u, _ in self.runs], ["One", "Two"])
+            self.assertIsNone(again.unfinished())
+            api._cancel.set()
+            self.gates["https://youtu.be/One"].set() if "https://youtu.be/One" in self.gates else None
+            _wait_until(lambda: not api.status()["running"])
+
+
+class TestTheNewLayout(unittest.TestCase):
+    def setUp(self):
+        with open(gui.UI_FILE) as page:
+            self.html = page.read()
+
+    def test_the_window_is_taller(self):
+        self.assertEqual(gui.WINDOW_SIZE, (560, 840))
+
+    def test_steal_it_is_above_the_status_and_stop_below(self):
+        go, readout, stop = (self.html.index(f'id="{name}"') for name in ("go", "readout", "stop"))
+        self.assertLess(go, readout)
+        self.assertLess(readout, stop)
+
+    def test_the_page_shows_the_queue(self):
+        for needed in ('id="queue"', "state.up_next", "state.last_added", "Add to queue",
+                       "api.queue_resume()", "api.queue_clear()", "api.queue_remove(",
+                       "api.queue_move(", "api.open_folder(", "state.beat_waiting"):
+            self.assertIn(needed, self.html)
+
+    def test_the_bpm_is_no_longer_offered_to_copy(self):
+        self.assertNotIn("BPM — click to copy", self.html)
+
+    def test_the_pause_button_says_mark_end_when_it_marks_the_end(self):
+        self.assertIn("Mark End", self.html)

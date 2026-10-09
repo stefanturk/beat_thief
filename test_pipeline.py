@@ -2054,11 +2054,12 @@ class TestAskingAtTheEnd(PipelineTestCase):
             return on_choose(request) if on_choose else {"url": request["candidates"][0]["url"]}
 
         songs = [self._song(t, n) for n, t in enumerate(self.TITLES, start=1)]
+        kwargs.setdefault("ask_later", True)
         with mock.patch("spotify.collection", return_value={"name": "Misco", "songs": songs}), \
              mock.patch("youtube_match.candidates", side_effect=self._unsure), \
              mock.patch.object(_FakeYoutubeDL, "download", download):
             return pipeline.run(self.PLAYLIST, output_dir=self.tmp_dir, on_event=self.events.append,
-                                on_choose=choose, on_review=on_review, ask_later=True, **kwargs)
+                                on_choose=choose, on_review=on_review, **kwargs)
 
     def _record(self, result):
         return pipeline.sources.Sources(result["output_dir"])
@@ -2138,6 +2139,34 @@ class TestAskingAtTheEnd(PipelineTestCase):
                          on_choose=lambda r: asked.append(len(_FakeYoutubeDL.downloads)) or
                          {"url": r["candidates"][0]["url"]}, ask_later=True)
         self.assertEqual(asked, [0])
+
+    def test_one_queued_song_saves_its_questions_for_whoever_runs_the_queue(self):
+        # In a queue, even one song's questions wait - and the run doesn't
+        # ask them at its own end either: the queue asks after its last song.
+        song = {"title": "One", "artist": "Someone", "duration_sec": 200.0, "query": "Someone One"}
+        asked = []
+        with mock.patch("spotify.track", return_value=song), \
+             mock.patch("youtube_match.candidates", side_effect=self._unsure):
+            result = pipeline.run("https://open.spotify.com/track/" + "A" * 22, output_dir=self.tmp_dir,
+                                  on_choose=lambda r: asked.append(r) or {"url": None},
+                                  ask_later="queue")
+        self.assertEqual(asked, [])
+        self.assertEqual(len(result["waiting"]), 1)
+        self.assertEqual(pipeline.pending_questions(result["output_dir"]), 1)
+
+    def test_a_queued_playlist_leaves_its_questions_for_the_end_of_the_queue(self):
+        result = self._play(on_choose=lambda r: self.fail("asked too soon"), ask_later="queue")
+        self.assertEqual([kind for kind, _ in self.order], ["download"] * 3)
+        self.assertEqual(len(result["waiting"]), 3)
+
+    def test_only_the_songs_asked_about_are_asked_again(self):
+        # Older guesses in the same folder were left on Auto - they're for
+        # Check them, not for this queue's questions.
+        result = self._play(ask_later="queue")
+        asked = []
+        pipeline.review_pending(result["output_dir"], on_choose=lambda r: asked.append(r["title"]) or {},
+                                keys=result["waiting"][:1])
+        self.assertEqual(asked, ["One"])
 
     def test_a_guess_on_auto_keeps_what_else_there_was(self):
         songs = [self._song(t, n) for n, t in enumerate(self.TITLES, start=1)]
