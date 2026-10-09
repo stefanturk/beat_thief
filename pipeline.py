@@ -1414,7 +1414,7 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
 
     if whole:
         if ctx.sanitize and fresh:
-            on_event({"stage": "sanitizing"})
+            on_event({"stage": "sanitizing", "index": position, "total": total})
         finished = _finish_track(track_url, fresh, folder, on_event, ctx.interactive,
                                  ctx.on_review, ctx.sanitize, ctx.own_folder, place, bpm=ctx.bpm,
                                  name=name, tags=tags, steps=ctx.steps)
@@ -1435,7 +1435,7 @@ def _take_song(ctx, song: dict, key: str, position: int, avoid=()) -> dict:
         return outcome
 
     if ctx.sanitize:
-        on_event({"stage": "sanitizing"})
+        on_event({"stage": "sanitizing", "index": position, "total": total})
     # Duplicates are looked for once the song is among the others, below -
     # in the work folder it's alone.
     steps = song_sanitizer._steps(ctx.steps) - {"duplicates"}

@@ -369,6 +369,53 @@ class TestSongsOnly(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr[-2000:])
 
 
+class TestAPlaylistKeepsItsPlace(unittest.TestCase):
+    """The steps after a song's download don't say which song they're on,
+    and the page used to show them bare: the bar went blank and "Song 3 of
+    12" vanished until the next song started."""
+
+    def test_every_step_of_a_song_keeps_the_song_and_the_bar(self):
+        seen = []
+
+        def playlist(url, on_event=None, **kwargs):
+            for event in (
+                {"stage": "resolving", "index": 2, "total": 12, "song": "Them Changes"},
+                {"stage": "found", "total": 1, "song": "Them Changes", "index": 2, "queue_total": 12},
+                {"stage": "downloading", "song": "Them Changes", "index": 2, "total": 12, "percent": 40.0},
+                {"stage": "sanitizing", "index": 2, "total": 12},
+                {"stage": "tempo"},
+                {"stage": "isolating", "instrument": "drums", "song": "Them Changes",
+                 "index": 1, "total": 1, "percent": None, "phase": "Loading the separator..."},
+                {"stage": "isolating", "instrument": "drums", "song": "Them Changes",
+                 "index": 1, "total": 1, "percent": 80.0, "phase": None},
+            ):
+                on_event(event)
+                seen.append(api.status())
+            return {"outputs": []}
+
+        api = gui.Api(run_pipeline=playlist)
+        api.start("https://open.spotify.com/playlist/abc", {"drums": True})
+        _wait_until(lambda: not api.status()["running"])
+
+        percents = [state["percent"] for state in seen]
+        self.assertNotIn(None, percents)
+        self.assertEqual(percents, sorted(percents))
+        self.assertTrue(all(8 < p < 17 for p in percents), percents)   # song 2 of 12
+        for state in seen[3:]:
+            with self.subTest(stage=state["stage"]):
+                self.assertTrue(state["message"].startswith("Song 2 of 12 — "), state["message"])
+                self.assertEqual((state["index"], state["total"]), (2, 12))
+        self.assertEqual(seen[3]["message"], "Song 2 of 12 — Them Changes — cleaning it up...")
+        self.assertEqual([s["state"] for s in seen[-1]["steps"]], ["done", "done", "done", "done", "now"])
+        self.assertEqual(seen[-1]["step_percent"], 80.0)
+
+    def test_the_page_has_somewhere_to_show_the_steps(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        for element in ('id="steps"', 'id="step-bar"'):
+            self.assertIn(element, html)
+
+
 class TestApiStatus(unittest.TestCase):
     def test_progress_events_become_a_readable_message_and_percentage(self):
         def emitting_pipeline(url, on_event=None, **kwargs):

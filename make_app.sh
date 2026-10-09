@@ -82,6 +82,7 @@ SOURCES=(
     beat_writer.py
     beat_loop.py
     pulse.py
+    progress.py
     audition.py
     bass_isolator.py
     harmony_isolator.py

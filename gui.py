@@ -30,6 +30,7 @@ import audition
 import beat_loop
 import instrument_isolator
 import pipeline
+import progress
 import pulse
 import sources
 
@@ -143,6 +144,9 @@ class Api:
         # to be a playlist - what's saved about it for the next launch.
         self._started = None
         self._saved = None
+        # The run in hand's progress.RunProgress, or None for a run that
+        # isn't worked through song by song (checking guesses).
+        self._progress = None
 
     @staticmethod
     def _idle_state() -> dict:
@@ -173,6 +177,15 @@ class Api:
             # folder - offered as "Check them" (see check_guesses).
             "to_check": 0,
             "checks_in": "",
+            # The run as a whole (see progress.RunProgress): this song's
+            # steps and which is in hand, that step's own percentage, the
+            # time left, and which song of how many.
+            "steps": [],
+            "then": "",
+            "step_percent": None,
+            "eta": "",
+            "index": None,
+            "total": None,
         }
 
     @staticmethod
@@ -243,6 +256,10 @@ class Api:
             state_snapshot = dict(self._state)
             self._started = None if song else {"url": url, "options": dict(options)}
             self._saved = None
+            self._progress = progress.RunProgress(
+                progress.steps_for(sanitize != "off", run_options["bpm"], instruments,
+                                   download=not song),
+                then="your questions" if sanitize == "ask" and not song else "")
 
         output_dir = options.get("output_dir") or DEFAULT_OUTPUT
 
@@ -268,6 +285,7 @@ class Api:
             self._state.update({"running": True, "stage": "starting", "message": "Getting ready...",
                                 "output_dir": folder})
             state_snapshot = dict(self._state)
+            self._progress = progress.RunProgress(["clean"])
             self._thread = threading.Thread(target=self._work_tidy, args=(folder,), daemon=True)
             self._thread.start()
         return state_snapshot
@@ -285,6 +303,7 @@ class Api:
             self._state.update({"running": True, "stage": "checking", "message": "Getting ready...",
                                 "output_dir": folder})
             state_snapshot = dict(self._state)
+            self._progress = None
             self._thread = threading.Thread(target=self._work_check, args=(folder,), daemon=True)
             self._thread.start()
         return state_snapshot
@@ -754,6 +773,8 @@ class Api:
         the thing that rewrites a file."""
         self._review_decision = None
         self._review_answered.clear()
+        if self._progress is not None:
+            self._progress.pause()
         with self._lock:
             self._state["stage"] = "reviewing"
             self._state["message"] = (
@@ -774,6 +795,8 @@ class Api:
 
         decision = self._review_decision or {"action": "keep"}
         self._review_decision = None
+        if self._progress is not None:
+            self._progress.resume()
         with self._lock:
             self._state["review"] = None
         return decision
@@ -790,6 +813,8 @@ class Api:
         A cancel releases it with nothing picked, which stops the run."""
         self._choice_decision = None
         self._choice_answered.clear()
+        if self._progress is not None:
+            self._progress.pause()
         with self._lock:
             self._state["stage"] = "choosing"
             self._state["message"] = "Which one is it?"
@@ -811,6 +836,8 @@ class Api:
 
         decision = self._choice_decision or {"url": None}
         self._choice_decision = None
+        if self._progress is not None:
+            self._progress.resume()
         with self._lock:
             self._state["choice"] = None
         return decision
@@ -967,16 +994,44 @@ class Api:
         stage = event["stage"]
         self._remember_progress(event)
         message, percent = self._describe(event)
+        tracker = self._progress
+        view = None
+        if tracker is not None:
+            tracker.feed(event)
+            view = tracker.view()
+            if view["percent"] is not None:
+                percent = view["percent"]
+            message = self._with_song(message, stage, view)
         with self._lock:
             if message is not None:
                 self._state["message"] = message
             self._state["stage"] = stage
             self._state["percent"] = percent
+            if view is not None:
+                self._state.update(steps=view["steps"], step_percent=view["step_percent"],
+                                   eta=view["eta"], index=view["index"], total=view["total"],
+                                   then=view["then"] if view["total"] > 1 else "")
             if stage == "error":
                 self._state["error"] = event.get("message", "")
             if event.get("problem"):
                 self._state["problem_count"] += 1
                 self._state["problems"] = (self._state["problems"] + [event["message"]])[-MAX_PROBLEMS:]
+
+    # The steps of a song that say nothing about which song they're on.
+    _SONGLESS = ("sanitizing", "tempo", "isolating", "isolated")
+
+    @staticmethod
+    def _with_song(message, stage, view) -> str | None:
+        """A playlist's message, always saying which song it's on - the
+        steps after the download used to drop it, and "Cleaning it up..."
+        on its own doesn't tell you song 3 from song 300."""
+        if message is None or view["total"] <= 1 or stage not in Api._SONGLESS:
+            return message
+        where = f"Song {view['index']:,} of {view['total']:,}"
+        if stage in ("sanitizing", "tempo") and view["song"]:
+            where += f" — {view['song']}"
+        return f"{where} — {message[:1].lower()}{message[1:]}" if stage in ("sanitizing", "tempo") \
+            else f"{where} — {message}"
 
     @staticmethod
     def _which_song(event) -> str:
