@@ -114,10 +114,10 @@
   @keyframes pulse { 50% { opacity: 0.25; } }
 
   main {
-    padding: 20px 22px;
+    padding: 16px 22px;
     display: flex;
     flex-direction: column;
-    gap: 22px;
+    gap: 14px;
     flex: none;
   }
 
@@ -141,7 +141,7 @@
   }
 
   /* Armed pads: on or off at a glance, no hunting for a tick mark. */
-  .pads { display: flex; flex-direction: column; gap: 8px; }
+  .pads { display: flex; flex-direction: column; gap: 6px; }
   .song-row { display: flex; align-items: center; gap: 18px; }
   .song-row .pad { flex: 0 0 calc((100% - 24px) / 4); }
   .song-row label {
@@ -281,7 +281,7 @@
   .howto-actions .text-button { margin-left: 0; font-size: 11.5px; }
   #take-listed { color: var(--violet); }
 
-  .stem-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .stem-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
   /* Installed without the instrument splitter: the squares are still there,
      so it's clear what it would add, but nothing in them can be armed. */
   .stem-grid[data-off="true"] .pad { opacity: 0.35; cursor: default; }
@@ -357,7 +357,7 @@
     background: #0d0e11;
     border: 1px solid var(--edge);
     border-radius: var(--radius);
-    padding: 22px 18px 18px;
+    padding: 16px 18px 14px;
     text-align: center;
   }
 
@@ -378,8 +378,31 @@
   body[data-state="error"] #figure,
   body[data-state="cancelled"] #figure { color: var(--bad); }
 
-  #figure[data-copyable="true"] { cursor: pointer; }
-  #figure[data-copyable="true"]:hover { background: rgba(95, 211, 154, 0.1); }
+  /* Finished: the tick and the line under it open the song's folder. */
+  #figure[data-openable="true"], #message[data-openable="true"] { cursor: pointer; }
+  #figure[data-openable="true"]:hover { background: rgba(95, 211, 154, 0.1); }
+  #message[data-openable="true"] { color: var(--ink); }
+  #message[data-openable="true"]:hover { color: var(--good); text-decoration: underline; }
+
+  /* What's waiting behind the song in hand. */
+  .queue { margin-top: 10px; font-size: 11.5px; color: var(--dim); text-align: left; }
+  .queue[hidden], .queue [hidden] { display: none; }
+  .queue-line { display: flex; align-items: baseline; gap: 6px 12px; flex-wrap: wrap; justify-content: center; }
+  .queue-line strong { color: var(--ink); font-weight: 500; }
+  .queue-line .text-button { margin-left: 0; font-size: 11.5px; color: var(--violet); }
+  #queue-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 132px; overflow-y: auto; }
+  #queue-list li {
+    display: flex; align-items: center; gap: 6px; padding: 3px 0;
+    border-top: 1px solid var(--edge);
+  }
+  #queue-list .q-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #queue-list button {
+    flex: none; width: 22px; height: 20px; padding: 0; border-radius: 4px;
+    background: var(--raised); border: 1px solid var(--edge); color: var(--dim);
+    font-size: 11px; cursor: pointer;
+  }
+  #queue-list button:hover { color: var(--ink); border-color: var(--violet); }
+  #queue-list button:disabled { opacity: 0.3; cursor: default; }
 
   #unit {
     font-family: var(--display);
@@ -509,13 +532,25 @@
   }
   #go:hover { background: #b9a1fb; }
   #go:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-  #go[data-mode="cancel"] {
+  #go:disabled { opacity: 0.45; cursor: default; }
+  /* While a song is going, Steal it adds to the queue and Stop is its own
+     button under the readout - two different things, two buttons. */
+  #stop {
+    width: 100%;
+    padding: 10px;
     background: transparent;
     border: 1px solid var(--bad);
+    border-radius: var(--radius);
     color: var(--bad);
+    font-family: var(--display);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    cursor: pointer;
   }
-  #go[data-mode="cancel"]:hover { background: rgba(255, 107, 94, 0.12); }
-  #go:disabled { opacity: 0.45; cursor: default; }
+  #stop:hover { background: rgba(255, 107, 94, 0.12); }
+  #stop[hidden] { display: none; }
 
   /* The one part of the page that scrolls: the header and the Take/readout
      section above it stay put at their natural size, so a long session of
@@ -952,8 +987,10 @@
       </div>
     </section>
 
+    <button id="go">Steal it</button>
+
     <section class="readout" id="readout">
-      <div id="figure" data-copyable="false">···</div>
+      <div id="figure" data-openable="false">···</div>
       <div id="unit"></div>
       <p id="message">Paste a link to get started.</p>
       <div class="track"><div id="bar"></div></div>
@@ -972,7 +1009,23 @@
         <button class="text-button" id="check-guesses" type="button" hidden></button>
         <button class="text-button" id="open-sources" type="button" hidden>Open Sources.csv</button>
       </div>
+      <!--
+        The songs waiting their turn: what's up next, what was added last,
+        and the rest behind a ▾ where they can be moved or taken out. After
+        a Stop it says so and offers to carry on or throw them away.
+      -->
+      <div class="queue" id="queue" hidden>
+        <div class="queue-line">
+          <span id="queue-summary"></span>
+          <button class="text-button" id="queue-toggle" type="button" aria-expanded="false"></button>
+          <button class="text-button" id="queue-resume" type="button" hidden>Resume</button>
+          <button class="text-button" id="queue-clear" type="button" hidden>Clear queue</button>
+        </div>
+        <ul id="queue-list" hidden></ul>
+      </div>
     </section>
+
+    <button id="stop" type="button" hidden>Stop</button>
 
     <!--
       The picker takes the readout's place rather than sitting below it.
@@ -993,9 +1046,9 @@
         <button id="fade" type="button" hidden>Fade here</button>
         <button id="keep" type="button" hidden>Leave it alone</button>
         <span class="seg" id="bars" role="group" aria-label="Bars to mark">
-          <button type="button" data-bars="16" class="on">16 bars</button>
-          <button type="button" data-bars="32">32</button>
-          <button type="button" data-bars="64">64</button>
+          <button type="button" data-bars="4" class="on">4 bars</button>
+          <button type="button" data-bars="8">8</button>
+          <button type="button" data-bars="16">16</button>
           <button type="button" data-bars="0">By ear</button>
         </span>
         <span class="seg" id="hear" role="group" aria-label="Listen to">
@@ -1030,7 +1083,6 @@
       </div>
     </section>
 
-    <button id="go">Steal it</button>
   </main>
 
   <section class="files">
@@ -1081,9 +1133,10 @@
 
   // --- painting ---------------------------------------------------------
 
-  function setFigure(text, unit, copyable) {
+  function setFigure(text, unit, openable) {
     el("figure").textContent = text;
-    el("figure").dataset.copyable = copyable ? "true" : "false";
+    el("figure").dataset.openable = openable ? "true" : "false";
+    el("message").dataset.openable = openable ? "true" : "false";
     el("unit").textContent = unit;
   }
 
@@ -1112,9 +1165,10 @@
     if (state.running) {
       setFigure(known ? Math.round(percent) + "%" : "···", whereAt(state), false);
     } else if (body.dataset.state === "done") {
-      const tempo = tempoOf(state.outputs || []);
-      if (tempo) setFigure(tempo, "BPM — click to copy", true);
-      else setFigure("✓", "Finished", false);
+      // Which song finished and that it's ready for the next - nothing
+      // else. A click opens that song's folder.
+      finishedFolder = state.finished ? state.finished.folder : "";
+      setFigure("✓", finishedFolder ? "Open its folder" : "Finished", !!finishedFolder);
     } else if (state.stage === "too-long" && state.too_long) {
       // Not a failure - the link just can't list the whole playlist.
       const listed = state.too_long.listed;
@@ -1131,10 +1185,76 @@
     }
 
     renderAfter(state);
+    renderQueue(state);
 
-    el("go").textContent = state.running ? "Stop" : "Steal it";
-    el("go").dataset.mode = state.running ? "cancel" : "go";
+    el("go").textContent = state.running ? "Add to queue" : "Steal it";
+    el("go").dataset.mode = state.running ? "queue" : "go";
+    el("stop").hidden = !state.running || !el("picker").hidden || !el("choice").hidden;
     if (state.output_dir) setDestination(state.output_dir);
+  }
+
+  // The folder the done line opens.
+  let finishedFolder = "";
+  // Whether the whole queue is listed, or only what's next.
+  let queueOpen = false;
+
+  // What's waiting: "Up next · Last added · 3 more ▾" while it runs,
+  // "Stopped — 4 queued" with Resume and Clear once it's stopped.
+  function renderQueue(state) {
+    const queue = state.queue || [];
+    // A queue left from last time is offered by the banner at the top.
+    const offered = !el("resume").hidden && el("resume").dataset.kind === "queue";
+    el("queue").hidden = queue.length === 0 || offered;
+    if (!queue.length) { queueOpen = false; }
+    const parts = [];
+    if (state.queue_paused) {
+      parts.push(document.createTextNode(
+        "Stopped — " + queue.length.toLocaleString() + " queued"));
+    } else if (queue.length) {
+      parts.push(document.createTextNode("Up next: "), strong(state.up_next));
+      if (state.last_added) parts.push(document.createTextNode(" · Last added: "), strong(state.last_added));
+    }
+    el("queue-summary").replaceChildren(...parts);
+    const more = state.queue_paused ? queue.length : queue.length - 1;
+    el("queue-toggle").hidden = more <= 0 && !state.queue_paused;
+    el("queue-toggle").textContent = (queueOpen ? "Hide" : state.queue_paused ? "Edit" : more + " more") + (queueOpen ? " ▴" : " ▾");
+    el("queue-toggle").setAttribute("aria-expanded", queueOpen ? "true" : "false");
+    el("queue-resume").hidden = !state.queue_paused;
+    el("queue-clear").hidden = !state.queue_paused && !queueOpen;
+    el("queue-list").hidden = !queueOpen;
+    const key = queue.map((e) => e.id + ":" + e.label).join("|");
+    if (queueOpen && el("queue-list").dataset.shown !== key) {
+      el("queue-list").dataset.shown = key;
+      el("queue-list").replaceChildren(...queue.map((entry, i) => {
+        const row = document.createElement("li");
+        const label = document.createElement("span");
+        label.className = "q-label";
+        label.textContent = entry.label;
+        label.title = entry.label;
+        row.append(label,
+          queueButton("↑", "Move up", i === 0, () => window.pywebview.api.queue_move(entry.id, -1)),
+          queueButton("↓", "Move down", i === queue.length - 1, () => window.pywebview.api.queue_move(entry.id, 1)),
+          queueButton("✕", "Take it out", false, () => window.pywebview.api.queue_remove(entry.id)));
+        return row;
+      }));
+    }
+  }
+
+  function strong(text) {
+    const node = document.createElement("strong");
+    node.textContent = text;
+    return node;
+  }
+
+  function queueButton(text, title, disabled, act) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = text;
+    button.title = title;
+    button.setAttribute("aria-label", title);
+    button.disabled = disabled;
+    button.addEventListener("click", () => act().then(render).catch(complain));
+    return button;
   }
 
   // Under the figure while a run goes: the time left and which song of how
@@ -1579,13 +1699,13 @@
   //
   // One click at the 1 and the end is put this many bars on. Walked a beat at
   // a time along the fitted grid rather than start + bars * one tempo, for
-  // the same reason the grid is fitted locally at all: 64 bars at a tempo a
-  // few tenths of a percent out ends a sixteenth or more off the one.
+  // the same reason the grid is fitted locally at all: 16 bars at a tempo a
+  // few tenths of a percent out ends well off the one.
   //
   // 0 is "by ear" - the old way, where stopping is what marks the end. Kept
   // across pickers, because it's a way of working rather than a per-song
   // choice.
-  let barsWanted = 16;
+  let barsWanted = 4;
 
   function barsAfter(from, bars) {
     let at = from;
@@ -1607,6 +1727,7 @@
 
   function chooseBars(bars) {
     barsWanted = bars;
+    labelPlay();
     for (const chip of document.querySelectorAll("#bars button")) {
       chip.classList.toggle("on", Number(chip.dataset.bars) === bars);
       chip.blur();
@@ -1983,7 +2104,7 @@
     startedAt = ctx.currentTime;
     startedFrom = picker.at;
     playing = true;
-    el("play").textContent = "Pause";
+    labelPlay();
     if (!raf) tick();
 
     // Saying "Pause" is not evidence of a sound. The clock is the evidence:
@@ -1996,6 +2117,15 @@
       pausePlay();
       sayInPicker("Audio did not start — click again.");
     }, WAKE_GRACE_MS);
+  }
+
+  // While it plays, the button says what pressing it will do: in By ear,
+  // with a start marked, stopping marks the end there - so "Mark End".
+  // Counting bars, the bars already mark the end, and it only pauses.
+  function labelPlay() {
+    if (!playing) { el("play").textContent = "Play"; return; }
+    const marks = picker && !trimming() && picker.start !== null && !countingBars();
+    el("play").textContent = marks ? "Mark End" : "Pause";
   }
 
   function pausePlay() {
@@ -2050,6 +2180,7 @@
     // the progress bar, Steal it - all belongs to the run that just ended.
     el("readout").hidden = true;
     el("go").hidden = true;
+    el("stop").hidden = true;
     // The link box has focus at this point - it's autofocused on load, and
     // it's where a link was just typed or a song's name was just put. Space
     // typed into a text box is a space, so the keydown handler below has to
@@ -2136,6 +2267,7 @@
     el("picker").hidden = false;
     el("readout").hidden = true;
     el("go").hidden = true;
+    el("stop").hidden = true;
     el("url").blur();
     el("build").hidden = true;
     el("fade").hidden = false;
@@ -2247,6 +2379,7 @@
     el("picker").hidden = true;
     el("readout").hidden = false;
     el("go").hidden = false;
+    el("stop").hidden = !running;
     el("play").textContent = "Play";
     el("build").disabled = true;
     el("build").hidden = false;
@@ -2344,6 +2477,7 @@
   }
 
   function sayWhatIsMarked() {
+    labelPlay();
     if (!picker || picker.start === null) return;
     if (countingBars()) {
       el("picker-hint").textContent = picker.end === null
@@ -2702,21 +2836,10 @@
         clearInterval(polling);
         polling = null;
         refreshLibrary().then(() => {
-          // The drums are there now, so the phrase can be picked.
-          const waiting = pendingBeatFor;
-          pendingBeatFor = null;
-          const looping = pendingLoopsFor;
-          pendingLoopsFor = null;
-          if (looping && !state.error && !state.cancelled) {
-            const fresh = songWaitedFor(looping, state);
-            if (fresh) loopStems(fresh, looping.stems);
-          }
-          if (waiting && !state.error && !state.cancelled) {
-            const fresh = songWaitedFor(waiting, state);
-            if (fresh && fresh.have && fresh.have.drums) openPicker(fresh);
-            else el("message").textContent =
-              "There's no drum stem to pick a beat out of — arm Drums and take it again.";
-          }
+          // The queue is done and the drums are there now, so each song
+          // with Beat armed has its phrase picked, one after another.
+          beatsToPick = (state.beat_waiting || []).slice();
+          pickNextBeat();
         });
       }
     });
@@ -2752,25 +2875,37 @@
       // "source", not "song": every other key here is an armed/not flag,
       // and one of the squares is called Song.
       options.source = selected.song;
-      // Nothing left to separate: go straight to the picker.
-      if (wantsBeat && !INSTRUMENTS.some((t) => options[t]) && selected.have && selected.have.drums) {
+      // Nothing left to separate: go straight to the picker - unless a
+      // song is going, when this waits its turn like anything else.
+      if (!running && wantsBeat && !INSTRUMENTS.some((t) => options[t]) && selected.have && selected.have.drums) {
         openPicker(selected);
         return;
       }
-      if (loopFromSpan && !INSTRUMENTS.some((t) => options[t])) {
+      if (!running && loopFromSpan && !INSTRUMENTS.some((t) => options[t])) {
         loopStems(selected, stemLoops);
         return;
       }
     }
-    // Remembered as a path rather than as the song object, because a link
-    // that hasn't been downloaded yet has no song object to remember - and
-    // that's the ordinary case: paste a link, click Beat, take it.
-    pendingBeatFor = wantsBeat ? { song: selected ? selected.song : "" } : null;
-    pendingLoopsFor = loopFromSpan ? { song: selected ? selected.song : "", stems: stemLoops } : null;
+    // What to do once the song is in: pick its beat (after the whole
+    // queue is done), or loop its stems over the drum loop's bars.
+    options.after = { beat: !!wantsBeat, loop_stems: loopFromSpan ? stemLoops : [] };
 
-    lastStage = null;
+    const queueing = running;
+    if (!queueing) lastStage = null;
     window.pywebview.api.start(pastedText || el("url").value, options).then((state) => {
+      if (queueing && state.queue_error) {
+        el("message").textContent = state.queue_error;
+        return;
+      }
       render(state);
+      if (queueing) {
+        // Taken: the box is clear for the next link.
+        clearPasted();
+        el("url").value = "";
+        if (selected) clearSelection();
+        showNumbering();
+        el("url").focus();
+      }
       if (state.running && !polling) polling = setInterval(poll, 250);
     }).catch(complain);
   }
@@ -2791,22 +2926,24 @@
 
   window.addEventListener("unhandledrejection", (event) => complain(event.reason));
 
-  // A song whose beat was armed, waiting for its drums to finish.
-  let pendingBeatFor = null;
-  // A song whose stems are to be looped over its drum loop's kept bars,
-  // waiting for those stems to be isolated.
-  let pendingLoopsFor = null;
   const INSTRUMENTS = ["drums", "bass", "harmony", "vocals"];
 
   // Which song that run was about. A song picked out of the stash is known
   // by its path from the start; a freshly downloaded one isn't known until
   // it exists, so it's recognised by the run's own outputs - and failing
   // that, by being the newest thing in the stash, which it is.
-  function songWaitedFor(waiting, state) {
-    const songs = lastLibrary || [];
-    if (waiting.song) return songs.find((s) => s.song === waiting.song);
-    const outputs = state.outputs || [];
-    return songs.find((s) => outputs.includes(s.song)) || songs[0];
+  // Songs whose beat is still to be picked, now the queue is done.
+  let beatsToPick = [];
+
+  function pickNextBeat() {
+    while (beatsToPick.length) {
+      const path = beatsToPick.shift();
+      const fresh = (lastLibrary || []).find((s) => s.song === path);
+      if (fresh && fresh.have && fresh.have.drums) { openPicker(fresh); return; }
+      el("message").dataset.openable = "false";
+      el("message").textContent =
+        "There's no drum stem to pick a beat out of — arm Drums and take it again.";
+    }
   }
 
   // --- wiring ------------------------------------------------------------
@@ -2982,35 +3119,48 @@
   el("tidy-folder").addEventListener("click", () => {
     if (running) return;
     lastStage = null;
-    pendingBeatFor = null;
-    pendingLoopsFor = null;
+    beatsToPick = [];
     window.pywebview.api.tidy_folder().then((state) => {
       render(state);
       if (state.running && !polling) polling = setInterval(poll, 250);
     }).catch(complain);
   });
 
-  el("go").addEventListener("click", () => {
-    if (running) window.pywebview.api.cancel().then(render);
-    else start();
+  // Steal it starts a song - or, with one already going, queues this one.
+  el("go").addEventListener("click", () => start());
+  el("stop").addEventListener("click", () => {
+    window.pywebview.api.cancel().then(render);
   });
 
   el("url").addEventListener("keydown", (event) => {
-    if (event.key === "Enter" && !running) start();
+    if (event.key === "Enter") start();
   });
 
-  el("figure").addEventListener("click", () => {
-    if (el("figure").dataset.copyable !== "true") return;
-    const tempo = el("figure").textContent;
-    // A file:// page can't rely on the async clipboard API, so go through a
-    // throwaway textarea - the copy is the whole point of showing the number.
-    const scratch = document.createElement("textarea");
-    scratch.value = tempo;
-    document.body.append(scratch);
-    scratch.select();
-    document.execCommand("copy");
-    scratch.remove();
-    el("unit").textContent = "BPM — copied";
+  // The done line: the song that just finished, a click from its folder.
+  function openFinished() {
+    if (el("figure").dataset.openable !== "true" || !finishedFolder) return;
+    window.pywebview.api.open_folder(finishedFolder);
+  }
+  el("figure").addEventListener("click", openFinished);
+  el("message").addEventListener("click", () => {
+    if (el("message").dataset.openable === "true") openFinished();
+  });
+
+  el("queue-toggle").addEventListener("click", () => {
+    queueOpen = !queueOpen;
+    delete el("queue-list").dataset.shown;
+    window.pywebview.api.status().then(render);
+  });
+  el("queue-resume").addEventListener("click", () => {
+    lastStage = null;
+    window.pywebview.api.queue_resume().then((state) => {
+      render(state);
+      if (state.running && !polling) polling = setInterval(poll, 250);
+    }).catch(complain);
+  });
+  el("queue-clear").addEventListener("click", () => {
+    queueOpen = false;
+    window.pywebview.api.queue_clear().then(render).catch(complain);
   });
 
   el("destination").addEventListener("click", () => {
@@ -3024,7 +3174,7 @@
   // just vanishes would leave the run stopped with nothing to show for it.
   el("picker-close").addEventListener("click", () => {
     if (pendingTrim) answerTrim("keep");
-    else closePicker();
+    else { closePicker(); pickNextBeat(); }
   });
 
   el("play").addEventListener("click", togglePlay);
@@ -3039,7 +3189,7 @@
   el("fade").addEventListener("click", () => answerTrim("fade"));
   el("keep").addEventListener("click", () => answerTrim("keep"));
 
-  // The keyboard is the picker. Space is the Play/Pause button and the
+  // The keyboard is the picker. Space is the Play / Mark End button and the
   // arrows walk the start onto the one - but only while the picker is open,
   // and never while a link is being typed into the box.
   document.addEventListener("keydown", (event) => {
@@ -3058,7 +3208,7 @@
     // arrows scrolling the window out from under the waveform.
     event.preventDefault();
 
-    // Space is the Play/Pause button, down to the same function - so it
+    // Space is the Play / Mark End button, down to the same function - so it
     // does whatever that does, in whichever of the two jobs the picker is
     // doing, and cannot drift away from it. Stopped, it plays; playing, it
     // stops, and in the beat picker stopping is also how you say where the
@@ -3086,7 +3236,15 @@
   function offerResume() {
     window.pywebview.api.unfinished().then((left) => {
       el("resume").hidden = !left;
+      el("resume").dataset.kind = left ? left.kind || "playlist" : "";
       if (!left) return;
+      if (left.kind === "queue") {
+        // Songs queued when the app last went away.
+        el("resume-text").replaceChildren(
+          strong(left.count.toLocaleString() + " queued song" + (left.count === 1 ? "" : "s")),
+          document.createTextNode(" didn't get their turn."));
+        return;
+      }
       const name = document.createElement("strong");
       name.textContent = left.name;
       const where = left.total
@@ -3099,14 +3257,22 @@
   el("resume-go").addEventListener("click", () => {
     el("resume").hidden = true;
     lastStage = null;
-    window.pywebview.api.resume_unfinished().then((state) => {
+    const resume = el("resume").dataset.kind === "queue"
+      ? window.pywebview.api.queue_resume() : window.pywebview.api.resume_unfinished();
+    resume.then((state) => {
       render(state);
       if (state.running && !polling) polling = setInterval(poll, 250);
     }).catch(complain);
   });
   el("resume-forget").addEventListener("click", () => {
     el("resume").hidden = true;
-    window.pywebview.api.forget_unfinished();
+    if (el("resume").dataset.kind === "queue") {
+      // Throwing the queue away - and then a playlist left half done, if
+      // there is one, gets its own offer.
+      window.pywebview.api.queue_clear().then((state) => { render(state); offerResume(); });
+    } else {
+      window.pywebview.api.forget_unfinished();
+    }
   });
 
   window.addEventListener("pywebviewready", () => {
