@@ -1106,9 +1106,14 @@ class Api:
                 if self._cancel.is_set():
                     break
                 try:
-                    self._review_pending(folder, on_choose=self._on_choose, on_review=self._on_review,
-                                         on_event=self._on_event, should_cancel=self._cancel.is_set,
-                                         keys=keys)
+                    asked = self._review_pending(folder, on_choose=self._on_choose,
+                                                 on_review=self._on_review, on_event=self._on_event,
+                                                 should_cancel=self._cancel.is_set, keys=keys) or {}
+                    # A different upload picked is a different file - the
+                    # picker opens that one, not the one that's gone.
+                    moved = asked.get("moved") or {}
+                    with self._lock:
+                        self._beat_waiting = [moved.get(p, p) for p in self._beat_waiting]
                 except BaseException as e:
                     with self._lock:
                         self._state["problem_count"] += 1

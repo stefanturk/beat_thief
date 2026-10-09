@@ -2033,6 +2033,28 @@ class TestTheQueue(unittest.TestCase):
                          ["/Music/Beat Thief/One/One (98.0 BPM).mp3",
                           "/Music/Beat Thief/Two/Two (98.0 BPM).mp3"])
 
+    def test_a_song_swapped_in_a_question_keeps_its_place_for_the_picker(self):
+        one = "/Music/Beat Thief/One/One (98.0 BPM).mp3"
+        swapped = "/Music/Beat Thief/One/One (101.0 BPM).mp3"
+
+        def pipeline(url, **kwargs):
+            return dict(self._pipeline(url, **kwargs), waiting=[f"key:{url}"])
+
+        def review(folder, keys=None, **kwargs):
+            moved = {one: swapped} if keys == ["key:https://youtu.be/One"] else {}
+            return {"asked": 1, "swapped": len(moved), "moved": moved}
+
+        self._hold("https://youtu.be/One")
+        api = gui.Api(run_pipeline=pipeline, review_pending=review)
+        api.start("https://youtu.be/One", {"song": True, "drums": True, "sanitize": "ask",
+                                           "after": {"beat": True}})
+        api.start("https://youtu.be/Two", {"song": True, "drums": True, "sanitize": "ask",
+                                           "after": {"beat": True}})
+        self.gates["https://youtu.be/One"].set()
+        _wait_until(lambda: not api.status()["running"])
+        self.assertEqual(api.status()["beat_waiting"],
+                         [swapped, "/Music/Beat Thief/Two/Two (98.0 BPM).mp3"])
+
     def test_stem_loops_are_cut_once_the_song_is_done(self):
         api = self._api()
         with mock.patch.object(gui.Api, "loop_stems", return_value={"loops": []}) as loop:
@@ -2104,3 +2126,10 @@ class TestTheNewLayout(unittest.TestCase):
 
     def test_the_pause_button_says_mark_end_when_it_marks_the_end(self):
         self.assertIn("Mark End", self.html)
+
+    def test_building_a_beat_moves_on_to_the_next_song_waiting(self):
+        # Only the picker's close button used to: Build closed the picker
+        # and left the rest of the queue's songs unpicked.
+        poll_beat = self.html[self.html.index("function pollBeat()"):]
+        poll_beat = poll_beat[:poll_beat.index("\n  }\n")]
+        self.assertIn("pickNextBeat()", poll_beat)
