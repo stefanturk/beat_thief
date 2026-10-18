@@ -889,9 +889,16 @@ class TestWhatASongHas(unittest.TestCase):
             "Song - Artist (Bass beat at 120 BPM).wav",
             "Song - Artist (Harmony beat at 120 BPM).wav",
             "Song - Artist (Vocals beat at 120 BPM).wav",
+            "Song - Artist (Isolated Instrumental).wav",
+            "Song - Artist (Instrumental beat at 120 BPM).wav",
         )
 
         self.assertEqual(set(have), set(pipeline.STASH_ORDER))
+
+    def test_the_instrumental_and_its_loop_are_told_apart(self):
+        have = self._have("Song - Artist (Instrumental beat at 120 BPM).wav")
+
+        self.assertEqual(set(have), {"song", "instrumental_beat"})
 
     def test_each_stem_loop_is_found_and_none_is_taken_for_the_drum_loop(self):
         have = self._have(
@@ -910,7 +917,7 @@ class TestWhatASongHas(unittest.TestCase):
 
         have = self._have(*names)
 
-        self.assertEqual({"bass_beat", "harmony_beat", "vocals_beat"}, set(have) - {"song"})
+        self.assertEqual({"bass_beat", "harmony_beat", "vocals_beat", "instrumental_beat"}, set(have) - {"song"})
 
 
 class TestLoopSpanInTheLibrary(unittest.TestCase):

@@ -143,7 +143,7 @@
   /* Armed pads: on or off at a glance, no hunting for a tick mark. */
   .pads { display: flex; flex-direction: column; gap: 6px; }
   .song-row { display: flex; align-items: center; gap: 18px; }
-  .song-row .pad { flex: 0 0 calc((100% - 24px) / 4); }
+  .song-row .pad { flex: 0 0 calc((100% - 24px) / 5); }
   .song-row label {
     display: flex; align-items: center; gap: 7px; cursor: pointer;
     font-size: 12.5px; color: var(--dim);
@@ -281,7 +281,9 @@
   .howto-actions .text-button { margin-left: 0; font-size: 11.5px; }
   #take-listed { color: var(--violet); }
 
-  .stem-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .stem-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+  /* The one long name: tighter, so its column is no wider than the rest. */
+  #pad-instrumental { letter-spacing: 0.04em; padding-left: 2px; padding-right: 2px; }
   /* Installed without the instrument splitter: the squares are still there,
      so it's clear what it would add, but nothing in them can be armed. */
   .stem-grid[data-off="true"] .pad { opacity: 0.35; cursor: default; }
@@ -291,6 +293,7 @@
   #pad-bass_beat { grid-column: 2; grid-row: 2; }
   #pad-harmony_beat { grid-column: 3; grid-row: 2; }
   #pad-vocals_beat { grid-column: 4; grid-row: 2; }
+  #pad-instrumental_beat { grid-column: 5; grid-row: 2; }
 
   .pad {
     flex: 1;
@@ -660,7 +663,7 @@
   /* The same six things as the Take section, in the same order, so a
      glance down the list and a glance up at the pads mean the same thing.
      Green is in the stash; clicking one reveals that exact file. */
-  .marks { display: grid; grid-template-columns: repeat(5, 11px); grid-auto-rows: 11px; gap: 3px; flex: none; }
+  .marks { display: grid; grid-template-columns: repeat(6, 11px); grid-auto-rows: 11px; gap: 3px; flex: none; }
   .mark {
     width: 11px;
     height: 11px;
@@ -961,6 +964,12 @@
           <button class="pad" id="pad-bass" data-stem="bass" aria-pressed="false">Bass</button>
           <button class="pad" id="pad-harmony" data-stem="harmony" aria-pressed="false">Harmony</button>
           <button class="pad" id="pad-vocals" data-stem="vocals" aria-pressed="false">Vocals</button>
+          <!--
+            Everything but the vocals: Drums, Bass and Harmony as one file.
+            Not a fifth part of the song - it overlaps those three - but the
+            same one separation makes it, so it costs no more than Vocals.
+          -->
+          <button class="pad" id="pad-instrumental" data-stem="instrumental" aria-pressed="false">Instrumental</button>
           <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
           <!--
             A loop of each stem over the drum loop's bars - the same marking,
@@ -971,6 +980,7 @@
           <button class="pad" id="pad-bass_beat" data-stem="bass_beat" data-again="true" aria-pressed="false">Beat</button>
           <button class="pad" id="pad-harmony_beat" data-stem="harmony_beat" data-again="true" aria-pressed="false">Beat</button>
           <button class="pad" id="pad-vocals_beat" data-stem="vocals_beat" data-again="true" aria-pressed="false">Beat</button>
+          <button class="pad" id="pad-instrumental_beat" data-stem="instrumental_beat" data-again="true" aria-pressed="false">Beat</button>
           <!--
             Midi is hidden, not gone: Ableton's own drums-to-MIDI does the job
             better for now, and a square that makes a worse copy of something
@@ -983,7 +993,7 @@
         </div>
       </div>
       <div class="extras">
-        <span class="aside" id="take-note">All four stems rebuild the song.</span>
+        <span class="aside" id="take-note">Drums, Bass, Harmony and Vocals rebuild the song.</span>
       </div>
     </section>
 
@@ -1377,17 +1387,19 @@
   // --- what's armed, and what's already in the stash ---------------------
 
   const STASH_ORDER = ["song", "drums", "beat", "midi", "bass", "harmony", "vocals",
-                       "bass_beat", "harmony_beat", "vocals_beat"];
+                       "instrumental", "bass_beat", "harmony_beat", "vocals_beat",
+                       "instrumental_beat"];
   const LABELS = {
     song: "Song", drums: "Drums", beat: "Beat", midi: "Midi",
-    bass: "Bass", harmony: "Harmony", vocals: "Vocals",
+    bass: "Bass", harmony: "Harmony", vocals: "Vocals", instrumental: "Instrumental",
     bass_beat: "Bass beat", harmony_beat: "Harmony beat", vocals_beat: "Vocals beat",
+    instrumental_beat: "Instrumental beat",
   };
   // The song down the left, as tall as both rows (see .mark-song).
-  const MARK_LAYOUT = ["song", "drums", "bass", "harmony", "vocals",
-                       "beat", "bass_beat", "harmony_beat", "vocals_beat"];
+  const MARK_LAYOUT = ["song", "drums", "bass", "harmony", "vocals", "instrumental",
+                       "beat", "bass_beat", "harmony_beat", "vocals_beat", "instrumental_beat"];
   // The stems that can be looped over a drum loop's bars.
-  const LOOPED_STEMS = ["bass", "harmony", "vocals"];
+  const LOOPED_STEMS = ["bass", "harmony", "vocals", "instrumental"];
 
   // What each thing needs before it can exist. A beat (the trimmed .wav)
   // and its midi are both cut out of the drum stem, independently of one
@@ -1400,11 +1412,12 @@
   // it was cut (song.span), and then it's cut straight from that.
   const NEEDS = {
     song: [],
-    drums: ["song"], bass: ["song"], harmony: ["song"], vocals: ["song"],
+    drums: ["song"], bass: ["song"], harmony: ["song"], vocals: ["song"], instrumental: ["song"],
     beat: ["song", "drums"], midi: ["song", "drums"],
     bass_beat: ["song", "bass", "drums", "beat"],
     harmony_beat: ["song", "harmony", "drums", "beat"],
     vocals_beat: ["song", "vocals", "drums", "beat"],
+    instrumental_beat: ["song", "instrumental", "drums", "beat"],
   };
 
   function spanToLoopFrom() { return !!(selected && selected.span && have("beat")); }
@@ -1425,7 +1438,7 @@
   // loops. So a green Beat or Midi can still be armed, and goes purple like
   // anything else.
   // A stem's loop is the same: another marking is another loop.
-  const MORE_THAN_ONE = new Set(["beat", "midi", "bass_beat", "harmony_beat", "vocals_beat"]);
+  const MORE_THAN_ONE = new Set(["beat", "midi", "bass_beat", "harmony_beat", "vocals_beat", "instrumental_beat"]);
 
   // What a pasted link is armed for before you touch anything: the song and
   // nothing else. Arming the beat as well would be the faster route to a
@@ -1530,7 +1543,7 @@
     el("take-note").textContent = selected
       ? (armed.length ? "Taking " + armed.map((t) => (have(t) ? "another " : "") + LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
                       : "Nothing armed — click a square to take something from " + selected.title + ".")
-      : "All four stems rebuild the song.";
+      : "Drums, Bass, Harmony and Vocals rebuild the song.";
     if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Run setup again and say yes to add it.";
   }
 
@@ -2928,7 +2941,7 @@
 
   window.addEventListener("unhandledrejection", (event) => complain(event.reason));
 
-  const INSTRUMENTS = ["drums", "bass", "harmony", "vocals"];
+  const INSTRUMENTS = ["drums", "bass", "harmony", "vocals", "instrumental"];
 
   // Which song that run was about. A song picked out of the stash is known
   // by its path from the start; a freshly downloaded one isn't known until

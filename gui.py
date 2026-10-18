@@ -812,7 +812,8 @@ class Api:
         caller (the tests, or a script) has no poller reading it, so it
         defaults to doing nothing.
 
-        stems names the other stems - "bass", "harmony", "vocals" - to loop
+        stems names the other stems - "bass", "harmony", "vocals",
+        "instrumental" - to loop
         over the same bars, cut from the loop's own span (after any nudge
         onto a kick), so they line up with the drum loop to the sample. The
         span is kept beside the loop either way, for loop_stems later."""

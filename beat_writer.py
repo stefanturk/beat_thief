@@ -214,7 +214,8 @@ def is_stolen_beat(name: str) -> bool:
 # stem - and the drum loop's span, cut out of any of them, is the same bars.
 # Lower-case "beat", so none of these reads as the drum loop's "Beat at".
 
-STEM_LOOP_LABELS = {"bass": "Bass beat", "harmony": "Harmony beat", "vocals": "Vocals beat"}
+STEM_LOOP_LABELS = {"bass": "Bass beat", "harmony": "Harmony beat", "vocals": "Vocals beat",
+                    "instrumental": "Instrumental beat"}
 
 
 def stem_loop_path(beat_path: str, stem: str) -> str:

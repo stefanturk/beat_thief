@@ -88,6 +88,7 @@ SOURCES=(
     bass_isolator.py
     harmony_isolator.py
     vocals_isolator.py
+    instrumental_isolator.py
 )
 
 case "$DEST" in

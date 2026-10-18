@@ -45,9 +45,10 @@ LABELS = {
     "bass": "Bass",
     "harmony": "Harmony",
     "vocals": "Vocals",
+    "instrumental": "Instrumental",
 }
 
-INSTRUMENTS = ("drums", "bass", "harmony", "vocals")
+INSTRUMENTS = ("drums", "bass", "harmony", "vocals", "instrumental")
 
 # A step with no percentage of its own is guessed at from how long it's
 # been going - but never past this much of itself, so a step that runs

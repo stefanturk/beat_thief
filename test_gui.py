@@ -137,6 +137,22 @@ class TestApiStart(unittest.TestCase):
 
         self.assertEqual(calls["instruments"], ["drums", "bass", "harmony", "vocals"])
 
+    def test_the_instrumental_pad_alone_asks_for_just_the_instrumental(self):
+        calls = {}
+
+        api = gui.Api(run_pipeline=lambda url, **kwargs: calls.update(kwargs) or {"outputs": []})
+        api.start("https://example.com/song", {"instrumental": True})
+        _wait_until(lambda: not api.status()["running"])
+
+        self.assertEqual(calls["instruments"], ["instrumental"])
+
+    def test_the_page_has_an_instrumental_pad_and_its_loop(self):
+        page = open(os.path.join(os.path.dirname(gui.__file__), "ui", "index.html")).read()
+
+        self.assertIn('id="pad-instrumental" data-stem="instrumental"', page)
+        self.assertIn('id="pad-instrumental_beat" data-stem="instrumental_beat"', page)
+        self.assertIn(".stem-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));", page)
+
     def test_the_options_the_page_actually_sends_are_understood(self):
         # The page sends one boolean per square, and Song is a square. A
         # "song" key that was sometimes a flag and sometimes a path meant
@@ -1019,6 +1035,20 @@ class TestStemLoops(unittest.TestCase):
         self.assertEqual(self.cuts, [(self.bass, 4.25, self.loop.beat.duration_sec,
                                       beat_loop.stem_loop_path(made["path"], "bass"))])
         self.assertEqual(result["bars"], 2)
+
+    def test_the_instrumental_loops_over_the_same_bars_too(self):
+        instrumental = os.path.join(self.tmp_dir, "Song - Artist (Isolated Instrumental).wav")
+        open(instrumental, "wb").close()
+        made = self._steal([])
+        self.cuts.clear()
+
+        with mock.patch("beat_loop.cut", side_effect=self._cut), \
+             mock.patch("instrument_isolator.song_output_dir", return_value=self.tmp_dir), \
+             mock.patch("pipeline._newest_stolen_beat", return_value=made["path"]):
+            gui.Api().loop_stems(self.song, ["instrumental"])
+
+        self.assertEqual(self.cuts, [(instrumental, 4.25, self.loop.beat.duration_sec,
+                                      beat_loop.stem_loop_path(made["path"], "instrumental"))])
 
     def test_a_drum_loop_without_a_span_asks_to_be_marked_again(self):
         old = os.path.join(self.tmp_dir, "Song - Artist (Beat at 120 BPM).wav")
