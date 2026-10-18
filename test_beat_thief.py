@@ -76,6 +76,11 @@ class TestChoosingInstruments(CliTestCase):
 
         self.assertEqual(captured["instruments"], ["drums", "bass", "harmony", "vocals"])
 
+    def test_instrumental_can_be_asked_for_on_its_own(self):
+        captured = self._instruments_for([self.URL, "instrumental"])
+
+        self.assertEqual(captured["instruments"], ["instrumental"])
+
     def test_named_instruments_still_combine(self):
         captured = self._instruments_for([self.URL, "drums", "vocals"])
 

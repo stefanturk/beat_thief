@@ -18,7 +18,7 @@ import pipeline
 
 BAR_WIDTH = 30
 
-_BARE_FLAGS = ("all", "drums", "bass", "harmony", "vocals")
+_BARE_FLAGS = ("all", "drums", "bass", "harmony", "vocals", "instrumental")
 
 # Options whose next argument is a value rather than a flag of its own, so
 # that "-o drums" means a folder called drums and not a request for them.
@@ -190,6 +190,11 @@ def main() -> None:
         action="store_true",
         help="Also isolate each song's vocals to a wav. Slow, off by default. Can also be given as a bare 'vocals' argument, before or after the URL.",
     )
+    parser.add_argument(
+        "--instrumental",
+        action="store_true",
+        help="Also write each song without its vocals to a wav. Slow, off by default. Can also be given as a bare 'instrumental' argument, before or after the URL.",
+    )
 
     # "all"/"drums"/"bass"/"harmony"/"vocals" are accepted bare (no --) too,
     # in any position, since that's the more natural way to type them.
@@ -202,8 +207,9 @@ def main() -> None:
     # Expanded here rather than handled downstream, so "all" is purely a way
     # of typing the four names and everything after this point sees one kind
     # of request. Naming no instrument at all still means just the song.
+    # The instrumental isn't one of the four - it's three of them again.
     if args.all:
-        for name in pipeline.INSTRUMENT_ORDER:
+        for name in pipeline.WHOLE_SONG:
             setattr(args, name, True)
 
     instruments = [name for name in pipeline.INSTRUMENT_ORDER if getattr(args, name)]

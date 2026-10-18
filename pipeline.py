@@ -32,6 +32,7 @@ import net
 import song_sanitizer
 import sources
 import spotify
+import instrumental_isolator
 import vocals_isolator
 import youtube_match
 
@@ -43,17 +44,20 @@ _INSTRUMENTS = {
     "bass": (bass_isolator, bass_isolator._LABEL),
     "harmony": (harmony_isolator, harmony_isolator._LABEL),
     "vocals": (vocals_isolator, vocals_isolator._LABEL),
+    "instrumental": (instrumental_isolator, instrumental_isolator._LABEL),
 }
 
 # The order instruments are worked through, so two runs asking for the same
 # set produce the same sequence regardless of how the set was built.
 #
-# These four are the whole song between them: demucs separates a mix into
-# exactly these sources, so nothing belongs to two of them and nothing to
-# none of them. Playing all four gives the song back - not bit-exactly
+# The first four are the whole song between them: demucs separates a mix
+# into exactly these sources, so nothing belongs to two of them and nothing
+# to none of them. Playing all four gives the song back - not bit-exactly
 # (separation is a guess; measured residual on a real track is about -20 dB)
-# but with nothing dropped.
-INSTRUMENT_ORDER = ("drums", "bass", "harmony", "vocals")
+# but with nothing dropped. The instrumental isn't a fifth: it's the first
+# three played together, so it overlaps them.
+INSTRUMENT_ORDER = ("drums", "bass", "harmony", "vocals", "instrumental")
+WHOLE_SONG = INSTRUMENT_ORDER[:4]
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
@@ -491,7 +495,8 @@ def _instrument_outputs(mp3_path: str, label: str) -> list[str]:
 # Each "<stem>_beat" is a loop of that stem cut over a drum loop's bars (see
 # beat_writer.stem_loop_path).
 STASH_ORDER = ("song", "drums", "beat", "midi", "bass", "harmony", "vocals",
-               "bass_beat", "harmony_beat", "vocals_beat")
+               "instrumental", "bass_beat", "harmony_beat", "vocals_beat",
+               "instrumental_beat")
 
 
 def _newest_stolen_beat(files: list[str], ext: str) -> str | None:
