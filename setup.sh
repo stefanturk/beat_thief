@@ -96,6 +96,19 @@ trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$RUNTIME" "$BIN"
 
 # ---------------------------------------------------------------- python
+# Steezy Studio's shared engine (a private Python 3.12 and ffmpeg that the
+# whole family of tools can use). If it is here and this Mac has no Beat Thief
+# Python yet, borrow it instead of downloading the same files again. Nothing
+# changes where it is absent, and an existing Beat Thief Python is left alone.
+ENGINE="${STEEZY_ENGINE_DIR:-$HOME/Library/Application Support/Steezy Studio/engine}"
+if [ ! -x "$PY" ] && "$ENGINE/python/bin/python3" -c 'import sys; assert sys.version_info >= (3, 12)' >/dev/null 2>&1; then
+    ln -s "$ENGINE/python" "$RUNTIME/python"
+    for tool in ffmpeg ffprobe; do
+        [ -x "$ENGINE/bin/$tool" ] && [ ! -e "$BIN/$tool" ] && ln -s "$ENGINE/bin/$tool" "$BIN/$tool"
+    done
+    note "Using the Steezy Studio engine at $ENGINE."
+fi
+
 say "1. Python"
 PBS="https://github.com/astral-sh/python-build-standalone/releases/download/20261003"
 if [ "$MACHINE" = arm64 ]; then
