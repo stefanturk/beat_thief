@@ -18,11 +18,19 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 
-HISTORY_PATH = os.path.join(
-    os.path.expanduser("~"), "Library", "Application Support", "Beat Thief", "history.json"
-)
+def _support_dir():
+    """Where Beat Thief keeps its bookkeeping: Application Support on a Mac,
+    %APPDATA% on Windows."""
+    if sys.platform.startswith("win"):
+        return os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Beat Thief")
+    return os.path.join(os.path.expanduser("~"), "Library", "Application Support", "Beat Thief")
+
+
+SUPPORT_DIR = _support_dir()
+HISTORY_PATH = os.path.join(SUPPORT_DIR, "history.json")
 
 # Enough to cover "songs you were working on lately" without the file growing
 # without bound. Oldest entries fall off the end.

@@ -23,11 +23,13 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
 import audition
 import beat_loop
+import history
 import instrument_isolator
 import pipeline
 import progress
@@ -52,8 +54,21 @@ MAX_PROBLEMS = 50
 # A playlist that was still going when the app quit, crashed or lost its
 # power - so the next launch can offer to carry on with it (see
 # Api.unfinished). Beside history.json, in Application Support.
-RUN_STATE_PATH = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
-                              "Beat Thief", "unfinished_run.json")
+RUN_STATE_PATH = os.path.join(history.SUPPORT_DIR, "unfinished_run.json")
+
+
+def _open_path(path, reveal=False):
+    """Open a folder or file in the system's own app; reveal=True selects it in
+    its parent. macOS `open` is unchanged; Windows uses Explorer / startfile."""
+    if sys.platform.startswith("win"):
+        if reveal:
+            subprocess.run(["explorer", "/select,", os.path.normpath(path)], check=False)
+        else:
+            os.startfile(path)  # noqa: S606  (Windows only)
+        return
+    subprocess.run(["open", "-R", path] if reveal else ["open", path], check=False)
+
+
 # How often (in songs) the saved progress is brought up to date. It's only
 # for the banner's "stopped at": the folder's own record is what resumes.
 RUN_STATE_EVERY = 10
@@ -549,7 +564,7 @@ class Api:
         revealed in its parent, selected."""
         if not path or not os.path.exists(path):
             return False
-        subprocess.run(["open", path] if os.path.isdir(path) else ["open", "-R", path], check=False)
+        _open_path(path, reveal=not os.path.isdir(path))
         return True
 
     def unfinished(self) -> dict | None:
@@ -628,7 +643,7 @@ class Api:
         """Open a file in whatever opens it - Sources.csv in Numbers."""
         if not path or not os.path.isfile(path):
             return False
-        subprocess.run(["open", path], check=False)
+        _open_path(path)
         return True
 
     def open_output_dir(self, path: str = "") -> bool:
@@ -645,7 +660,7 @@ class Api:
             os.makedirs(path, exist_ok=True)
         except OSError:
             return False
-        subprocess.run(["open", path], check=False)
+        _open_path(path)
         return True
 
     def library(self) -> list:
@@ -1501,9 +1516,22 @@ def _name_the_menu_bar() -> None:
         pass
 
 
+def _put_engine_on_path() -> None:
+    """Windows: the Steezy Studio engine's ffmpeg lives in its bin folder, and a
+    Start-menu shortcut can't set PATH, so add it here. No effect elsewhere."""
+    if not sys.platform.startswith("win"):
+        return
+    engine = os.environ.get("STEEZY_ENGINE_DIR") or os.path.join(
+        os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "Steezy Studio", "engine")
+    binp = os.path.join(engine, "bin")
+    if os.path.isdir(binp):
+        os.environ["PATH"] = binp + os.pathsep + os.environ.get("PATH", "")
+
+
 def main() -> None:
     import webview  # imported here so the Api above stays testable without it
 
+    _put_engine_on_path()
     _name_the_menu_bar()
 
     api = Api()
