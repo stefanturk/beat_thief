@@ -13,8 +13,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import termios
-import tty
+
+try:  # single-keypress prompts in the terminal; termios/tty don't exist on Windows
+    import termios
+    import tty
+except ImportError:
+    termios = tty = None
 
 from mutagen.easyid3 import EasyID3
 from mutagen.id3 import ID3, ID3NoHeaderError, TXXX
@@ -385,7 +389,7 @@ def play_snippet(audio: AudioSegment) -> None:
 
 
 def _play_until_done_or_space(proc: subprocess.Popen) -> None:
-    if not sys.stdin.isatty():
+    if not sys.stdin.isatty() or termios is None:
         proc.wait()
         return
     fd = sys.stdin.fileno()
@@ -405,6 +409,9 @@ def _play_until_done_or_space(proc: subprocess.Popen) -> None:
 def _raw_read_char() -> str:
     """Read exactly one character from stdin in raw (cbreak) terminal mode,
     with no need to press Enter first."""
+    if termios is None:
+        import msvcrt  # Windows
+        return msvcrt.getwch()
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
     try:

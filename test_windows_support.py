@@ -48,3 +48,15 @@ class WindowsSupport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_gui_imports_without_unix_only_modules():
+    """Windows has no termios/tty; Beat Thief crashed on start there because
+    song_sanitizer imported them at the top (found by Steezy Studio's Windows CI)."""
+    import subprocess, sys
+    code = ("import sys\n"
+            "for m in ('termios', 'tty', 'fcntl', 'pty', 'resource', 'pwd', 'grp'): sys.modules[m] = None\n"
+            "import gui\n")
+    r = subprocess.run([sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr[-2000:]
