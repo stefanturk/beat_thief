@@ -1547,6 +1547,10 @@ def main() -> None:
         min_size=(420, 520),
     )
     window.events.closing += lambda: _may_close(api)
+    # On Windows: its own taskbar group, wearing Beat Thief's icon, not Python's.
+    winquiet.windows_app_identity("beat_thief")
+    ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico")
+    window.events.shown += lambda: winquiet.set_window_icon(APP_NAME, ico)
     webview.start()
 
 
