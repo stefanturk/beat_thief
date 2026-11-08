@@ -9,6 +9,7 @@ import history
 import instrument_isolator
 import pipeline
 import song_sanitizer
+import sources
 import spotify
 
 
@@ -48,7 +49,7 @@ class _FakeYoutubeDL:
         """What yt-dlp would call the file: the upload's title and channel,
         unless the run named it (a song Spotify already named)."""
         template = os.path.basename(self.opts.get("outtmpl", ""))
-        if "%(title)s" in template:
+        if "%(title)" in template:
             return entry["title"] + " - Artist"
         return template[:-len(".%(ext)s")].replace("%%", "%")
 
@@ -84,6 +85,17 @@ class _FakeYoutubeDL:
 
 
 class PipelineTestCase(unittest.TestCase):
+
+    def _assert_flat_playlist_and_own_folders(self, result, playlist):
+        flat = sorted(f for f in os.listdir(playlist) if f.endswith(".mp3"))
+        self.assertTrue(flat)
+        self.assertTrue(result["songs"])
+        for path in result["songs"]:
+            stem = os.path.splitext(os.path.basename(path))[0]
+            self.assertEqual(os.path.dirname(path), os.path.join(self.tmp_dir, stem))
+            self.assertTrue(os.path.isfile(path))
+            self.assertTrue(any(f.endswith(stem + ".mp3") for f in flat), (stem, flat))
+
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         _FakeYoutubeDL.downloads = []
@@ -258,7 +270,7 @@ class TestInstrumentRuns(PipelineTestCase):
 
     def test_produced_files_are_collected_as_outputs(self):
         song_dir = os.path.join(self.tmp_dir, "Some Song - Artist")
-        wav = os.path.join(song_dir, "Some Song - Artist (Isolated Drums at 120.000 BPM).wav")
+        wav = os.path.join(song_dir, "Drums Isolated - Some Song - Artist - 120 BPM.wav")
 
         def fake_isolate(path, context=None):
             os.makedirs(song_dir, exist_ok=True)
@@ -277,7 +289,7 @@ class TestInstrumentRuns(PipelineTestCase):
         # is a stale file from a version that wrote whole-song MIDI, and
         # handing it back as something just produced would be a lie.
         song_dir = os.path.join(self.tmp_dir, "Some Song - Artist")
-        basename = "Some Song - Artist (Isolated Drums at 120.000 BPM)"
+        basename = "Drums Isolated - Some Song - Artist - 120 BPM"
         wav = os.path.join(song_dir, basename + ".wav")
         stale_mid = os.path.join(song_dir, basename + ".mid")
 
@@ -451,8 +463,8 @@ class TestTheTempoGoesInTheName(PipelineTestCase):
         self.mock_tempo.return_value = (0, 104.46)
         result = self._run()
 
-        expected = os.path.join(self.tmp_dir, "Some Song - Artist (104.5 BPM)",
-                                "Some Song - Artist (104.5 BPM).mp3")
+        expected = os.path.join(self.tmp_dir, "Some Song - Artist - 104.5 BPM",
+                                "Some Song - Artist - 104.5 BPM.mp3")
         self.assertEqual(result["songs"], [expected])
         from mutagen.easyid3 import EasyID3
         self.assertEqual(EasyID3(expected)["bpm"], ["104.5"])
@@ -471,7 +483,7 @@ class TestTheTempoGoesInTheName(PipelineTestCase):
     def test_a_whole_number_tempo_has_no_decimal(self):
         self.mock_tempo.return_value = (0, 120.0)
         result = self._run()
-        self.assertTrue(result["songs"][0].endswith("Some Song - Artist (120 BPM).mp3"))
+        self.assertTrue(result["songs"][0].endswith("Some Song - Artist - 120 BPM.mp3"))
 
     def test_left_alone_when_bpm_is_off(self):
         result = self._run(sanitize=False, bpm=False)
@@ -484,7 +496,7 @@ class TestTheTempoGoesInTheName(PipelineTestCase):
         self.mock_tempo.return_value = (0, 98.0)
         result = self._run(sanitize=False, bpm=True)
         self.mock_sanitize.assert_not_called()
-        self.assertTrue(result["songs"][0].endswith("Some Song - Artist (98 BPM).mp3"))
+        self.assertTrue(result["songs"][0].endswith("Some Song - Artist - 98 BPM.mp3"))
 
     def test_a_tempo_that_cannot_be_read_leaves_the_name_as_it_was(self):
         result = self._run()
@@ -500,8 +512,8 @@ class TestTheTempoGoesInTheName(PipelineTestCase):
                 _FakeYoutubeDL.downloads.append(urls)
                 return 0
 
-        existing = os.path.join(self.tmp_dir, "Some Song - Artist (104.5 BPM)",
-                                "Some Song - Artist (104.5 BPM).mp3")
+        existing = os.path.join(self.tmp_dir, "Some Song - Artist - 104.5 BPM",
+                                "Some Song - Artist - 104.5 BPM.mp3")
         os.makedirs(os.path.dirname(existing))
         with open(existing, "wb") as f:
             f.write(b"already here")
@@ -639,7 +651,7 @@ class TestRemembersWhereSongsCameFrom(PipelineTestCase):
 
     def test_the_library_lists_the_song_with_its_link_and_its_files(self):
         song_dir = os.path.join(self.tmp_dir, "Some Song - Artist")
-        wav = os.path.join(song_dir, "Some Song - Artist (Isolated Drums at 120.000 BPM).wav")
+        wav = os.path.join(song_dir, "Drums Isolated - Some Song - Artist - 120 BPM.wav")
 
         def fake_isolate(path, context=None):
             os.makedirs(song_dir, exist_ok=True)
@@ -761,9 +773,9 @@ class TestOneFolderPerSong(unittest.TestCase):
         self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), filed)
 
     def test_a_song_is_found_under_its_tempo_name(self):
-        folder = os.path.join(self.tmp_dir, "Song - Artist (98 BPM)")
+        folder = os.path.join(self.tmp_dir, "Song - Artist - 98 BPM")
         os.makedirs(folder)
-        renamed = os.path.join(folder, "Song - Artist (98 BPM).mp3")
+        renamed = os.path.join(folder, "Song - Artist - 98 BPM.mp3")
         with open(renamed, "wb") as f:
             f.write(b"x")
         self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), renamed)
@@ -771,26 +783,26 @@ class TestOneFolderPerSong(unittest.TestCase):
     def test_a_song_is_found_under_the_name_the_sanitizer_gave_it(self):
         # yt-dlp's "Song - Artist (Official Video)" is tidied to
         # "Song - Artist" - the same derivation finds it again.
-        folder = os.path.join(self.tmp_dir, "Song - Artist (98 BPM)")
+        folder = os.path.join(self.tmp_dir, "Song - Artist - 98 BPM")
         os.makedirs(folder)
-        renamed = os.path.join(folder, "Song - Artist (98 BPM).mp3")
+        renamed = os.path.join(folder, "Song - Artist - 98 BPM.mp3")
         with open(renamed, "wb") as f:
             f.write(b"x")
         self.assertEqual(
             pipeline.existing_song(self.tmp_dir, "Song - Artist (Official Video).mp3"), renamed)
 
     def test_a_numbered_song_is_found_under_its_number(self):
-        folder = os.path.join(self.tmp_dir, "004 - Song - Artist (98 BPM)")
+        folder = os.path.join(self.tmp_dir, "004 - Song - Artist - 98 BPM")
         os.makedirs(folder)
-        renamed = os.path.join(folder, "004 - Song - Artist (98 BPM).mp3")
+        renamed = os.path.join(folder, "004 - Song - Artist - 98 BPM.mp3")
         with open(renamed, "wb") as f:
             f.write(b"x")
         self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), renamed)
 
     def test_a_different_song_with_a_tempo_is_not_mistaken_for_this_one(self):
-        folder = os.path.join(self.tmp_dir, "Song - Artist Two (98 BPM)")
+        folder = os.path.join(self.tmp_dir, "Song - Artist Two - 98 BPM")
         os.makedirs(folder)
-        with open(os.path.join(folder, "Song - Artist Two (98 BPM).mp3"), "wb") as f:
+        with open(os.path.join(folder, "Song - Artist Two - 98 BPM.mp3"), "wb") as f:
             f.write(b"x")
         self.assertEqual(pipeline.existing_song(self.tmp_dir, "Song - Artist.mp3"), "")
 
@@ -815,21 +827,21 @@ class TestWhatASongHas(unittest.TestCase):
 
     def test_each_stem_is_found_by_its_own_label(self):
         have = self._have(
-            "Song - Artist (Isolated Drums at 120.000 BPM).wav",
-            "Song - Artist (Isolated Vocals).wav",
+            "Drums Isolated - Song - Artist - 120 BPM.wav",
+            "Vocals Isolated - Song - Artist.wav",
         )
 
         self.assertEqual(set(have), {"song", "drums", "vocals"})
-        self.assertTrue(have["drums"].endswith("Drums at 120.000 BPM).wav"))
+        self.assertTrue(have["drums"].endswith("- 120 BPM.wav"))
 
     def test_a_stolen_wav_counts_as_a_beat(self):
-        have = self._have("Song - Artist (Beat at 120 BPM).wav")
+        have = self._have("Drum Beat - Song - Artist - 120 BPM.wav")
 
         self.assertIn("beat", have)
         self.assertNotIn("midi", have)
 
     def test_a_stolen_mid_counts_as_midi(self):
-        have = self._have("Song - Artist (Beat at 120 BPM).mid")
+        have = self._have("Drum Beat - Song - Artist - 120 BPM.mid")
 
         self.assertIn("midi", have)
         self.assertNotIn("beat", have)
@@ -855,8 +867,8 @@ class TestWhatASongHas(unittest.TestCase):
         self.assertEqual(have["midi"], newer)
 
     def test_the_newest_of_several_beat_wavs_is_the_one_offered(self):
-        older = os.path.join(self.tmp_dir, "Song - Artist (Beat at 98 BPM).wav")
-        newer = os.path.join(self.tmp_dir, "Song - Artist (Beat at 120 BPM).wav")
+        older = os.path.join(self.tmp_dir, "Drum Beat - Song - Artist - 98 BPM.wav")
+        newer = os.path.join(self.tmp_dir, "Drum Beat - Song - Artist - 120 BPM.wav")
         for path in (older, newer):
             open(path, "wb").close()
         os.utime(older, (0, 0))
@@ -880,39 +892,39 @@ class TestWhatASongHas(unittest.TestCase):
 
     def test_everything_it_can_report_is_a_name_the_app_shows(self):
         have = self._have(
-            "Song - Artist (Isolated Drums at 120.000 BPM).wav",
-            "Song - Artist (Isolated Bass at 120.000 BPM).wav",
-            "Song - Artist (Isolated Harmony).wav",
-            "Song - Artist (Isolated Vocals).wav",
-            "Song - Artist (Beat at 120 BPM).wav",
-            "Song - Artist (Beat at 120 BPM).mid",
-            "Song - Artist (Bass beat at 120 BPM).wav",
-            "Song - Artist (Harmony beat at 120 BPM).wav",
-            "Song - Artist (Vocals beat at 120 BPM).wav",
-            "Song - Artist (Isolated Instrumental).wav",
-            "Song - Artist (Instrumental beat at 120 BPM).wav",
+            "Drums Isolated - Song - Artist - 120 BPM.wav",
+            "Bass Isolated - Song - Artist - 120 BPM.wav",
+            "Harmony Isolated - Song - Artist.wav",
+            "Vocals Isolated - Song - Artist.wav",
+            "Drum Beat - Song - Artist - 120 BPM.wav",
+            "Drum Beat - Song - Artist - 120 BPM.mid",
+            "Bass Beat - Song - Artist - 120 BPM.wav",
+            "Harmony Beat - Song - Artist - 120 BPM.wav",
+            "Vocal Beat - Song - Artist - 120 BPM.wav",
+            "Instrumental Isolated - Song - Artist.wav",
+            "Instrumental Beat - Song - Artist - 120 BPM.wav",
         )
 
         self.assertEqual(set(have), set(pipeline.STASH_ORDER))
 
     def test_the_instrumental_and_its_loop_are_told_apart(self):
-        have = self._have("Song - Artist (Instrumental beat at 120 BPM).wav")
+        have = self._have("Instrumental Beat - Song - Artist - 120 BPM.wav")
 
         self.assertEqual(set(have), {"song", "instrumental_beat"})
 
     def test_each_stem_loop_is_found_and_none_is_taken_for_the_drum_loop(self):
         have = self._have(
-            "Song - Artist (Isolated Bass at 120.000 BPM).wav",
-            "Song - Artist (Bass beat at 120 BPM).wav",
+            "Bass Isolated - Song - Artist - 120 BPM.wav",
+            "Bass Beat - Song - Artist - 120 BPM.wav",
         )
 
-        self.assertTrue(have["bass_beat"].endswith("(Bass beat at 120 BPM).wav"))
-        self.assertTrue(have["bass"].endswith("(Isolated Bass at 120.000 BPM).wav"))
+        self.assertTrue(have["bass_beat"].endswith("Bass Beat - Song - Artist - 120 BPM.wav"))
+        self.assertTrue(have["bass"].endswith("Bass Isolated - Song - Artist - 120 BPM.wav"))
         self.assertNotIn("beat", have)
 
     def test_the_stem_loop_names_are_the_ones_beat_loop_writes(self):
         import beat_loop
-        beat = os.path.join(self.tmp_dir, "Song - Artist (Beat at 120 BPM).wav")
+        beat = os.path.join(self.tmp_dir, "Drum Beat - Song - Artist - 120 BPM.wav")
         names = [os.path.basename(beat_loop.stem_loop_path(beat, stem)) for stem in beat_loop.STEM_LOOP_LABELS]
 
         have = self._have(*names)
@@ -926,7 +938,7 @@ class TestLoopSpanInTheLibrary(unittest.TestCase):
 
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
-        self.beat = os.path.join(self.tmp_dir, "Song (Beat at 120 BPM).wav")
+        self.beat = os.path.join(self.tmp_dir, "Drum Beat - Song - 120 BPM.wav")
         open(self.beat, "wb").close()
 
     def tearDown(self):
@@ -1265,15 +1277,13 @@ class TestSpotifyPlaylists(PipelineTestCase):
         for path in result["songs"]:
             self.assertEqual(os.path.dirname(path), folder)
 
-    def test_asking_for_a_stem_gives_each_song_its_own_folder_again(self):
-        """Stems and MIDI need somewhere to live, so the per-song folders
-        come back - inside the playlist's folder, not scattered."""
+    def test_asking_for_a_stem_gives_each_song_its_own_folder_beside_the_playlist(self):
+        """The playlist folder stays just the songs, all of them. Stems need
+        somewhere to live, so each song asked about gets a folder of its own
+        beside it, as if it had been downloaded by itself."""
         with mock.patch("drum_isolator.isolate_drums_for_single_file"):
             result = self._play(instruments=["drums"])
-        folder = os.path.join(self.tmp_dir, "Misco")
-        for path in result["songs"]:
-            title = os.path.splitext(os.path.basename(path))[0]
-            self.assertEqual(os.path.dirname(path), os.path.join(folder, title))
+        self._assert_flat_playlist_and_own_folders(result, os.path.join(self.tmp_dir, "Misco"))
 
     def test_a_single_track_link_still_lands_where_it_always_did(self):
         """One song is not a playlist, whatever its album is called."""
@@ -1502,10 +1512,10 @@ class TestSanitizingSongsAlreadyOnDisk(PipelineTestCase):
     def test_a_song_gets_its_tempo_and_its_folder_follows(self):
         self.mock_tempo.return_value = (0, 98.0)
         self._put("Filed - Artist", "Filed - Artist.mp3")
-        stem = self._put("Filed - Artist", "Filed - Artist (Isolated Drums at 98 BPM).wav")
+        stem = self._put("Filed - Artist", "Drums Isolated - Filed - Artist - 98 BPM.wav")
         result = self._tidy()
-        folder = os.path.join(self.tmp_dir, "Filed - Artist (98 BPM)")
-        self.assertEqual(result["songs"], [os.path.join(folder, "Filed - Artist (98 BPM).mp3")])
+        folder = os.path.join(self.tmp_dir, "Filed - Artist - 98 BPM")
+        self.assertEqual(result["songs"], [os.path.join(folder, "Filed - Artist - 98 BPM.mp3")])
         self.assertTrue(os.path.exists(os.path.join(folder, os.path.basename(stem))),
                         "the stems moved with the song")
 
@@ -1518,7 +1528,7 @@ class TestSanitizingSongsAlreadyOnDisk(PipelineTestCase):
                             for p in result["songs"]))
 
     def test_a_song_that_already_has_its_tempo_is_not_read_again(self):
-        self._put("Song - Artist (98 BPM)", "Song - Artist (98 BPM).mp3")
+        self._put("Song - Artist - 98 BPM", "Song - Artist - 98 BPM.mp3")
         self._tidy()
         self.mock_tempo.assert_not_called()
 
@@ -1616,7 +1626,7 @@ class TestYoutubePlaylists(PipelineTestCase):
         self.mock_tempo.return_value = (0, 98.0)
         result = self._play(number=True)
         self.assertEqual(sorted(os.path.basename(p) for p in result["songs"]),
-                         ["001 - One - Artist (98 BPM).mp3", "002 - Two - Artist (98 BPM).mp3"])
+                         ["001 - One - Artist - 98 BPM.mp3", "002 - Two - Artist - 98 BPM.mp3"])
 
     def test_numbering_is_off_unless_asked_for(self):
         result = self._play()
@@ -1647,13 +1657,10 @@ class TestYoutubePlaylists(PipelineTestCase):
         for path in result["songs"]:
             self.assertEqual(os.path.dirname(path), result["output_dir"])
 
-    def test_asking_for_a_stem_puts_each_songs_folder_inside_the_playlists(self):
+    def test_asking_for_a_stem_puts_each_songs_folder_beside_the_playlist(self):
         with mock.patch("drum_isolator.isolate_drums_for_single_file"):
             result = self._play(instruments=["drums"])
-        folder = os.path.join(self.tmp_dir, "Funk Night")
-        for path in result["songs"]:
-            title = os.path.splitext(os.path.basename(path))[0]
-            self.assertEqual(os.path.dirname(path), os.path.join(folder, title))
+        self._assert_flat_playlist_and_own_folders(result, os.path.join(self.tmp_dir, "Funk Night"))
 
     def test_a_single_video_with_a_list_in_its_link_is_still_one_song(self):
         """A watch link off a playlist carries list= too, but it's one video
@@ -2202,3 +2209,68 @@ class TestAskingAtTheEnd(PipelineTestCase):
         self.assertEqual(pipeline.pending_questions(result["output_dir"]), 3)
         entry = self._record(result).get("spotify:" + "A" * 22)
         self.assertEqual([c["title"] for c in entry["candidates"]], ["One Official Video", "One 2022 Remaster"])
+
+
+class TestPlaylistSongsGetTheirOwnFolderForExtras(PipelineTestCase):
+    """Coming back to a playlist song later for a stem: a copy of the song
+    goes in a folder of its own beside the playlist, and the playlist keeps
+    its copy."""
+
+    def _playlist(self, *stems):
+        folder = os.path.join(self.tmp_dir, "Mix")
+        os.makedirs(folder)
+        with open(os.path.join(folder, sources.MANIFEST_FILENAME), "w") as f:
+            f.write("{}")
+        paths = []
+        for n, stem in enumerate(stems, start=1):
+            path = os.path.join(folder, f"{n:03d} - {stem}.mp3")
+            with open(path, "wb") as f:
+                f.write(stem.encode())
+            paths.append(path)
+        return folder, paths
+
+    def test_take_more_later_copies_the_song_into_its_own_folder(self):
+        folder, (one, two) = self._playlist("One - A - 98 BPM", "Two - A - 98 BPM")
+        history.remember("https://youtu.be/one", [one])
+        with mock.patch("drum_isolator.isolate_drums_for_single_file") as drums:
+            result = pipeline.isolate([one], ["drums"])
+        own = os.path.join(self.tmp_dir, "One - A - 98 BPM", "One - A - 98 BPM.mp3")
+        drums.assert_called_once()
+        self.assertEqual(drums.call_args[0][0], own)
+        self.assertEqual(result["songs"], [own])
+        self.assertTrue(os.path.isfile(one) and os.path.isfile(two))      # the playlist is untouched
+        self.assertEqual(history.url_for(own), "https://youtu.be/one")    # the stash follows the song
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "Two - A - 98 BPM")))
+
+    def test_coming_back_again_finds_the_same_folder(self):
+        _folder, (one,) = self._playlist("One - A - 98 BPM")
+        first = pipeline.own_folder_for(one)
+        self.assertEqual(pipeline.own_folder_for(one), first)
+        self.assertEqual(len([d for d in os.listdir(self.tmp_dir) if d.startswith("One")]), 1)
+
+    def test_a_different_song_with_the_same_name_gets_its_own_folder(self):
+        _folder, (one,) = self._playlist("One - A")
+        taken = os.path.join(self.tmp_dir, "One - A")
+        os.makedirs(taken)
+        with open(os.path.join(taken, "One - A.mp3"), "wb") as f:
+            f.write(b"a different recording")
+        self.assertEqual(pipeline.own_folder_for(one), os.path.join(self.tmp_dir, "One - A 2", "One - A 2.mp3"))
+
+    def test_a_song_not_in_a_playlist_stays_where_it_is(self):
+        path = os.path.join(self.tmp_dir, "Loose - A.mp3")
+        with open(path, "wb") as f:
+            f.write(b"x")
+        self.assertEqual(pipeline.own_folder_for(path), path)
+
+
+class TestAFolderOfSeveralSongsKeepsTheirFilesApart(unittest.TestCase):
+    def test_each_song_only_has_its_own_stems_and_beats(self):
+        folder = "/m/Old Playlist"
+        files = [os.path.join(folder, n) for n in (
+            "001 - One - A (Isolated Drums at 98 BPM).wav",
+            "Drum Beat - 002 - Two - A - 98 BPM.wav",
+            "Bass Isolated - 002 - Two - A - 98 BPM.wav")]
+        have = pipeline._what_a_song_has(os.path.join(folder, "001 - One - A (98 BPM).mp3"), files)
+        self.assertEqual(set(have), {"song", "drums"})
+        have = pipeline._what_a_song_has(os.path.join(folder, "002 - Two - A - 98 BPM.mp3"), files)
+        self.assertEqual(set(have), {"song", "beat", "bass"})

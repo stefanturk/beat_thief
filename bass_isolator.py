@@ -19,6 +19,7 @@ import numpy as np
 from pydub import AudioSegment
 
 import instrument_isolator
+import names
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
@@ -27,7 +28,7 @@ _HTDEMUCS_MODEL = "htdemucs"
 # What every bass output filename for a song contains, and what identifies
 # bass files (vs. e.g. a sibling drums export) within a song's shared
 # "<title> (Isolated)" folder - see instrument_isolator.
-_LABEL = "Isolated Bass"
+_LABEL = "bass"   # see names.ISOLATED
 
 # Written alongside each song's bass output files to identify exactly which
 # source mp3 they were produced from - see instrument_isolator.
@@ -93,7 +94,7 @@ def _apply_noise_gate(wav_path: str) -> None:
 
 
 def _output_basename(title: str, tempo: float) -> str:
-    return f"{title} ({_LABEL} at {instrument_isolator.bpm_text(tempo)} BPM)"
+    return names.isolated(_LABEL, title, tempo)
 
 
 def isolate_bass(mp3_path: str, context: instrument_isolator.RunContext | None = None) -> bool:
@@ -121,7 +122,7 @@ def isolate_bass(mp3_path: str, context: instrument_isolator.RunContext | None =
     bass_wav = os.path.join(stem_dir, "bass.wav")
 
     os.makedirs(song_dir, exist_ok=True)
-    instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
+    instrument_isolator.clear_stale_outputs(song_dir, _LABEL, title)
     basename = _output_basename(title, tempo)
     wav_path = os.path.join(song_dir, basename + ".wav")
     instrument_isolator.trim_and_export(bass_wav, trim_ms, wav_path)

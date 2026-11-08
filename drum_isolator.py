@@ -18,6 +18,7 @@ import os
 import sys
 
 import instrument_isolator
+import names
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
@@ -26,7 +27,7 @@ _HTDEMUCS_MODEL = "htdemucs"
 # What every drums output filename for a song contains, and what
 # identifies drum files (vs. e.g. a sibling bass export) within a song's
 # shared "<title> (Isolated)" folder - see instrument_isolator.
-_LABEL = "Isolated Drums"
+_LABEL = "drums"   # see names.ISOLATED
 
 # Written alongside each song's drum output files to identify exactly which
 # source mp3 they were produced from - see instrument_isolator.
@@ -37,7 +38,7 @@ _SOURCE_MARKER_FILENAME = ".drums_source.json"
 
 
 def _output_basename(title: str, tempo: float) -> str:
-    return f"{title} ({_LABEL} at {instrument_isolator.bpm_text(tempo)} BPM)"
+    return names.isolated(_LABEL, title, tempo)
 
 
 def isolate_drums(mp3_path: str, context: instrument_isolator.RunContext | None = None) -> bool:
@@ -65,7 +66,7 @@ def isolate_drums(mp3_path: str, context: instrument_isolator.RunContext | None 
     drums_wav = os.path.join(stem_dir, "drums.wav")
 
     os.makedirs(song_dir, exist_ok=True)
-    instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
+    instrument_isolator.clear_stale_outputs(song_dir, _LABEL, title)
     basename = _output_basename(title, tempo)
     wav_path = os.path.join(song_dir, basename + ".wav")
     instrument_isolator.trim_and_export(drums_wav, trim_ms, wav_path)

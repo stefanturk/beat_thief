@@ -60,3 +60,39 @@ def test_gui_imports_without_unix_only_modules():
     r = subprocess.run([sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr[-2000:]
+
+
+class TestNoConsoleWindows(unittest.TestCase):
+    def setUp(self):
+        import subprocess
+        self.original = subprocess.Popen.__init__
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        import subprocess
+        subprocess.Popen.__init__ = self.original
+        if hasattr(subprocess.Popen, "_steezy_quiet"):
+            del subprocess.Popen._steezy_quiet
+
+    def test_nothing_changes_on_a_mac(self):
+        import winquiet
+        self.assertFalse(winquiet.install("darwin"))
+
+    def test_every_new_process_is_hidden_on_windows(self):
+        import subprocess
+        import winquiet
+        seen = []
+        subprocess.Popen.__init__ = lambda self, *a, **kw: seen.append(kw)
+        self.assertTrue(winquiet.install("win32"))
+        subprocess.Popen(["ffmpeg"])
+        subprocess.Popen(["ffmpeg"], creationflags=0x10)
+        self.assertEqual([kw["creationflags"] for kw in seen], [winquiet.CREATE_NO_WINDOW, 0x10])
+
+    def test_demucs_runs_with_the_patch_in_place_on_windows(self):
+        import winquiet
+        with mock.patch.object(sys, "platform", "win32"):
+            cmd = winquiet.python_module_cmd("pythonw.exe", "demucs")
+        self.assertEqual(cmd[:2], ["pythonw.exe", "-c"])
+        self.assertIn("winquiet.install()", cmd[2])
+        self.assertIn("run_module('demucs'", cmd[2])
+        self.assertEqual(winquiet.python_module_cmd("python3", "demucs"), ["python3", "-m", "demucs"])

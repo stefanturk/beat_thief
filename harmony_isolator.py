@@ -19,6 +19,7 @@ import os
 import sys
 
 import instrument_isolator
+import names
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
@@ -27,7 +28,7 @@ _HTDEMUCS_MODEL = "htdemucs"
 # What every harmony output filename for a song contains, and what
 # identifies harmony files (vs. e.g. a sibling drums/bass export) within a
 # song's shared "<title> (Isolated)" folder - see instrument_isolator.
-_LABEL = "Isolated Harmony"
+_LABEL = "harmony"   # see names.ISOLATED
 
 # Written alongside each song's harmony output file to identify exactly
 # which source mp3 it was produced from - see instrument_isolator.
@@ -46,7 +47,7 @@ _SOURCE_MARKER_FILENAME = ".harmony_source_v2.json"
 def _output_basename(title: str) -> str:
     # No BPM suffix, unlike drums/bass - there's no MIDI step here for a
     # tempo to matter to, so nothing about the filename is tempo-dependent.
-    return f"{title} ({_LABEL})"
+    return names.isolated(_LABEL, title)
 
 
 def isolate_harmony(mp3_path: str, context: instrument_isolator.RunContext | None = None) -> bool:
@@ -73,7 +74,7 @@ def isolate_harmony(mp3_path: str, context: instrument_isolator.RunContext | Non
     other_wav = os.path.join(stem_dir, "other.wav")
 
     os.makedirs(song_dir, exist_ok=True)
-    instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
+    instrument_isolator.clear_stale_outputs(song_dir, _LABEL, title)
     basename = _output_basename(title)
     wav_path = os.path.join(song_dir, basename + ".wav")
     instrument_isolator.trim_and_export(other_wav, trim_ms, wav_path)

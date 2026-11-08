@@ -88,14 +88,14 @@ class TestIsolateBass(unittest.TestCase):
         result = bass_isolator.isolate_bass(self.mp3_path)
 
         self.assertTrue(result)
-        basename = "Song - Artist (Isolated Bass at 120 BPM)"
+        basename = "Bass Isolated - Song - Artist - 120 BPM"
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
         mock_gate.assert_called_once_with(os.path.join(self.song_dir, basename + ".wav"))
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, bass_isolator._SOURCE_MARKER_FILENAME)))
 
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
-        basename = "Song - Artist (Isolated Bass at 120.000 BPM)"
+        basename = "Bass Isolated - Song - Artist - 120 BPM"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, bass_isolator._SOURCE_MARKER_FILENAME)
@@ -112,7 +112,7 @@ class TestIsolateBass(unittest.TestCase):
     def test_reruns_when_a_wav_is_there_but_no_marker_confirms_it(
         self, mock_alignment, mock_run_demucs, mock_trim, mock_gate
     ):
-        basename = "Song - Artist (Isolated Bass at 120.000 BPM)"
+        basename = "Song - Artist (Isolated Bass at 120.000 BPM)"   # an old name
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         # No marker, so this wav can't be trusted as coming from
@@ -128,7 +128,7 @@ class TestIsolateBass(unittest.TestCase):
         mock_run_demucs.assert_called_once()
         # Redone under today's name, one decimal at most, and the old
         # three-decimal copy cleared rather than left beside it.
-        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Song - Artist (Isolated Bass at 120 BPM).wav")))
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Bass Isolated - Song - Artist - 120 BPM.wav")))
         self.assertFalse(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
 
 

@@ -28,6 +28,7 @@ import drum_isolator
 import harmony_isolator
 import history
 import instrument_isolator
+import names
 import net
 import song_sanitizer
 import sources
@@ -111,15 +112,16 @@ def file_name_for(title: str, artist: str) -> str:
     song. A slash would make a path of it and a leading dot would hide it;
     a colon shows up in Finder as a slash."""
     name = f"{title} - {artist}" if artist else title
-    cleaned = "".join(" " if c in "/\\:" else c for c in name)
-    return re.sub(r"\s+", " ", cleaned).strip(" .") or "Song"
+    return names.safe_name(name, "Song")
 
 
 def _base_ydl_opts(output_dir: str, name: str | None = None) -> dict:
     """yt-dlp's settings for one download. Given a name, the file is saved
     under it rather than under whatever the upload calls itself - so a
     song Spotify named arrives with Spotify's name on it."""
-    stem = name.replace("%", "%%") if name else "%(title)s - %(uploader)s"
+    # Byte-capped (".120B"): a Japanese title is three bytes a character,
+    # and every stem and loop named after the song adds its own label.
+    stem = name.replace("%", "%%") if name else "%(title).120B - %(uploader).40B"
     return {
         "format": "bestaudio/best",
         "outtmpl": os.path.join(output_dir, stem + ".%(ext)s"),
@@ -471,11 +473,64 @@ def file_into_own_folder(mp3_path: str) -> str:
     return destination
 
 
+def _is_playlist_folder(folder: str) -> bool:
+    return os.path.exists(os.path.join(folder, sources.MANIFEST_FILENAME))
+
+
+def _own_copy(mp3_path: str) -> tuple[str, bool]:
+    """Where a song's stems and beats live: (that song's mp3, whether it's
+    there yet).
+
+    A song already in a folder of its own is its own answer. A song sitting
+    flat in a playlist folder isn't - the playlist folder is the playlist,
+    just the songs - so its extras get a folder beside the playlist, named
+    and laid out exactly as if that song had been downloaded by itself, with
+    a copy of the song in it. The playlist keeps its copy.
+
+    Anything else (a flat folder that isn't a playlist) is left where it is."""
+    folder = os.path.dirname(os.path.abspath(mp3_path))
+    stem = os.path.splitext(os.path.basename(mp3_path))[0]
+    if os.path.basename(folder) == stem or not _is_playlist_folder(folder):
+        return mp3_path, True
+    bare = _NUMBER_RE.sub("", stem, count=1)
+    root = os.path.dirname(folder)
+    size = os.path.getsize(mp3_path) if os.path.exists(mp3_path) else -1
+    nth = 1
+    while True:
+        name = bare if nth == 1 else f"{bare} {nth}"
+        target = os.path.join(root, name, name + ".mp3")
+        if not os.path.exists(target):
+            # Not this song's folder, if it's there under another song's
+            # name: never put a second song in with the first one's stems.
+            if not os.path.isdir(os.path.dirname(target)):
+                return target, False
+        elif os.path.getsize(target) == size:
+            return target, True
+        nth += 1
+
+
+def own_folder_for(mp3_path: str) -> str:
+    """The mp3 that a song's stems and beats go beside (see _own_copy),
+    copying it there first if it has to be. Coming back to the song later -
+    from the stash, or the playlist again - finds the same folder."""
+    target, there = _own_copy(mp3_path)
+    if there:
+        return target
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        shutil.copy2(mp3_path, target)
+    except OSError:
+        return mp3_path
+    history.move(mp3_path, target)
+    return target
+
+
 def _instrument_outputs(mp3_path: str, label: str) -> list[str]:
     """The files an isolator just produced for this song and instrument, so
     a caller can offer them directly instead of making someone go looking."""
     song_dir = instrument_isolator.song_output_dir(mp3_path)
-    basename = instrument_isolator.find_existing_basename(song_dir, label)
+    basename = instrument_isolator.find_existing_basename(
+        song_dir, label, instrument_isolator.song_title(mp3_path))
     if basename is None:
         return []
     # Just the wav. An isolator produces nothing else now that whole-song
@@ -517,8 +572,12 @@ def _what_a_song_has(song_path: str, files: list[str]) -> dict:
     A path rather than a flag, because a front end wants both: which
     squares to fill in, and what to reveal when one is clicked."""
     have = {"song": song_path}
-    for name, (_module, label) in _INSTRUMENTS.items():
-        match = next((p for p in files if label in os.path.basename(p) and p.endswith(".wav")), None)
+    # Only this song's own files: an older playlist folder can hold several
+    # songs' stems side by side, and a name is what tells them apart.
+    title = instrument_isolator.song_title(song_path)
+    files = [p for p in files if p != song_path and names.belongs_to(p, title)]
+    for name in _INSTRUMENTS:
+        match = next((p for p in files if p.endswith(".wav") and names.is_isolated(p, name)), None)
         if match:
             have[name] = match
     wav_beat = _newest_stolen_beat(files, ".wav")
@@ -527,9 +586,8 @@ def _what_a_song_has(song_path: str, files: list[str]) -> dict:
     midi_beat = _newest_stolen_beat(files, ".mid")
     if midi_beat:
         have["midi"] = midi_beat
-    for stem, label in beat_writer.STEM_LOOP_LABELS.items():
-        marker = f"({label} at "
-        loops = [p for p in files if marker in os.path.basename(p) and p.endswith(".wav")]
+    for stem in beat_writer.STEM_LOOP_LABELS:
+        loops = [p for p in files if p.endswith(".wav") and names.is_beat(p, stem)]
         if loops:
             have[stem + "_beat"] = max(loops, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0.0)
     return have
@@ -623,8 +681,7 @@ def _library_entry(song_path: str, url: str) -> dict | None:
 def _safe_folder_name(name: str) -> str:
     """A playlist's name, fit to be a folder. Slashes would make a path out
     of a name, and a leading dot would hide the folder from Finder."""
-    cleaned = "".join(" " if c in "/\\:" else c for c in name).strip(" .")
-    return cleaned or "Playlist"
+    return names.safe_name(name, "Playlist")
 
 
 def _resolve_one(song: dict, index, total, on_event, on_choose, cancelled,
@@ -1114,7 +1171,10 @@ def run(
     # they'd otherwise pile up unlabelled beside the mp3s - but a playlist
     # downloaded just for the songs is a folder of songs, and burying each
     # one in a folder of its own would only make it harder to use.
-    own_folder = bool(wanted) or not is_playlist
+    # A playlist folder is always just its songs, flat. A playlist song that
+    # also gets stems or beats gets a folder of its own beside the playlist,
+    # as if it had been downloaded by itself (see own_folder_for).
+    own_folder = not is_playlist
     try:
         os.makedirs(output_dir, exist_ok=True)
     except OSError as e:
@@ -1261,6 +1321,10 @@ def run(
         }
     )
 
+    if is_playlist and wanted:
+        # What was made for each song is beside its own copy, so that's the
+        # one to hand back (see own_folder_for).
+        songs = [copy if there else p for p in songs for copy, there in [_own_copy(p)]]
     result["songs"] = songs
     result["outputs"] = result["outputs"] + [p for p in songs if p not in result["outputs"]]
 
@@ -1310,7 +1374,8 @@ def _problem(result: dict, on_event, message: str) -> None:
 
 
 def _missing_stems(mp3_path: str, wanted) -> bool:
-    return any(not _instrument_outputs(mp3_path, _INSTRUMENTS[name][1]) for name in wanted)
+    copy, there = _own_copy(mp3_path)
+    return not there or any(not _instrument_outputs(copy, _INSTRUMENTS[name][1]) for name in wanted)
 
 
 def _nap(seconds: float, cancelled) -> bool:
@@ -1642,6 +1707,13 @@ def _isolate_songs(song_paths, wanted, on_event, cancelled, should_cancel, inter
     # finished, cancelled or blown up.
     try:
         for mp3_path in song_paths:
+            # A playlist song gets its own folder first (see own_folder_for),
+            # and from here on it's that copy everything is made beside.
+            own = own_folder_for(mp3_path)
+            if own != mp3_path:
+                result["songs"] = [own if p == mp3_path else p for p in result.get("songs", [])]
+                result["outputs"] = [own if p == mp3_path else p for p in result.get("outputs", [])]
+                mp3_path = own
             title = instrument_isolator.song_title(mp3_path)
             for name in wanted:
                 if cancelled():

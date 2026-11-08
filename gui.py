@@ -27,10 +27,12 @@ import sys
 import threading
 import time
 
+import winquiet  # first, so no console window ever flashes up on Windows  # noqa: F401
 import audition
 import beat_loop
 import history
 import instrument_isolator
+import names
 import pipeline
 import progress
 import pulse
@@ -836,7 +838,7 @@ class Api:
             song_dir = os.path.dirname(wav_path)
             basename = os.path.splitext(os.path.basename(wav_path))[0]
             tempo = instrument_isolator.parse_tempo_from_basename(basename)
-            title = basename.split(" (Isolated")[0]
+            title = names.parse(basename).title
 
             loop = beat_loop.build(wav_path, tempo, float(start_sec), float(end_sec), on_phase=on_phase)
             if on_phase is not None:
@@ -917,7 +919,8 @@ class Api:
         it answers directly rather than through a poller."""
         try:
             song_dir = instrument_isolator.song_output_dir(song_path)
-            files = [os.path.join(song_dir, n) for n in os.listdir(song_dir)]
+            title = instrument_isolator.song_title(song_path)
+            files = [os.path.join(song_dir, n) for n in os.listdir(song_dir) if names.belongs_to(n, title)]
             beat_path = pipeline._newest_stolen_beat(files, ".wav") or pipeline._newest_stolen_beat(files, ".mid")
             span = beat_loop.read_span(beat_path) if beat_path else None
             if span is None:
@@ -933,12 +936,12 @@ class Api:
         """Cut each of stems over [origin_sec, +duration_sec], named after
         the drum loop at beat_path. Returns (paths written, stems that have
         no isolated wav to cut from)."""
-        names = sorted(os.listdir(song_dir))
+        listing = sorted(os.listdir(song_dir))
+        title = names.parse(beat_path).title
         loops, missing = [], []
         for stem in stems:
-            label = pipeline._INSTRUMENTS[stem][1]
-            source = next((os.path.join(song_dir, n) for n in names
-                           if label in n and n.endswith(".wav")), None)
+            source = next((os.path.join(song_dir, n) for n in listing
+                           if n.endswith(".wav") and names.is_isolated(n, stem) and names.belongs_to(n, title)), None)
             if source is None:
                 missing.append(stem)
                 continue

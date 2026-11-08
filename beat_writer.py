@@ -26,6 +26,7 @@ import json
 import os
 from typing import NamedTuple
 
+import names
 import pretty_midi
 
 # Name -> MIDI note, in the order the kit is laid out low to high. Every one
@@ -60,16 +61,10 @@ PIECES = {
 # The pads a Drum Rack shows. Anything outside is silent in a stock rack.
 RACK_LOW, RACK_HIGH = 36, 51
 
-# What a stolen loop's filename carries, the way each isolator's outputs
-# carry its label (see instrument_isolator.find_existing_basename). Lives
-# here rather than in beat_loop so that reading a song's folder to see
-# what's in it doesn't mean importing the transcriber and all of torch.
-STOLEN_BEAT_LABEL = "Beat at"
-
-# What that label used to be. Only ever read, never written: a folder of
-# beats stolen before the rename should still show a green Beat square
-# rather than looking like a song nobody has taken a loop out of.
-_FORMER_STOLEN_BEAT_LABEL = "Stolen Beat"
+# Loop names live in names.py (label first: "Drum Beat - Song - 104.5
+# BPM"), which also reads every older name - "(Beat at ...)", "(Stolen
+# Beat, 4 bars)" - so a folder of beats taken before a rename still shows
+# its green Beat square.
 
 # How long each note is written as. A drum rack plays one-shots, so this is
 # cosmetic - but a part whose notes are all hairlines is unreadable in the
@@ -190,21 +185,15 @@ def filename_for(beat: Beat, label: str) -> str:
 
 
 def stolen_beat_filename(beat: Beat, title: str) -> str:
-    """What a stolen loop is called: the song it came out of, and the tempo
-    to set Ableton to.
-
-    The bar count used to be in here as well - "(Stolen Beat, 4 bars)
-    (104.9 BPM)" - and it's gone. It's the one number in the name that
-    can't be acted on: the clip is however many bars it is whether or not
-    the filename agrees, while the tempo is a number you have to type into
-    Live. Two brackets deep, the tempo was also the half that got clipped
-    first in any list narrow enough to truncate."""
-    return f"{title} ({STOLEN_BEAT_LABEL} {round(beat.tempo, 1):g} BPM).mid"
+    """What a stolen loop is called: "Drum Beat - Song - Artist - 104.9
+    BPM.mid". The tempo is the number you have to type into Live; the bar
+    count isn't in it, because the clip is however long it is."""
+    return names.beat("drums", title, beat.tempo) + ".mid"
 
 
 def is_stolen_beat(name: str) -> bool:
-    """Whether a filename is a stolen loop, under either name it has had."""
-    return STOLEN_BEAT_LABEL in name or _FORMER_STOLEN_BEAT_LABEL in name
+    """Whether a filename is a drum loop, under any name it has had."""
+    return names.is_beat(name, "drums")
 
 
 # --- loops of the other stems --------------------------------------------
@@ -212,25 +201,17 @@ def is_stolen_beat(name: str) -> bool:
 # Every stem is trimmed by the same beat-1 cut (instrument_isolator
 # .song_alignment), so a time in the drum stem is the same time in the bass
 # stem - and the drum loop's span, cut out of any of them, is the same bars.
-# Lower-case "beat", so none of these reads as the drum loop's "Beat at".
 
-STEM_LOOP_LABELS = {"bass": "Bass beat", "harmony": "Harmony beat", "vocals": "Vocals beat",
-                    "instrumental": "Instrumental beat"}
+STEM_LOOP_LABELS = {stem: names.BEAT[stem] for stem in ("bass", "harmony", "vocals", "instrumental")}
 
 
 def stem_loop_path(beat_path: str, stem: str) -> str:
     """Where the loop of stem that matches the drum loop at beat_path goes:
-    "Song (Beat at 104.5 BPM) (2).wav" -> "Song (Bass beat at 104.5 BPM) (2).wav".
+    "Drum Beat - Song - 104.5 BPM 2.wav" -> "Bass Beat - Song - 104.5 BPM 2.wav".
 
-    Derived from the drum loop's own name, " (2)" and all, so a second
+    Derived from the drum loop's own name, number and all, so a second
     marking's stems stay paired with it rather than with the first."""
-    directory, name = os.path.split(beat_path)
-    base = os.path.splitext(name)[0]
-    at = base.rfind("(" + STOLEN_BEAT_LABEL)
-    if at < 0:
-        raise ValueError(f"not a drum loop: {name}")
-    renamed = base[:at + 1] + STEM_LOOP_LABELS[stem] + base[at + len("(Beat"):]
-    return os.path.join(directory, renamed + ".wav")
+    return names.stem_loop_of(beat_path, stem)
 
 
 def _span_path(beat_path: str) -> str:

@@ -51,14 +51,14 @@ class TestIsolateInstrumental(unittest.TestCase):
         result, _ = self._isolate()
 
         self.assertTrue(result)
-        _rate, samples = wavfile.read(os.path.join(self.song_dir, "Song - Artist (Isolated Instrumental).wav"))
+        _rate, samples = wavfile.read(os.path.join(self.song_dir, "Instrumental Isolated - Song - Artist.wav"))
         self.assertTrue((samples == 1230).all())  # no vocals (4) in it
 
     def test_only_the_instrumental_lands_in_the_songs_folder(self):
         self._isolate()
 
         wavs = [f for f in os.listdir(self.song_dir) if f.endswith(".wav")]
-        self.assertEqual(wavs, ["Song - Artist (Isolated Instrumental).wav"])
+        self.assertEqual(wavs, ["Instrumental Isolated - Song - Artist.wav"])
 
     def test_a_loud_sum_is_held_at_full_scale_rather_than_wrapping_round(self):
         self.stems["drums"] = np.full((100, 2), 30000, dtype=np.int16)
@@ -66,7 +66,7 @@ class TestIsolateInstrumental(unittest.TestCase):
 
         self._isolate()
 
-        _rate, samples = wavfile.read(os.path.join(self.song_dir, "Song - Artist (Isolated Instrumental).wav"))
+        _rate, samples = wavfile.read(os.path.join(self.song_dir, "Instrumental Isolated - Song - Artist.wav"))
         self.assertTrue((samples == 32767).all())
 
     def test_one_separation_serves_the_vocals_and_the_instrumental(self):
@@ -80,7 +80,7 @@ class TestIsolateInstrumental(unittest.TestCase):
         demucs.assert_called_once()
 
     def test_skips_when_it_is_already_there_for_this_mp3(self):
-        with open(os.path.join(self.song_dir, "Song - Artist (Isolated Instrumental).wav"), "wb") as f:
+        with open(os.path.join(self.song_dir, "Instrumental Isolated - Song - Artist.wav"), "wb") as f:
             f.write(b"x")
         instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, instrumental_isolator._SOURCE_MARKER_FILENAME)
 

@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+
+import names
+import winquiet
 import os
 import re
 import shutil
@@ -120,7 +123,7 @@ def run_demucs(
     importing torch and loading the model and it says nothing at all in it -
     so a cancel in that minute did nothing for the whole of it, which is
     exactly the part of a run somebody changes their mind during."""
-    cmd = [sys.executable, "-m", "demucs", "-n", model_name, "-o", out_dir]
+    cmd = winquiet.python_module_cmd(sys.executable, "demucs") + ["-n", model_name, "-o", out_dir]
     if two_stems:
         cmd += ["--two-stems", two_stems]
     cmd.append(input_path)
@@ -297,17 +300,16 @@ def song_output_dir(mp3_path: str) -> str:
 
 def has_existing_outputs(song_dir: str, label: str, require_midi: bool) -> bool:
     """Whether song_dir already has a wav (and, if require_midi, a matching
-    .mid) for the given instrument label (e.g. "Isolated Drums") - matched
-    by the label appearing in the filename, so drums and bass sharing one
+    .mid) isolated for stem label ("drums", "bass"...) - read from the
+    names (see names.parse), new or old, so drums and bass sharing one
     song_dir don't see each other's files."""
     if not os.path.isdir(song_dir):
         return False
     entries = os.listdir(song_dir)
-    marker = f"({label}"
-    has_wav = any(marker in f and f.endswith(".wav") for f in entries)
+    has_wav = any(f.endswith(".wav") and names.is_isolated(f, label) for f in entries)
     if not require_midi:
         return has_wav
-    has_mid = any(marker in f and f.endswith(".mid") for f in entries)
+    has_mid = any(f.endswith(".mid") and names.is_isolated(f, label) for f in entries)
     return has_wav and has_mid
 
 
@@ -316,64 +318,54 @@ def bpm_text(tempo: float) -> str:
     all for a whole number. Three decimals was precision nobody can type
     into Live or hear, and it made every name longer. The tempo itself is
     kept at full precision everywhere it's used - only the name rounds."""
-    return f"{round(tempo, 1):g}"
-
-
-_TEMPO_FROM_BASENAME_RE = re.compile(r"at ([\d.]+) BPM\)$")
-
-# What sanitizing adds to a song's own name: "Song - Artist (104.5 BPM)".
-# No "at", which is what keeps it apart from a stem's "(Isolated Drums at
-# 104.5 BPM)" - the one is the song's tempo, the other says what was cut.
-_SONG_TEMPO_RE = re.compile(r" \([\d.]+ BPM\)$")
+    return names.bpm_text(tempo)
 
 
 def song_title(mp3_path: str) -> str:
     """What a song is called in the names of things made from it: the mp3's
     name without its extension and without the tempo sanitizing puts in
-    it. Otherwise every stem and loop would say the tempo twice - "Song
-    (104.5 BPM) (Isolated Drums at 104.5 BPM)"."""
-    stem = os.path.splitext(os.path.basename(mp3_path))[0]
-    return _SONG_TEMPO_RE.sub("", stem)
+    it ("Song - Artist - 104.5 BPM", or the older "(104.5 BPM)")."""
+    stem = os.path.basename(mp3_path)
+    if stem.lower().endswith(".mp3"):
+        stem = stem[:-4]
+    return names.strip_song_tempo(stem)
 
 
 def with_song_tempo(title: str, tempo: float) -> str:
     """title with its tempo on the end, as a sanitized song is named."""
-    return f"{_SONG_TEMPO_RE.sub('', title)} ({bpm_text(tempo)} BPM)"
+    return names.song(title, tempo)
 
 
-def find_existing_basename(song_dir: str, label: str) -> str | None:
-    """The basename (no extension) of song_dir's existing wav for this
-    instrument label, or None if there isn't one - lets a caller add a
-    MIDI file for outputs that were already isolated without re-running
-    demucs, by reading the tempo straight back out of the filename (see
-    parse_tempo_from_basename) instead of needing song_alignment() again."""
+def find_existing_basename(song_dir: str, label: str, title: str | None = None) -> str | None:
+    """The basename (no extension) of song_dir's existing wav isolated for
+    stem label, or None if there isn't one. With title, only that song's -
+    an older playlist folder can hold several songs' stems side by side."""
     if not os.path.isdir(song_dir):
         return None
-    marker = f"({label} at"
-    for f in os.listdir(song_dir):
-        if marker in f and f.endswith(".wav"):
+    for f in sorted(os.listdir(song_dir)):
+        if f.endswith(".wav") and names.is_isolated(f, label) and (title is None or names.belongs_to(f, title)):
             return os.path.splitext(f)[0]
     return None
 
 
 def parse_tempo_from_basename(basename: str) -> float:
-    match = _TEMPO_FROM_BASENAME_RE.search(basename)
-    if not match:
+    tempo = names.parse(basename).tempo
+    if tempo is None:
         raise ValueError(f"no tempo found in {basename!r}")
-    return float(match.group(1))
+    return tempo
 
 
-def clear_stale_outputs(song_dir: str, label: str) -> None:
-    """Remove any previously-produced .wav/.mid files for this instrument
+def clear_stale_outputs(song_dir: str, label: str, title: str | None = None) -> None:
+    """Remove any previously-produced .wav/.mid files isolated for stem
     label - the filename embeds the tempo, so re-processing with a
     different tempo would otherwise leave old and new copies side by side.
-    Only touches files matching this label, leaving any other instrument's
-    files in the same shared song_dir alone."""
+    Only touches that stem's files (and with title, that song's), leaving
+    everything else in the folder alone."""
     if not os.path.isdir(song_dir):
         return
-    marker = f"({label}"
     for f in os.listdir(song_dir):
-        if marker in f and (f.endswith(".wav") or f.endswith(".mid")):
+        if (f.endswith(".wav") or f.endswith(".mid")) and names.is_isolated(f, label) and (
+                title is None or names.belongs_to(f, title)):
             os.remove(os.path.join(song_dir, f))
 
 

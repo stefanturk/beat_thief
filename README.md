@@ -191,11 +191,23 @@ the stems and any stolen beat, together:
 ```
 ~/Music/Beat Thief/
   Song Title/
-    Song Title.mp3
-    Song Title (Isolated Drums at 120.000 BPM).wav
-    Song Title (Isolated Bass at 120.000 BPM).wav
-    Song Title (Beat at 120 BPM).mid
+    Song Title - 120 BPM.mp3
+    Drums Isolated - Song Title - 120 BPM.wav
+    Bass Isolated - Song Title - 120 BPM.wav
+    Vocals Isolated - Song Title.wav
+    Drum Beat - Song Title - 120 BPM.wav
+    Drum Beat - Song Title - 120 BPM.mid
+    Bass Beat - Song Title - 120 BPM.wav
 ```
+
+Every name says what it is first: "<Stem> Isolated" for a whole stem and
+"<Stem> Beat" for a loop cut out of one. Files made by older versions
+("Song Title (Isolated Drums at 120 BPM).wav") are still recognised.
+
+A playlist folder holds just the playlist's songs, all of them, flat. A
+song from it that also gets stems or beats - when the playlist is
+downloaded or any time later - gets a folder of its own beside the
+playlist, laid out as above with a copy of the song in it.
 
 Downloading and sanitizing still work on a flat directory — the sanitizer
 renames, dedupes and compares across the whole set of new mp3s at once — so
@@ -217,7 +229,7 @@ detail.
 
 ### Drums
 
-`<Song Title> (Isolated Drums at N.NNN BPM).wav` is the isolated drum mix.
+`Drums Isolated - <Song Title> - N BPM.wav` is the isolated drum mix.
 The exact BPM is in the filename, there to read at a glance.
 
 The drum transcriber that reads it — nine pieces, per-hit velocity — is
@@ -292,7 +304,7 @@ sharing with them.
 
 ### Bass
 
-`<Song Title> (Isolated Bass at N.NNN BPM).wav` is the isolated bass part.
+`Bass Isolated - <Song Title> - N BPM.wav` is the isolated bass part.
 
 Anything quieter than 5% of the track's own peak volume is gated out —
 imperfect stem separation tends to leave a low-level noise floor behind,
@@ -300,7 +312,7 @@ and this is what's left when the real bass content stops.
 
 ### Harmony
 
-`<Song Title> (Isolated Harmony).wav` is everything left in the mix once
+`Harmony Isolated - <Song Title>.wav` is everything left in the mix once
 drums, bass and vocals are pulled out — guitars, keys, pads, whatever else
 is holding the chords up — meant to drop straight into a DAW alongside the
 other exports from the same song. No MIDI step for this one, just audio.
@@ -312,7 +324,7 @@ time you ask for harmony on that song.
 
 ### Vocals
 
-`<Song Title> (Isolated Vocals).wav` is the singing — lead and backing —
+`Vocals Isolated - <Song Title>.wav` is the singing — lead and backing —
 with the band taken out from under it. Audio only, no MIDI.
 
 ### Beats, not songs

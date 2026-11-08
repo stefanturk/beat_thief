@@ -81,6 +81,8 @@ SOURCES=(
     percussion_splitter.py
     groove_reader.py
     beat_writer.py
+    names.py
+    winquiet.py
     beat_loop.py
     pulse.py
     progress.py

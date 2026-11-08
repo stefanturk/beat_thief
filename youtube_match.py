@@ -32,6 +32,8 @@ import urllib.parse
 
 import yt_dlp
 
+import names
+
 # How far from Spotify's duration a result can be and still be worth showing.
 # Four seconds covers the ordinary differences - a video's silent lead-in, a
 # fade held a beat longer - without letting in a different arrangement.
@@ -148,8 +150,14 @@ _DISQUALIFYING_RE = re.compile(
 )
 
 
+# The same words in Japanese. No word boundaries in Japanese text, so these
+# are plain substrings - long enough not to turn up inside a song's name.
+_DISQUALIFYING_JA_RE = re.compile("ライブ|カバー|歌ってみた|弾いてみた|叩いてみた|リミックス|カラオケ|オフボーカル|インスト")
+
+
 def looks_like_another_version(title: str) -> bool:
-    return bool(_DISQUALIFYING_RE.search((title or "").lower()))
+    title = title or ""
+    return bool(_DISQUALIFYING_RE.search(title.lower()) or _DISQUALIFYING_JA_RE.search(title))
 
 
 # A remaster is the same players in the same room; only the mastering differs.
@@ -237,7 +245,7 @@ def _squash(name: str) -> str:
     """A name reduced to letters and digits, so "Earth, Wind & Fire" and
     "Earth Wind & Fire - Topic" can be compared at all."""
     name = re.sub(r"\s*-\s*topic$", "", (name or "").strip().lower())
-    return re.sub(r"[^0-9a-z]+", "", name)
+    return names.squash(name)
 
 
 def same_artist(wanted: str, found: list[str]) -> bool:

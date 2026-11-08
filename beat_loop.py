@@ -423,7 +423,7 @@ def build(
 
 
 def _free_path(path: str) -> str:
-    """path, or the next " (2)", " (3)"... that nothing is using.
+    """path, or the next " 2", " 3"... that nothing is using.
 
     A song is worth more than one beat - a verse and a chorus out of the
     same drums are two different loops - and the name only carries the bar
@@ -433,7 +433,7 @@ def _free_path(path: str) -> str:
     stem, ext = os.path.splitext(path)
     nth = 2
     while os.path.exists(path):
-        path = f"{stem} ({nth}){ext}"
+        path = f"{stem} {nth}{ext}"
         nth += 1
     return path
 

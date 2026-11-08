@@ -46,7 +46,7 @@ class TestIsolateVocals(unittest.TestCase):
         result = vocals_isolator.isolate_vocals(self.mp3_path)
 
         self.assertTrue(result)
-        wav_path = os.path.join(self.song_dir, "Song - Artist (Isolated Vocals).wav")
+        wav_path = os.path.join(self.song_dir, "Vocals Isolated - Song - Artist.wav")
         self.assertTrue(os.path.exists(wav_path))
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, vocals_isolator._SOURCE_MARKER_FILENAME)))
 
@@ -76,11 +76,11 @@ class TestIsolateVocals(unittest.TestCase):
 
         produced = os.listdir(self.song_dir)
         self.assertFalse([f for f in produced if f.endswith(".mid")])
-        self.assertIn("Song - Artist (Isolated Vocals).wav", produced)
+        self.assertIn("Vocals Isolated - Song - Artist.wav", produced)
 
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
-        with open(os.path.join(self.song_dir, "Song - Artist (Isolated Vocals).wav"), "wb") as f:
+        with open(os.path.join(self.song_dir, "Vocals Isolated - Song - Artist.wav"), "wb") as f:
             f.write(b"x")
         instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, vocals_isolator._SOURCE_MARKER_FILENAME)
 
@@ -93,7 +93,7 @@ class TestIsolateVocals(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reprocesses_when_the_marker_is_missing(self, mock_alignment, mock_run_demucs, mock_trim):
-        with open(os.path.join(self.song_dir, "Song - Artist (Isolated Vocals).wav"), "wb") as f:
+        with open(os.path.join(self.song_dir, "Vocals Isolated - Song - Artist.wav"), "wb") as f:
             f.write(b"x")
         # no marker - so this wav can't be trusted as coming from self.mp3_path.
 
@@ -110,7 +110,7 @@ class TestIsolateVocals(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reprocesses_when_the_marker_does_not_match(self, mock_alignment, mock_run_demucs, mock_trim):
-        with open(os.path.join(self.song_dir, "Song - Artist (Isolated Vocals).wav"), "wb") as f:
+        with open(os.path.join(self.song_dir, "Vocals Isolated - Song - Artist.wav"), "wb") as f:
             f.write(b"x")
         stale_mp3 = os.path.join(self.tmp_dir, "stale.mp3")
         with open(stale_mp3, "wb") as f:

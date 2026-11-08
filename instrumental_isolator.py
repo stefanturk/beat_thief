@@ -24,6 +24,7 @@ import numpy as np
 from scipy.io import wavfile
 
 import instrument_isolator
+import names
 
 DEFAULT_OUTPUT = os.path.join(os.path.expanduser("~"), "Downloads", "Song Downloads")
 
@@ -32,7 +33,7 @@ _HTDEMUCS_MODEL = "htdemucs"
 # What every instrumental output filename for a song contains, and what
 # identifies instrumental files within a song's folder - see
 # instrument_isolator.
-_LABEL = "Isolated Instrumental"
+_LABEL = "instrumental"   # see names.ISOLATED
 
 # Written alongside each song's instrumental output file to identify
 # exactly which source mp3 it was produced from - see instrument_isolator.
@@ -45,7 +46,7 @@ _SOURCES = ("drums", "bass", "other")
 
 def _output_basename(title: str) -> str:
     # No BPM suffix, like vocals - nothing about it is tempo-dependent.
-    return f"{title} ({_LABEL})"
+    return names.isolated(_LABEL, title)
 
 
 def _summed_wav(stem_dir: str) -> str:
@@ -91,7 +92,7 @@ def isolate_instrumental(mp3_path: str, context: instrument_isolator.RunContext 
     instrumental_wav = _summed_wav(stem_dir)
 
     os.makedirs(song_dir, exist_ok=True)
-    instrument_isolator.clear_stale_outputs(song_dir, _LABEL)
+    instrument_isolator.clear_stale_outputs(song_dir, _LABEL, title)
     wav_path = os.path.join(song_dir, _output_basename(title) + ".wav")
     instrument_isolator.trim_and_export(instrumental_wav, trim_ms, wav_path)
 

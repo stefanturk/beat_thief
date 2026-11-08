@@ -82,7 +82,7 @@ class TestIsolateDrums(unittest.TestCase):
         result = drum_isolator.isolate_drums(self.mp3_path)
 
         self.assertTrue(result)
-        basename = "Song - Artist (Isolated Drums at 120 BPM)"
+        basename = "Drums Isolated - Song - Artist - 120 BPM"
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, drum_isolator._SOURCE_MARKER_FILENAME)))
 
@@ -98,11 +98,11 @@ class TestIsolateDrums(unittest.TestCase):
 
         drum_isolator.isolate_drums(mp3)
 
-        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Song - Artist (Isolated Drums at 120 BPM).wav")))
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Drums Isolated - Song - Artist - 120 BPM.wav")))
 
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
-        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"   # an old name
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, drum_isolator._SOURCE_MARKER_FILENAME)
@@ -116,7 +116,7 @@ class TestIsolateDrums(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reruns_when_a_wav_is_there_but_no_marker_confirms_it(self, mock_alignment, mock_run_demucs, mock_trim):
-        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"
+        basename = "Song - Artist (Isolated Drums at 120.000 BPM)"   # an old name
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         # No marker, so this wav can't be trusted as coming from
@@ -132,7 +132,7 @@ class TestIsolateDrums(unittest.TestCase):
         mock_run_demucs.assert_called_once()
         # Redone under today's name, one decimal at most, and the old
         # three-decimal copy cleared rather than left beside it.
-        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Song - Artist (Isolated Drums at 120 BPM).wav")))
+        self.assertTrue(os.path.exists(os.path.join(self.song_dir, "Drums Isolated - Song - Artist - 120 BPM.wav")))
         self.assertFalse(os.path.exists(os.path.join(self.song_dir, basename + ".wav")))
 
     @mock.patch("instrument_isolator.trim_and_export")
@@ -141,7 +141,7 @@ class TestIsolateDrums(unittest.TestCase):
     def test_reruns_and_replaces_stale_outputs_when_the_source_mp3_marker_does_not_match(
         self, mock_alignment, mock_run_demucs, mock_trim
     ):
-        stale = "Song - Artist (Isolated Drums at 90.000 BPM)"
+        stale = "Drums Isolated - Song - Artist - 90 BPM"
         with open(os.path.join(self.song_dir, stale + ".wav"), "wb") as f:
             f.write(b"x")
         instrument_isolator.write_source_marker(
@@ -158,7 +158,7 @@ class TestIsolateDrums(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertFalse(os.path.exists(os.path.join(self.song_dir, stale + ".wav")))
-        fresh = "Song - Artist (Isolated Drums at 120 BPM)"
+        fresh = "Drums Isolated - Song - Artist - 120 BPM"
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, fresh + ".wav")))
 
 

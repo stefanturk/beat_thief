@@ -820,8 +820,25 @@
   }
 
   /* The one thing in here that writes a file, so it's the one that's lit. */
-  #build { border-color: var(--violet); color: var(--violet); }
-  #build:hover { background: var(--violet-dim); }
+  /* Far right, filled and bigger than everything else in the row: it's
+     where you end up once the loop sounds right, so it shouldn't need
+     looking for. */
+  .picker-controls #build {
+    padding: 11px 22px;
+    background: var(--violet);
+    border-color: var(--violet);
+    color: #141418;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .picker-controls #build:hover { filter: brightness(1.12); color: #141418; }
+  .picker-controls #build:disabled {
+    background: transparent;
+    color: var(--violet);
+    border-color: var(--violet);
+    opacity: 0.45;
+    filter: none;
+  }
 
   /* How long you've held the section for. Pushed to the right with the
      clock, and violet because it's the thing you're deciding. */
@@ -940,7 +957,7 @@
             The tempo in the name and the BPM tag. Needs nothing but the
             song, so it doesn't wait on Sanitize.
           -->
-          <label id="bpm-wrap" title="Put the song's tempo in its name and its BPM tag: Song - Artist (104.5 BPM).">
+          <label id="bpm-wrap" title="Put the song's tempo in its name and its BPM tag: Song - Artist - 104.5 BPM.">
             <input type="checkbox" id="bpm" checked> BPM
           </label>
           <!--
@@ -1052,14 +1069,14 @@
       <canvas id="detail" width="1000" height="104"></canvas>
       <div class="picker-controls">
         <button id="play" type="button">Play</button>
-        <button id="build" type="button" disabled>Build</button>
+        <button id="check" type="button" hidden title="Hear the end of the loop run into its start (L)">Check loop</button>
         <button id="fade" type="button" hidden>Fade here</button>
         <button id="keep" type="button" hidden>Leave it alone</button>
         <span class="seg" id="bars" role="group" aria-label="Bars to mark">
-          <button type="button" data-bars="4" class="on">4 bars</button>
+          <button type="button" data-bars="0" class="on">By hand</button>
+          <button type="button" data-bars="4">4 bars</button>
           <button type="button" data-bars="8">8</button>
           <button type="button" data-bars="16">16</button>
-          <button type="button" data-bars="0">By ear</button>
         </span>
         <span class="seg" id="hear" role="group" aria-label="Listen to">
           <button type="button" data-hear="drums" class="on">Drums</button>
@@ -1068,6 +1085,7 @@
         <button id="picker-close" type="button">Close</button>
         <span id="marked"></span>
         <span id="clock">0:00</span>
+        <button id="build" type="button" disabled>Build beat</button>
       </div>
     </section>
 
@@ -1120,23 +1138,24 @@
 
   // --- reading a run's state -------------------------------------------
 
-  // The tempo lives in the filename ("... at 121.132 BPM).wav") because that's
-  // where the pipeline puts it. Pulling it back out is what lets the readout
-  // finish on the number worth knowing rather than a bare "100%".
-  const TEMPO = /at ([\d.]+) BPM\)/;
-  // A sanitized song says its own tempo too ("Song - Artist (104.5 BPM).mp3"),
+  // The tempo lives in the filename ("Drums Isolated - Song - 121.1 BPM.wav",
+  // or the older "... at 121.132 BPM).wav") because that's where the pipeline
+  // puts it. Pulling it back out is what lets the readout finish on the
+  // number worth knowing rather than a bare "100%".
+  const TEMPO = /(?:at ([\d.]+) BPM\)| - ([\d.]+) BPM(?: \d+)?\.(?:wav|mid)$)/;
+  // A sanitized song says its own tempo too ("Song - Artist - 104.5 BPM.mp3"),
   // so a song-only run can finish on it - but only when it was one song: the
   // first of a playlist's tempos is no more the answer than any other.
-  const SONG_TEMPO = /\(([\d.]+) BPM\)\.mp3$/;
+  const SONG_TEMPO = /(?:\(([\d.]+) BPM\)| - ([\d.]+) BPM)\.mp3$/;
 
   function tempoOf(paths) {
     for (const path of paths) {
       const found = path.match(TEMPO);
-      if (found) return found[1];
+      if (found) return found[1] || found[2];
     }
     if (paths.length === 1) {
       const found = paths[0].match(SONG_TEMPO);
-      if (found) return found[1];
+      if (found) return found[1] || found[2];
     }
     return null;
   }
@@ -1715,10 +1734,51 @@
   // the same reason the grid is fitted locally at all: 16 bars at a tempo a
   // few tenths of a percent out ends well off the one.
   //
-  // 0 is "by ear" - the old way, where stopping is what marks the end. Kept
-  // across pickers, because it's a way of working rather than a per-song
-  // choice.
-  let barsWanted = 4;
+  // 0 is "by hand" - stopping is what marks the end - and it's the default:
+  // you know where the phrase ends better than a bar count does. Kept across
+  // pickers, because it's a way of working rather than a per-song choice.
+  let barsWanted = 0;
+
+  // --- checking the loop -----------------------------------------------------
+  //
+  // Whether a loop works is decided at one place: where its end runs back
+  // into its start. Playing it from the top makes you sit through the whole
+  // thing to hear that once. Checking starts CHECK_BARS before the end, so
+  // the join comes almost at once, and then goes round and round. While it
+  // does, the close-up shows the two sides of the join next to each other.
+  const CHECK_BARS = 2;
+  let checking = false;
+
+  function canCheck() {
+    return picker !== null && !trimming() && picker.start !== null && picker.end !== null;
+  }
+
+  function checkFrom() {
+    const bar = beatAt(picker.end) * BEATS_PER_BAR;
+    const from = picker.end - CHECK_BARS * bar;
+    return from > picker.start ? from : picker.start;
+  }
+
+  function checkLoop() {
+    if (!canCheck()) return;
+    checking = true;
+    playFrom(checkFrom());
+    el("picker-hint").textContent = "Checking the loop: the end runs into the start — ← → move the start, [ ] move the end, " +
+      "click either side of the join to move that side. Space stops.";
+  }
+
+  // [ and ] move the end by a sixteenth, the way ← → move the start.
+  function nudgeEnd(steps) {
+    if (!canCheck() || countingBars()) return;
+    const end = picker.end + steps * stepAt(picker.end);
+    if (end <= picker.start || end > picker.duration) return;
+    picker.end = end;
+    if (checking) checkLoop(); else { sayWhatIsMarked(); drawWave(); drawDetail(); }
+  }
+
+  function refreshCheck() {
+    el("check").hidden = !canCheck();
+  }
 
   function barsAfter(from, bars) {
     let at = from;
@@ -1932,8 +1992,40 @@
     if (!picker) return;
 
     const span = detailSpan();
-    const from = detailCentre() - span / 2;
-    const x = (when) => ((when - from) / span) * w;
+    if (checking && canCheck()) {
+      // The seam view: the bars running up to the end on the left, the bars
+      // the loop goes back to on the right, joined in the middle - the join
+      // you're listening for, as it will be in the loop.
+      const half = span / 2;
+      paintWindow(ctx, picker.end - half, half, 0, w / 2, h);
+      paintWindow(ctx, picker.start, half, w / 2, w / 2, h);
+      ctx.fillStyle = "#fab08b";
+      ctx.fillRect(w / 2 - 1, 0, 2, h);
+      if (playing) {
+        const at = playhead();
+        const x = at >= picker.end - half && at <= picker.end ? ((at - (picker.end - half)) / half) * (w / 2)
+                : at >= picker.start && at <= picker.start + half ? w / 2 + ((at - picker.start) / half) * (w / 2)
+                : null;
+        if (x !== null) { ctx.fillStyle = "#e9e7e2"; ctx.fillRect(x - 0.5, 0, 1, h); }
+      }
+      return;
+    }
+    paintWindow(ctx, detailCentre() - span / 2, span, 0, w, h);
+    if (playing) {
+      const from = detailCentre() - span / 2;
+      ctx.fillStyle = "#e9e7e2";
+      ctx.fillRect(((playhead() - from) / span) * w - 0.5, 0, 1, h);
+    }
+  }
+
+  // One stretch of the stem, [from, from + span], drawn into the strip of
+  // the close-up that starts at left and is width wide.
+  function paintWindow(ctx, from, span, left, width, h) {
+    const x = (when) => left + ((when - from) / span) * width;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, 0, width, h);
+    ctx.clip();
 
     // The waveform for this window, drawn off the decoded audio rather than
     // the 900-bucket envelope - at this zoom a bucket is several bars wide
@@ -1943,10 +2035,10 @@
       const rate = picker.buffer.sampleRate;
       const mid = h / 2;
       ctx.fillStyle = "#33373f";
-      const perPixel = (span * rate) / w;
+      const perPixel = (span * rate) / width;
       const stride = Math.max(1, Math.floor(perPixel / 24));
-      for (let px = 0; px < w; px++) {
-        const first = Math.floor((from + picker.lead + (px / w) * span) * rate);
+      for (let px = 0; px < width; px++) {
+        const first = Math.floor((from + picker.lead + (px / width) * span) * rate);
         let loudest = 0;
         for (let i = 0; i < perPixel; i += stride) {
           const sample = data[first + i];
@@ -1955,13 +2047,13 @@
           if (level > loudest) loudest = level;
         }
         const bar = Math.max(1, loudest * h * 0.9);
-        ctx.fillRect(px, mid - bar / 2, 1, bar);
+        ctx.fillRect(left + px, mid - bar / 2, 1, bar);
       }
     }
 
     // The grid. Bars heaviest, beats next, sixteenths faint - so which line
     // is which is readable at a glance instead of counting.
-    const grid = trimming() ? null : gridAt(detailCentre());
+    const grid = trimming() ? null : gridAt(from + span / 2);
     if (grid) {
       const first = Math.floor((from - grid.downbeat) / grid.step) - 1;
       const last = Math.ceil((from + span - grid.downbeat) / grid.step) + 1;
@@ -1992,11 +2084,7 @@
       ctx.fillStyle = colour;
       ctx.fillRect(x(time) - 1, 0, 2, h);
     }
-
-    if (playing) {
-      ctx.fillStyle = "#e9e7e2";
-      ctx.fillRect(x(playhead()) - 0.5, 0, 1, h);
-    }
+    ctx.restore();
   }
 
   // Every bar, the whole waveform lights up on the one.
@@ -2101,7 +2189,7 @@
     // get - a start that's off the one is obvious the second time it comes
     // round. By ear it plays on, because playing past the end is how the
     // end gets moved.
-    picker.loop = countingBars() && picker.start !== null && picker.end !== null &&
+    picker.loop = (checking || countingBars()) && picker.start !== null && picker.end !== null &&
                   picker.at >= picker.start && picker.at < picker.end
       ? [picker.start, picker.end] : null;
     if (picker.loop) {
@@ -2136,12 +2224,14 @@
   // with a start marked, stopping marks the end there - so "Mark End".
   // Counting bars, the bars already mark the end, and it only pauses.
   function labelPlay() {
-    if (!playing) { el("play").textContent = "Play"; return; }
-    const marks = picker && !trimming() && picker.start !== null && !countingBars();
+    if (!playing) { el("play").textContent = "Play"; el("check").textContent = "Check loop"; return; }
+    const marks = picker && !trimming() && picker.start !== null && !countingBars() && !checking;
     el("play").textContent = marks ? "Mark End" : "Pause";
+    el("check").textContent = checking ? "Stop check" : "Check loop";
   }
 
   function pausePlay() {
+    checking = false;
     if (picker) picker.at = playhead();
     stopSource();
     playing = false;
@@ -2383,6 +2473,8 @@
   function closePicker() {
     stopSource();
     playing = false;
+    checking = false;
+    el("check").hidden = true;
     if (raf) { cancelAnimationFrame(raf); raf = null; }
     // A build still in flight is left to finish on the Python side - its
     // file still gets written - but nothing here should keep polling into a
@@ -2415,6 +2507,18 @@
     if (!picker || el("play").disabled) return;
     const box = canvas.getBoundingClientRect();
     const fraction = (event.clientX - box.left) / box.width;
+    if (checking && canvas === detail && canCheck()) {
+      // The seam view: the end's side on the left, the start's on the right.
+      const half = detailSpan() / 2;
+      if (fraction < 0.5) {
+        const end = snapToKick(picker.end - half + fraction * 2 * half);
+        if (end > picker.start && !countingBars()) picker.end = end;
+        checkLoop();
+      } else {
+        setStart(snapToKick(picker.start + (fraction - 0.5) * 2 * half), true);
+      }
+      return;
+    }
     const at = canvas === detail
       ? detailCentre() - detailSpan() / 2 + fraction * detailSpan()
       : fraction * picker.duration;
@@ -2445,8 +2549,8 @@
       picker.end = null;
       refreshBuildEnabled();
     }
-    playFrom(picker.start);
-    sayWhatIsMarked();
+    if (checking && canCheck()) checkLoop();
+    else { checking = false; playFrom(picker.start); sayWhatIsMarked(); }
     drawWave();
     drawDetail();
   }
@@ -2466,7 +2570,7 @@
   function nudgeStart(steps) {
     if (!picker || picker.start === null) return;
     setStart(picker.start + steps * stepAt(picker.start), true);
-    sayWhatIsMarked();
+    if (!checking) sayWhatIsMarked();
   }
 
   // Sliding takes the end with it, so the section keeps its length and only
@@ -2483,10 +2587,10 @@
     picker.start = start;
     if (countingBars()) placeEnd();
     else if (picker.end !== null) picker.end = start + span;
-    playFrom(picker.start);
+    if (checking && canCheck()) checkLoop();
+    else { playFrom(picker.start); sayWhatIsMarked(); }
     drawWave();
     drawDetail();
-    sayWhatIsMarked();
   }
 
   function sayWhatIsMarked() {
@@ -2495,12 +2599,12 @@
     if (countingBars()) {
       el("picker-hint").textContent = picker.end === null
         ? "There aren't " + barsWanted + " bars left after here — start earlier, or count fewer."
-        : barsWanted + " bars, looping — ← → a sixteenth, ⇧ a beat, S drums/song — Build when it loops right.";
+        : barsWanted + " bars, looping — ← → a sixteenth, ⇧ a beat, S drums/song, L to check the join — Build when it loops right.";
       return;
     }
     if (picker.end === null) return;
     el("picker-hint").textContent = (picker.end - picker.start).toFixed(1) +
-      "s marked — build the beat, ⇧← ⇧→ to slide it a beat, or play it again and stop at a different 1 to move the end.";
+      "s marked — L (Check loop) to hear the end run into the start, [ ] to move the end, ⇧← ⇧→ to slide it a beat, then Build.";
   }
 
   function firstHint() {
@@ -2527,8 +2631,9 @@
     // Trimming has no phrase and no end to mark, and neither does a picker
     // with no start set yet - both just stop.
     if (trimming() || picker.start === null) { pausePlay(); return; }
-    // The bars already say where it ends; stopping is only stopping.
-    if (countingBars()) { pausePlay(); return; }
+    // The bars already say where it ends, and a check is only listening;
+    // stopping either is only stopping.
+    if (countingBars() || checking) { pausePlay(); sayWhatIsMarked(); return; }
     pausePlay();
     if (end <= picker.start) {
       el("picker-hint").textContent = "That is before the start - click again and play on.";
@@ -2591,6 +2696,7 @@
 
   function refreshBuildEnabled() {
     if (!picker) return;
+    refreshCheck();
     el("build").disabled = !(picker.start !== null && picker.end !== null && outputsFromPads());
   }
 
@@ -3198,6 +3304,7 @@
   el("play").addEventListener("click", togglePlay);
 
   el("build").addEventListener("click", buildBeat);
+  el("check").addEventListener("click", () => { el("check").blur(); if (checking) pausePlay(); else checkLoop(); });
   for (const chip of document.querySelectorAll("#bars button")) {
     chip.addEventListener("click", () => chooseBars(Number(chip.dataset.bars)));
   }
@@ -3213,10 +3320,11 @@
   document.addEventListener("keydown", (event) => {
     if (el("picker").hidden) return;
     const keyed = event.code === "Space" || event.code === "ArrowLeft" || event.code === "ArrowRight" ||
-                  event.code === "KeyS";
+                  event.code === "KeyS" || event.code === "KeyL" ||
+                  event.code === "BracketLeft" || event.code === "BracketRight";
     if (!keyed) return;
     // ⌘S and friends are the system's, not a swap.
-    if (event.code === "KeyS" && (event.metaKey || event.ctrlKey || event.altKey)) return;
+    if ((event.code === "KeyS" || event.code === "KeyL") && (event.metaKey || event.ctrlKey || event.altKey)) return;
     // Somewhere you can type is the one place these are just keys. The link
     // box is autofocused, so without this the whole interaction is dead -
     // which is exactly how the spacebar came to do nothing for a while.
@@ -3239,6 +3347,14 @@
     }
     if (event.code === "KeyS") {
       toggleHearing();
+      return;
+    }
+    if (event.code === "KeyL") {
+      if (checking) pausePlay(); else checkLoop();
+      return;
+    }
+    if (event.code === "BracketLeft" || event.code === "BracketRight") {
+      nudgeEnd(event.code === "BracketLeft" ? -1 : 1);
       return;
     }
     const direction = event.code === "ArrowLeft" ? -1 : 1;

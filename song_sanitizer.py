@@ -25,6 +25,8 @@ from mutagen.id3 import ID3, ID3NoHeaderError, TXXX
 
 from pydub import AudioSegment
 
+import names
+
 DUPLICATES_DIR_NAME = "Duplicates"
 
 _JUNK_PATTERNS = [
@@ -50,6 +52,10 @@ _JUNK_PATTERNS = [
     r"\bvisualizer\b",
     r"\bhd\b",
     r"\b4k\b",
+    r"\bmv\b",
+    r"\bpv\b",
+    r"ミュージックビデオ",
+    r"公式",
 ]
 _JUNK_RE = re.compile("|".join(_JUNK_PATTERNS), re.IGNORECASE)
 
@@ -66,7 +72,11 @@ DEDUP_THRESHOLD = 0.9
 # Square brackets are left alone deliberately: the junk list already names
 # the ones worth removing, and what's left in them is usually a remixer or a
 # catalogue number somebody chose to put there.
-_PARENTHETICAL_RE = re.compile(r"\s*\([^()]*\)")
+#
+# Japanese uploads use the fullwidth forms: "（Official Music Video）" is the
+# same aside as "(Official Music Video)", and "【MV】" / "【公式】" is where a
+# channel puts its tag - so both come off the same way.
+_PARENTHETICAL_RE = re.compile(r"\s*(?:\([^()]*\)|（[^（）]*）|【[^【】]*】)")
 
 
 # --- Title cleanup and ID3 tags ---------------------------------------------
@@ -74,7 +84,7 @@ _PARENTHETICAL_RE = re.compile(r"\s*\([^()]*\)")
 def clean_title(stem: str) -> str:
     cleaned = _strip_parentheticals(stem)
     cleaned = _JUNK_RE.sub("", cleaned)
-    cleaned = re.sub(r"[\(\[]\s*[\)\]]", "", cleaned)  # leftover empty () or [] shells
+    cleaned = re.sub(r"[\(\[（【「]\s*[\)\]）】」]", "", cleaned)  # leftover empty () [] （） 【】 「」 shells
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     cleaned = re.sub(r"\s*-\s*$", "", cleaned).strip()
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
@@ -117,6 +127,26 @@ def split_title_artist(stem: str) -> tuple[str, str]:
                 artist = left.strip()
                 title = right.strip()
             break
+    else:
+        # "YOASOBI「夜に駆ける」": Japanese uploads quote the song's name in
+        # corner brackets, with the artist in front.
+        quoted = re.match(r"^(?P<before>[^「]*)「(?P<inside>[^」]+)」(?P<after>.*)$", title)
+        if quoted:
+            if quoted["before"].strip():
+                artist = quoted["before"].strip()
+            title = quoted["inside"].strip()
+        else:
+            # "夜に駆ける／YOASOBI" - but Japanese uploads put the artist on
+            # either side, so only when one side is the channel's name.
+            for sep in ("／", "⧸"):
+                if sep in title and artist:
+                    left, right = (part.strip() for part in title.split(sep, 1))
+                    if left and right:
+                        if names.squash(right) == names.squash(artist) or names.squash(artist) in names.squash(right):
+                            title, artist = left, right
+                        elif names.squash(left) == names.squash(artist) or names.squash(artist) in names.squash(left):
+                            title, artist = right, left
+                    break
 
     return title, artist
 
@@ -174,17 +204,23 @@ def _is_already_sanitized(path: str) -> bool:
 # What Beat Thief itself adds to a song's name - a playlist number in front
 # and the tempo on the end - so not part of what the song is called.
 _OUR_PREFIX_RE = re.compile(r"^\d{3} - ")
-_OUR_SUFFIX_RE = re.compile(r" \([\d.]+ BPM\)$")
 
 
 def normalize_for_compare(stem: str) -> str:
     # Every song has a number and a tempo once named for them, so leaving
     # them in makes any two look more alike than they are - and the same
     # song with and without its tempo look less alike than it is.
-    stem = _OUR_SUFFIX_RE.sub("", _OUR_PREFIX_RE.sub("", stem))
-    lowered = stem.lower()
-    stripped = re.sub(r"[^a-z0-9]+", " ", lowered)
-    return re.sub(r"\s+", " ", stripped).strip()
+    #
+    # Letters of every script are kept (names.fold): with only a-z kept,
+    # every Japanese title came out empty, and two different songs by one
+    # artist both read as just "yoasobi" - the same song, to the deduper.
+    stem = names.strip_song_tempo(_OUR_PREFIX_RE.sub("", stem))
+    return names.fold(stem)
+
+
+def _title_part(stem: str) -> str:
+    title, _artist = split_title_artist(names.strip_song_tempo(_OUR_PREFIX_RE.sub("", stem)))
+    return names.fold(title)
 
 
 def find_duplicate_pairs(filenames: list[str], threshold: float = DEDUP_THRESHOLD,
@@ -217,6 +253,11 @@ def find_duplicate_pairs(filenames: list[str], threshold: float = DEDUP_THRESHOL
                     continue
                 seen.add((a, b))
             (f1, n1), (f2, n2) = normalized[a], normalized[b]
+            # Nothing left of a title to compare is no evidence of anything:
+            # two songs by one artist must never be called one song because
+            # neither name had a title anybody could read.
+            if not n1 or not n2 or not _title_part(os.path.splitext(f1)[0]) or not _title_part(os.path.splitext(f2)[0]):
+                continue
             matcher = difflib.SequenceMatcher(None, n1, n2)
             # The quick bounds are upper limits on ratio(), so a pair that
             # fails them can't pass it - and they cost almost nothing.

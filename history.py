@@ -103,3 +103,19 @@ def url_for(song_path: str, path: str | None = None) -> str:
         if entry.get("song") == target:
             return entry.get("url", "")
     return ""
+
+
+def move(old_path: str, new_path: str, path: str | None = None) -> None:
+    """The song at old_path is now looked after at new_path (a playlist
+    song copied into a folder of its own, to hold its stems and beats).
+    Keeps its link and its place in the list."""
+    old, new = os.path.abspath(old_path), os.path.abspath(new_path)
+    entries = _load(path)
+    if not any(e.get("song") == old for e in entries):
+        return
+    kept = []
+    for e in entries:
+        if e.get("song") == new:
+            continue
+        kept.append(dict(e, song=new) if e.get("song") == old else e)
+    _save(kept, path)

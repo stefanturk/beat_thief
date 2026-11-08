@@ -313,7 +313,7 @@ class TestApiStart(unittest.TestCase):
         api = gui.Api(
             isolate_pipeline=lambda songs, **k: {
                 "songs": list(songs), "downloaded": 0,
-                "outputs": ["/songs/Track/Track (Isolated Bass at 96.000 BPM).wav"],
+                "outputs": ["/songs/Track/Bass Isolated - Track - 96 BPM.wav"],
             },
         )
         api.start("", {"source": "/songs/Track/Track.mp3", "bass": True})
@@ -732,7 +732,7 @@ class TestAudition(unittest.TestCase):
 
     def test_the_songs_tempo_comes_along(self):
         # It sizes the slide keystroke. Without it a beat is a guess.
-        prepared = self._audition("Song - Artist (Isolated Drums at 105.373 BPM).wav")
+        prepared = self._audition("Song - Artist (Isolated Drums at 105.373 BPM).wav")   # an old name
 
         self.assertAlmostEqual(prepared["tempo"], 105.373, places=3)
 
@@ -747,7 +747,7 @@ class TestAudition(unittest.TestCase):
         # audition.preview hands back the same dict every time it's asked
         # for a file, so adding a key to it would accumulate across calls.
         cached = {"audio": "data:x", "peaks": [0.1], "duration": 9.0, "path": "p"}
-        path = os.path.join(self.tmp_dir, "Song (Isolated Drums at 99.000 BPM).wav")
+        path = os.path.join(self.tmp_dir, "Drums Isolated - Song - 99 BPM.wav")
         with open(path, "wb") as f:
             f.write(b"x")
         with mock.patch("audition.preview", return_value=cached):
@@ -761,7 +761,7 @@ class TestAudition(unittest.TestCase):
         # flash to this, and works out its own arrow-key step from it.
         beat = 0.5
         kicks = [round(n * beat, 4) for n in range(64)]
-        path = os.path.join(self.tmp_dir, "Song (Isolated Drums at 120.000 BPM).wav")
+        path = os.path.join(self.tmp_dir, "Drums Isolated - Song - 120 BPM.wav")
         with open(path, "wb") as f:
             f.write(b"x")
         prepared = {"audio": "data:x", "peaks": [0.1], "duration": 40.0,
@@ -775,7 +775,7 @@ class TestAudition(unittest.TestCase):
             self.assertAlmostEqual(segment["step"], beat / 4, delta=0.005)
 
     def test_a_stem_with_nothing_to_fit_a_grid_to_still_comes_back(self):
-        path = os.path.join(self.tmp_dir, "Song (Isolated Drums at 120.000 BPM).wav")
+        path = os.path.join(self.tmp_dir, "Drums Isolated - Song - 120 BPM.wav")
         with open(path, "wb") as f:
             f.write(b"x")
         prepared = {"audio": "data:x", "peaks": [0.1], "duration": 9.0,
@@ -816,7 +816,7 @@ class TestStealBeat(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.stem = os.path.join(
-            self.tmp_dir, "Song - Artist (Isolated Drums at 120.000 BPM).wav")
+            self.tmp_dir, "Drums Isolated - Song - Artist - 120 BPM.wav")
         with open(self.stem, "wb") as f:
             f.write(b"not really a wav")
 
@@ -891,7 +891,7 @@ class TestStealBeat(unittest.TestCase):
 
     def test_a_stem_that_is_not_there_comes_back_as_a_message(self):
         loop = gui.Api().steal_beat(
-            os.path.join(self.tmp_dir, "gone (Isolated Drums at 120.000 BPM).wav"), 0.0, 4.0)
+            os.path.join(self.tmp_dir, "Drums Isolated - gone - 120 BPM.wav"), 0.0, 4.0)
 
         self.assertIn("error", loop)
 
@@ -904,7 +904,7 @@ class TestStealBeat(unittest.TestCase):
         self.assertTrue(args[2].endswith(".mid"))  # named after the .mid it sits beside
 
     def test_the_wav_actually_lands_next_to_a_real_midi(self):
-        real_stem = os.path.join(self.tmp_dir, "Real - Artist (Isolated Drums at 120.000 BPM).wav")
+        real_stem = os.path.join(self.tmp_dir, "Drums Isolated - Real - Artist - 120 BPM.wav")
         with contextlib.closing(wave.open(real_stem, "wb")) as f:
             f.setnchannels(1)
             f.setsampwidth(2)
@@ -929,7 +929,7 @@ class TestStealBeat(unittest.TestCase):
         # Real write()/write_wav(), so what lands on disk can actually be
         # checked - a mocked write_wav can't prove a .mid was or wasn't
         # deleted alongside it.
-        real_stem = os.path.join(self.tmp_dir, "Real - Artist (Isolated Drums at 120.000 BPM).wav")
+        real_stem = os.path.join(self.tmp_dir, "Drums Isolated - Real - Artist - 120 BPM.wav")
         with contextlib.closing(wave.open(real_stem, "wb")) as f:
             f.setnchannels(1)
             f.setsampwidth(2)
@@ -969,9 +969,9 @@ class TestStemLoops(unittest.TestCase):
         self.tmp_dir = tempfile.mkdtemp()
         self.song = os.path.join(self.tmp_dir, "Song - Artist.mp3")
         open(self.song, "wb").close()
-        self.drums = os.path.join(self.tmp_dir, "Song - Artist (Isolated Drums at 120.0 BPM).wav")
-        self.bass = os.path.join(self.tmp_dir, "Song - Artist (Isolated Bass at 120.0 BPM).wav")
-        self.vocals = os.path.join(self.tmp_dir, "Song - Artist (Isolated Vocals at 120.0 BPM).wav")
+        self.drums = os.path.join(self.tmp_dir, "Drums Isolated - Song - Artist - 120 BPM.wav")
+        self.bass = os.path.join(self.tmp_dir, "Bass Isolated - Song - Artist - 120 BPM.wav")
+        self.vocals = os.path.join(self.tmp_dir, "Vocals Isolated - Song - Artist.wav")
         for path in (self.drums, self.bass, self.vocals):
             open(path, "wb").close()
         self.loop = beat_loop.Loop(
@@ -1003,8 +1003,8 @@ class TestStemLoops(unittest.TestCase):
         self.assertEqual(by_source[self.bass], by_source[self.drums])
         self.assertEqual(by_source[self.vocals], (4.25, self.loop.beat.duration_sec))
         names = [os.path.basename(p) for p in result["loops"]]
-        self.assertEqual(names, ["Song - Artist (Bass beat at 120 BPM).wav",
-                                 "Song - Artist (Vocals beat at 120 BPM).wav"])
+        self.assertEqual(names, ["Bass Beat - Song - Artist - 120 BPM.wav",
+                                 "Vocal Beat - Song - Artist - 120 BPM.wav"])
 
     def test_no_stems_armed_is_the_drum_loop_alone(self):
         result = self._steal([])
@@ -1037,7 +1037,7 @@ class TestStemLoops(unittest.TestCase):
         self.assertEqual(result["bars"], 2)
 
     def test_the_instrumental_loops_over_the_same_bars_too(self):
-        instrumental = os.path.join(self.tmp_dir, "Song - Artist (Isolated Instrumental).wav")
+        instrumental = os.path.join(self.tmp_dir, "Instrumental Isolated - Song - Artist.wav")
         open(instrumental, "wb").close()
         made = self._steal([])
         self.cuts.clear()
@@ -1051,7 +1051,7 @@ class TestStemLoops(unittest.TestCase):
                                       beat_loop.stem_loop_path(made["path"], "instrumental"))])
 
     def test_a_drum_loop_without_a_span_asks_to_be_marked_again(self):
-        old = os.path.join(self.tmp_dir, "Song - Artist (Beat at 120 BPM).wav")
+        old = os.path.join(self.tmp_dir, "Drum Beat - Song - Artist - 120 BPM.wav")
         open(old, "wb").close()
         with mock.patch("instrument_isolator.song_output_dir", return_value=self.tmp_dir):
             result = gui.Api().loop_stems(self.song, ["bass"])
@@ -1067,7 +1067,7 @@ class TestStealBeatAsync(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp()
         self.stem = os.path.join(
-            self.tmp_dir, "Song - Artist (Isolated Drums at 120.000 BPM).wav")
+            self.tmp_dir, "Drums Isolated - Song - Artist - 120 BPM.wav")
         with open(self.stem, "wb") as f:
             f.write(b"not really a wav")
 
@@ -1359,14 +1359,23 @@ class TestUiFile(unittest.TestCase):
             with self.subTest(method=name):
                 self.assertTrue(callable(getattr(gui.Api, name, None)))
 
-    def test_the_picker_offers_4_8_16_bars_or_by_ear(self):
+    def test_the_picker_marks_by_hand_first_or_4_8_16_bars(self):
         with open(gui.UI_FILE) as page:
             html = page.read()
         chips = re.findall(r'data-bars="(\d+)"', html)
 
-        self.assertEqual(chips, ["4", "8", "16", "0"])
-        self.assertIn("let barsWanted = 4;", html)
-        self.assertRegex(html, r'data-bars="4" class="on"')
+        self.assertEqual(chips, ["0", "4", "8", "16"])
+        self.assertIn("let barsWanted = 0;", html)
+        self.assertRegex(html, r'data-bars="0" class="on">By hand<')
+
+    def test_check_loop_starts_two_bars_before_the_end_and_wraps(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        self.assertIn('id="check"', html)
+        self.assertIn("const CHECK_BARS = 2;", html)
+        self.assertIn("picker.end - CHECK_BARS * bar", html)
+        self.assertIn("picker.loop = (checking || countingBars())", html)   # it goes round
+        self.assertIn('event.code === "KeyL"', html)
 
     def test_s_swaps_the_drums_and_the_song(self):
         with open(gui.UI_FILE) as page:

@@ -473,7 +473,7 @@ class TestWrite(unittest.TestCase):
     def test_the_filename_is_the_song_and_the_tempo_to_set_ableton_to(self):
         path = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
 
-        self.assertEqual(os.path.basename(path), "Some Song (Beat at 120 BPM).mid")
+        self.assertEqual(os.path.basename(path), "Drum Beat - Some Song - 120 BPM.mid")
         self.assertTrue(os.path.exists(path))
 
     def test_the_track_inside_is_named_after_the_file(self):
@@ -483,14 +483,14 @@ class TestWrite(unittest.TestCase):
         path = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
 
         midi = pretty_midi.PrettyMIDI(path)
-        self.assertEqual(midi.instruments[0].name, "Some Song (Beat at 120 BPM)")
+        self.assertEqual(midi.instruments[0].name, "Drum Beat - Some Song - 120 BPM")
 
     def test_a_second_beats_track_carries_its_own_name(self):
         beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
         second = beat_loop.write(self._loop(), self.tmp_dir, "Some Song")
 
         midi = pretty_midi.PrettyMIDI(second)
-        self.assertEqual(midi.instruments[0].name, "Some Song (Beat at 120 BPM) (2)")
+        self.assertEqual(midi.instruments[0].name, "Drum Beat - Some Song - 120 BPM 2")
 
     def test_it_makes_the_folder_if_it_is_not_there(self):
         out_dir = os.path.join(self.tmp_dir, "new")
@@ -508,7 +508,7 @@ class TestWrite(unittest.TestCase):
         self.assertNotEqual(first, second)
         self.assertTrue(os.path.exists(first))
         self.assertTrue(os.path.exists(second))
-        self.assertIn("(2)", os.path.basename(second))
+        self.assertTrue(os.path.basename(second).endswith(" BPM 2.mid"))
 
     def test_it_keeps_counting_past_the_second(self):
         written = [beat_loop.write(self._loop(), self.tmp_dir, "Some Song") for _ in range(4)]
@@ -537,17 +537,17 @@ class TestWriteWav(unittest.TestCase):
     def test_the_wav_sits_beside_the_midi_with_a_matching_name(self):
         wav_path = os.path.join(self.tmp_dir, "stem.wav")
         _silent_wav(wav_path, seconds=10.0)
-        mid_path = os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).mid")
+        mid_path = os.path.join(self.tmp_dir, "Drum Beat - Some Song - 120 BPM.mid")
 
         out_path = beat_loop.write_wav(self._loop(), wav_path, mid_path)
 
-        self.assertEqual(out_path, os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).wav"))
+        self.assertEqual(out_path, os.path.join(self.tmp_dir, "Drum Beat - Some Song - 120 BPM.wav"))
         self.assertTrue(os.path.exists(out_path))
 
     def test_it_is_trimmed_to_the_loops_own_span_not_the_raw_marking(self):
         wav_path = os.path.join(self.tmp_dir, "stem.wav")
         _silent_wav(wav_path, seconds=10.0)
-        mid_path = os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).mid")
+        mid_path = os.path.join(self.tmp_dir, "Drum Beat - Some Song - 120 BPM.mid")
         loop = self._loop(origin_sec=2.0, bars=2, tempo=120.0)  # 4s long
 
         out_path = beat_loop.write_wav(loop, wav_path, mid_path)
@@ -561,7 +561,7 @@ class TestWriteWav(unittest.TestCase):
         # ffmpeg's own rounding of a silent file; this is the real claim.
         wav_path = os.path.join(self.tmp_dir, "stem.wav")
         _click_wav(wav_path, seconds=20.0, tempo=120.0)
-        mid_path = os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).mid")
+        mid_path = os.path.join(self.tmp_dir, "Drum Beat - Some Song - 120 BPM.mid")
         loop = self._loop(origin_sec=4.0, bars=2, tempo=120.0)
 
         out_path = beat_loop.write_wav(loop, wav_path, mid_path)
@@ -576,7 +576,7 @@ class TestWriteWav(unittest.TestCase):
         import numpy as np
         wav_path = os.path.join(self.tmp_dir, "stem.wav")
         _click_wav(wav_path, seconds=20.0, tempo=120.0)
-        mid_path = os.path.join(self.tmp_dir, "Some Song (Beat at 120 BPM).mid")
+        mid_path = os.path.join(self.tmp_dir, "Drum Beat - Some Song - 120 BPM.mid")
         loop = self._loop(origin_sec=4.0, bars=2, tempo=120.0)   # 4.0s is a kick
 
         out_path = beat_loop.write_wav(loop, wav_path, mid_path)
@@ -599,24 +599,24 @@ class TestStemLoops(unittest.TestCase):
         return TestWriteWav._loop(self, origin_sec=origin_sec, bars=bars, tempo=tempo)
 
     def test_a_stem_loop_is_named_after_the_drum_loop_it_matches(self):
-        beat = os.path.join(self.tmp_dir, "Song - Artist (Beat at 104.5 BPM).wav")
+        beat = os.path.join(self.tmp_dir, "Drum Beat - Song - Artist - 104.5 BPM.wav")
         self.assertEqual(
             beat_loop.stem_loop_path(beat, "bass"),
-            os.path.join(self.tmp_dir, "Song - Artist (Bass beat at 104.5 BPM).wav"))
+            os.path.join(self.tmp_dir, "Bass Beat - Song - Artist - 104.5 BPM.wav"))
 
     def test_a_second_drum_loops_number_carries_over(self):
-        beat = os.path.join(self.tmp_dir, "Song (Beat at 104.5 BPM) (2).wav")
+        beat = os.path.join(self.tmp_dir, "Drum Beat - Song - 104.5 BPM 2.wav")
         self.assertEqual(
             os.path.basename(beat_loop.stem_loop_path(beat, "vocals")),
-            "Song (Vocals beat at 104.5 BPM) (2).wav")
+            "Vocal Beat - Song - 104.5 BPM 2.wav")
 
     def test_a_stem_loop_is_not_mistaken_for_the_drum_loop(self):
         for stem in beat_loop.STEM_LOOP_LABELS:
-            name = os.path.basename(beat_loop.stem_loop_path("/x/Song (Beat at 100 BPM).wav", stem))
+            name = os.path.basename(beat_loop.stem_loop_path("/x/Drum Beat - Song - 100 BPM.wav", stem))
             self.assertFalse(beat_writer.is_stolen_beat(name), name)
 
     def test_the_span_round_trips_through_the_sidecar(self):
-        beat = os.path.join(self.tmp_dir, "Song (Beat at 120 BPM).wav")
+        beat = os.path.join(self.tmp_dir, "Drum Beat - Song - 120 BPM.wav")
         loop = self._loop(origin_sec=4.25, bars=2)
         beat_loop.write_span(beat, loop)
 
@@ -628,12 +628,12 @@ class TestStemLoops(unittest.TestCase):
         self.assertEqual(span["tempo"], 120.0)
 
     def test_the_sidecar_is_hidden_so_the_folder_stays_draggable(self):
-        beat = os.path.join(self.tmp_dir, "Song (Beat at 120 BPM).wav")
+        beat = os.path.join(self.tmp_dir, "Drum Beat - Song - 120 BPM.wav")
         beat_loop.write_span(beat, self._loop())
         self.assertTrue(all(n.startswith(".") for n in os.listdir(self.tmp_dir)))
 
     def test_a_loop_made_before_sidecars_has_no_span(self):
-        self.assertIsNone(beat_loop.read_span(os.path.join(self.tmp_dir, "Old (Beat at 120 BPM).wav")))
+        self.assertIsNone(beat_loop.read_span(os.path.join(self.tmp_dir, "Drum Beat - Old - 120 BPM.wav")))
 
     def test_the_stem_cut_is_the_drum_cut_to_the_sample(self):
         import numpy as np
@@ -642,7 +642,7 @@ class TestStemLoops(unittest.TestCase):
         _click_wav(drums, seconds=20.0, tempo=120.0)
         _click_wav(bass, seconds=20.0, tempo=120.0)
         loop = self._loop(origin_sec=4.0, bars=2)
-        mid = os.path.join(self.tmp_dir, "Song (Beat at 120 BPM).mid")
+        mid = os.path.join(self.tmp_dir, "Drum Beat - Song - 120 BPM.mid")
         drum_loop = beat_loop.write_wav(loop, drums, mid)
 
         out = beat_loop.stem_loop_path(drum_loop, "bass")

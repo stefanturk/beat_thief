@@ -47,14 +47,14 @@ class TestIsolateHarmony(unittest.TestCase):
         result = harmony_isolator.isolate_harmony(self.mp3_path)
 
         self.assertTrue(result)
-        basename = "Song - Artist (Isolated Harmony)"
+        basename = "Harmony Isolated - Song - Artist"
         wav_path = os.path.join(self.song_dir, basename + ".wav")
         self.assertTrue(os.path.exists(wav_path))
         self.assertTrue(os.path.exists(os.path.join(self.song_dir, harmony_isolator._SOURCE_MARKER_FILENAME)))
 
     @mock.patch("instrument_isolator.run_demucs")
     def test_skips_when_outputs_already_exist_and_match_the_source_mp3(self, mock_run_demucs):
-        basename = "Song - Artist (Isolated Harmony)"
+        basename = "Harmony Isolated - Song - Artist"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, harmony_isolator._SOURCE_MARKER_FILENAME)
@@ -68,7 +68,7 @@ class TestIsolateHarmony(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reprocesses_when_the_marker_is_missing(self, mock_alignment, mock_run_demucs, mock_trim):
-        basename = "Song - Artist (Isolated Harmony)"
+        basename = "Harmony Isolated - Song - Artist"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         # no marker - so this wav can't be trusted as coming from self.mp3_path.
@@ -86,7 +86,7 @@ class TestIsolateHarmony(unittest.TestCase):
     @mock.patch("instrument_isolator.run_demucs")
     @mock.patch("instrument_isolator.song_alignment")
     def test_reprocesses_when_the_marker_does_not_match(self, mock_alignment, mock_run_demucs, mock_trim):
-        basename = "Song - Artist (Isolated Harmony)"
+        basename = "Harmony Isolated - Song - Artist"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         stale_mp3 = os.path.join(self.tmp_dir, "stale.mp3")
@@ -126,7 +126,7 @@ class TestIsolateHarmony(unittest.TestCase):
     def test_a_harmony_file_from_before_vocals_were_split_out_is_rebuilt(self, mock_alignment, mock_run_demucs, mock_trim):
         # Those files still have the vocals in them. Their old marker would
         # otherwise pass them off as current forever.
-        basename = "Song - Artist (Isolated Harmony)"
+        basename = "Harmony Isolated - Song - Artist"
         with open(os.path.join(self.song_dir, basename + ".wav"), "wb") as f:
             f.write(b"x")
         instrument_isolator.write_source_marker(self.song_dir, self.mp3_path, ".harmony_source.json")
