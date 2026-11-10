@@ -3,7 +3,7 @@ pydub
 mutagen
 soundfile
 librosa
-scipy
+scipy==1.13.1
 numpy<2
 pretty_midi
 pywebview

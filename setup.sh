@@ -179,7 +179,11 @@ say "3. Installing the Python packages"
 # ready-made Intel Mac build (llvmlite, under librosa, did in 2026), and pip
 # would then try to compile it - which needs tools nobody has, and fails.
 # This takes the newest version that does have one.
-"$PY" -m pip install --prefer-binary --upgrade -r "$REPO/requirements.txt"
+# The Steezy Studio engine's shared pin set, when there is one: stops this install moving
+# packages the other tools rely on. /dev/null (no constraints) when Studio isn't installed.
+CONSTRAINTS="${STEEZY_ENGINE_DIR:-$HOME/Library/Application Support/Steezy Studio/engine}/constraints.txt"
+[ -f "$CONSTRAINTS" ] || CONSTRAINTS=/dev/null
+"$PY" -m pip install --prefer-binary --upgrade -c "$CONSTRAINTS" -r "$REPO/requirements.txt"
 
 # The instrument splitter (torch and demucs) is most of the download and
 # only matters for stems, beat loops and MIDI. Somebody who only wants the
@@ -206,7 +210,7 @@ fi
 if [ "$splitter" = yes ]; then
     say "3b. Installing the instrument splitter"
     note "torch is about 2GB, so this is the long part."
-    "$PY" -m pip install --prefer-binary -r "$REPO/requirements-splitter.txt"
+    "$PY" -m pip install --prefer-binary -c "$CONSTRAINTS" -r "$REPO/requirements-splitter.txt"
 fi
 
 # The window, the downloader and the rest, each imported on its own so a
