@@ -1563,7 +1563,7 @@
       ? (armed.length ? "Taking " + armed.map((t) => (have(t) ? "another " : "") + LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
                       : "Nothing armed — click a square to take something from " + selected.title + ".")
       : "Drums, Bass, Harmony and Vocals rebuild the song.";
-    if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Run setup again and say yes to add it.";
+    if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Open Steezy Studio and press Update all, or run ./setup.sh --with-splitter in the Beat Thief folder.";
   }
 
   let lastLibrary = null;
@@ -3413,7 +3413,7 @@
     window.pywebview.api.splitter_installed().then((installed) => {
       splitter = installed !== false;
       document.querySelector(".stem-grid").dataset.off = splitter ? "false" : "true";
-      if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Run setup again and say yes to add it.";
+      if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Open Steezy Studio and press Update all, or run ./setup.sh --with-splitter in the Beat Thief folder.";
     });
     offerResume();
     poll();

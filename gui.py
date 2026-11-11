@@ -337,7 +337,7 @@ class Api:
         # saved before then (the resume banner) can still carry them.
         if instruments and not instrument_isolator.splitter_installed():
             if song:
-                return {}, "Splitting into instruments isn't installed. Run setup again and say yes to add it."
+                return {}, "Splitting into instruments isn't installed. Open Steezy Studio and press Update all, or run ./setup.sh --with-splitter in the Beat Thief folder."
             instruments = []
         if song and not instruments:
             return {}, "Nothing armed - pick what to take."
