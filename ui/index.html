@@ -2174,8 +2174,36 @@
     return context();
   }
 
+  // Web Audio is bound to the output device that was the default when the
+  // context was built. Plug headphones in, take them out, and WebKit can leave
+  // a context that is "running" and whose clock ticks, but that plays into a
+  // device that is gone - so the clock check in playFrom is satisfied and the
+  // button says Pause over silence. Whenever the devices change, the context
+  // is thrown away; the next Play builds one on whatever is the default now.
+  function dropContextForNewDevice() {
+    const wasPlaying = playing;
+    if (wasPlaying) pausePlay(); else stopSource();
+    if (audioCtx) {
+      try { audioCtx.close(); } catch (e) { /* already closed */ }
+      audioCtx = null;
+    }
+    if (wasPlaying) sayInPicker("Audio device changed - press Play.");
+  }
+  try {
+    if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+      navigator.mediaDevices.addEventListener("devicechange", dropContextForNewDevice);
+    }
+  } catch (e) { /* no device events here; the Play fallback below covers it */ }
+
   function playFrom(seconds) {
     if (!picker || !picker.buffer) return;
+    // Starting from silence always gets a fresh context: the device events
+    // above are not guaranteed to arrive in every webview, and a context is
+    // cheap (the decoded buffers do not belong to it). Mid-play seeks keep it.
+    if (!playing && audioCtx) {
+      try { audioCtx.close(); } catch (e) { /* already closed */ }
+      audioCtx = null;
+    }
     const ctx = usableContext();
 
     stopSource();
@@ -2706,6 +2734,19 @@
   // closes itself on success and the result is reported after that.
   let builtFrom = null;
 
+  function hidePickerWhileBuilding() {
+    el("picker").hidden = true;
+    el("readout").hidden = false;
+  }
+
+  function showPickerAfterBuild() {
+    if (!picker) return;
+    el("picker").hidden = false;
+    el("readout").hidden = true;
+    el("go").hidden = true;
+    el("stop").hidden = true;
+  }
+
   function buildBeat() {
     const outputs = outputsFromPads();
     if (!picker || picker.start === null || picker.end === null || !outputs) return;
@@ -2713,17 +2754,21 @@
     builtFrom = picker.start;
     pausePlay();
     el("build").disabled = true;
+    // The marking is done, so the picker steps aside and the page says what
+    // is happening. Its state is kept, so a failed build can bring it back
+    // with the start and end still marked.
+    hidePickerWhileBuilding();
     // Set before the call even returns, not after - a fast build can finish
-    // before the first 250ms poll fires, and without this the picker would
+    // before the first 250ms poll fires, and without this the page would
     // jump straight from the click to the result with nothing shown between.
-    el("picker-hint").textContent = "Cutting the section...";
+    el("message").textContent = "Building beat...";
 
     window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end, outputs, stemsFromPads()).then((snapshot) => {
       if (snapshot.busy) {
         // A build was already running when this click landed - it's still
         // that one's result on the way, not this click's, so say so rather
         // than letting the click look like it did nothing.
-        el("picker-hint").textContent = "Still working on the last one...";
+        el("message").textContent = "Still working on the last one...";
       }
       if (beatPolling) clearInterval(beatPolling);
       beatPolling = setInterval(pollBeat, 250);
@@ -2734,13 +2779,14 @@
   function pollBeat() {
     window.pywebview.api.beat_status().then((state) => {
       if (state.running) {
-        el("picker-hint").textContent = state.phase || "Building it...";
+        el("message").textContent = state.phase || "Building beat...";
         return;
       }
       clearInterval(beatPolling);
       beatPolling = null;
 
       if (state.error) {
+        showPickerAfterBuild();
         refreshBuildEnabled();
         el("picker-hint").textContent = state.error;
         return;
