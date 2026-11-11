@@ -1501,6 +1501,7 @@
   // nothing past the Song square can be made (gui.Api.splitter_installed).
   // Assumed there until asked, so a full install never flickers grey.
   let splitter = true;
+  let slowNote = "";      // set on an Intel Mac: splitting is slow there (gui.Api.splitter_speed_note)
 
   function togglePad(thing) {
     if (!splitter && thing !== "song") return;
@@ -1563,7 +1564,8 @@
       ? (armed.length ? "Taking " + armed.map((t) => (have(t) ? "another " : "") + LABELS[t].toLowerCase()).join(", ") + " from " + selected.title
                       : "Nothing armed — click a square to take something from " + selected.title + ".")
       : "Drums, Bass, Harmony and Vocals rebuild the song.";
-    if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Open Steezy Studio and press Update all, or run ./setup.sh --with-splitter in the Beat Thief folder.";
+    if (splitter && slowNote && armed.length) el("take-note").textContent += " " + slowNote;
+    if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Open Steezy Studio and press Update all to add it.";
   }
 
   let lastLibrary = null;
@@ -3413,8 +3415,9 @@
     window.pywebview.api.splitter_installed().then((installed) => {
       splitter = installed !== false;
       document.querySelector(".stem-grid").dataset.off = splitter ? "false" : "true";
-      if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Open Steezy Studio and press Update all, or run ./setup.sh --with-splitter in the Beat Thief folder.";
+      if (!splitter) el("take-note").textContent = "Splitting into instruments isn't installed. Open Steezy Studio and press Update all to add it.";
     });
+    window.pywebview.api.splitter_speed_note().then((n) => { slowNote = n || ""; }).catch(() => {});
     offerResume();
     poll();
     // Song armed, nothing green, nothing selected - the state a pasted

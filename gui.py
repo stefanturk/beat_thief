@@ -337,7 +337,7 @@ class Api:
         # saved before then (the resume banner) can still carry them.
         if instruments and not instrument_isolator.splitter_installed():
             if song:
-                return {}, "Splitting into instruments isn't installed. Open Steezy Studio and press Update all, or run ./setup.sh --with-splitter in the Beat Thief folder."
+                return {}, "Splitting into instruments isn't installed. Open Steezy Studio and press Update all to add it."
             instruments = []
         if song and not instruments:
             return {}, "Nothing armed - pick what to take."
@@ -485,6 +485,18 @@ class Api:
     def splitter_installed(self) -> bool:
         """Whether stems can be made here - False after a songs-only setup."""
         return instrument_isolator.splitter_installed()
+
+    def splitter_speed_note(self) -> str:
+        """Said under the Take squares on a Mac with an Intel processor, which has
+        no graphics path for the splitter (torch only uses an Apple-silicon GPU),
+        so it runs on the processor alone and takes several times as long as on an
+        M-series Mac. Empty everywhere else. (An Intel-built Python on an M-series
+        Mac reports x86_64 too and is just as slow, so the same words fit.)"""
+        import platform
+        if sys.platform == "darwin" and platform.machine() == "x86_64":
+            return ("This Mac splits songs on its processor alone, so expect roughly 5-10 minutes "
+                    "per song, and closing other apps helps.")
+        return ""
 
     def is_playlist(self, url: str) -> bool:
         """Whether the page should offer to number the songs this link
