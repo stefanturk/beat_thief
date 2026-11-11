@@ -85,6 +85,7 @@ SOURCES=(
     winquiet.py
     beat_loop.py
     pulse.py
+    loop_check.py
     progress.py
     audition.py
     bass_isolator.py

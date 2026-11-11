@@ -32,6 +32,7 @@ import audition
 import beat_loop
 import history
 import instrument_isolator
+import loop_check
 import names
 import pipeline
 import progress
@@ -797,6 +798,44 @@ class Api:
                             pulse.grid_track(prepared.get("kicks") or [], prepared["tempo"])]
         return prepared
 
+    def regrid(self, wav_path: str, tempo: float) -> dict:
+        """The picker's grid fitted again at `tempo` - what tapping along
+        sends when the stem's filename tempo is the wrong octave or a 2:3 of
+        the real one. The same kicks and the same local fit as audition();
+        only the starting tempo is new."""
+        try:
+            kicks = audition.preview(wav_path).get("kicks") or []
+        except Exception as e:
+            return {"error": str(e) or e.__class__.__name__}
+        return {"grid": [grid._asdict() for grid in pulse.grid_track(kicks, float(tempo))]}
+
+    def check_section(self, wav_path: str, start_sec: float, end_sec: float,
+                      grid_tempo: float, bars: int) -> dict:
+        """A second opinion on a marked section, before it's built: do the
+        drums straight after it sound like it (loop_check)? If they clearly
+        repeat at another length, the loop would come back on the wrong
+        beat, and drift says by how many beats, with the tempo that would
+        have made the marked bars right.
+
+        Only ever a warning. The grid is still what gets built (see
+        beat_loop.build) - this has called a loop wrong that sounded right.
+        drift is None when the drumming doesn't repeat clearly enough to
+        say, and 0 when it repeats where it was marked."""
+        beats = int(bars) * pulse.BEATS_PER_BAR
+        try:
+            found = loop_check.check(wav_path, float(start_sec), 60.0 / float(grid_tempo), beats)
+        except Exception as e:
+            return {"error": str(e) or e.__class__.__name__}
+        if found is None:
+            return {"drift": None}
+        if not found["off"]:
+            return {"drift": 0.0}
+        return {
+            "drift": round(found["beats"] - beats, 2),
+            "repeats": round(found["beats"], 1),
+            "tempo": round(float(grid_tempo) * beats / found["beats"], 1),
+        }
+
     def audition_song(self, song_path: str) -> dict:
         """The whole song, to swap in for the drum stem while marking.
 
@@ -818,7 +857,8 @@ class Api:
         }
 
     def steal_beat(self, wav_path: str, start_sec: float, end_sec: float,
-                    outputs: str = "both", on_phase=None, stems=()) -> dict:
+                    outputs: str = "both", on_phase=None, stems=(),
+                    grid_tempo=None, bars=None) -> dict:
         """Turn the marked section into a loop and save it next to the stem.
 
         outputs picks what's kept: "wav" for just the trimmed loop audio,
@@ -845,14 +885,20 @@ class Api:
         "instrumental" - to loop
         over the same bars, cut from the loop's own span (after any nudge
         onto a kick), so they line up with the drum loop to the sample. The
-        span is kept beside the loop either way, for loop_stems later."""
+        span is kept beside the loop either way, for loop_stems later.
+
+        grid_tempo and bars are the grid the picker showed and how many of
+        its bars were marked. Given, the loop is exactly that many bars at
+        that tempo (see beat_loop.build): what you saw is what you get."""
         try:
             song_dir = os.path.dirname(wav_path)
             basename = os.path.splitext(os.path.basename(wav_path))[0]
             tempo = instrument_isolator.parse_tempo_from_basename(basename)
             title = names.parse(basename).title
 
-            loop = beat_loop.build(wav_path, tempo, float(start_sec), float(end_sec), on_phase=on_phase)
+            loop = beat_loop.build(wav_path, tempo, float(start_sec), float(end_sec), on_phase=on_phase,
+                                   grid_tempo=float(grid_tempo) if grid_tempo else None,
+                                   bars=int(bars) if bars else None)
             if on_phase is not None:
                 on_phase("Saving the loop...")
             mid_path = beat_loop.write(loop, song_dir, title)
@@ -892,7 +938,7 @@ class Api:
         }
 
     def steal_beat_start(self, wav_path: str, start_sec: float, end_sec: float,
-                          outputs: str = "both", stems=None) -> dict:
+                          outputs: str = "both", stems=None, grid_tempo=None, bars=None) -> dict:
         """Like steal_beat, but returns immediately and reports progress
         through beat_status() - the page polls it exactly the way it polls
         status() for a run.
@@ -918,7 +964,7 @@ class Api:
 
         self._beat_thread = threading.Thread(
             target=self._steal_beat_work,
-            args=(wav_path, start_sec, end_sec, outputs, list(stems or [])),
+            args=(wav_path, start_sec, end_sec, outputs, list(stems or []), grid_tempo, bars),
             daemon=True,
         )
         self._beat_thread.start()
@@ -971,9 +1017,11 @@ class Api:
         with self._beat_lock:
             self._beat_state["phase"] = phase
 
-    def _steal_beat_work(self, wav_path, start_sec, end_sec, outputs="both", stems=()):
+    def _steal_beat_work(self, wav_path, start_sec, end_sec, outputs="both", stems=(),
+                         grid_tempo=None, bars=None):
         result = self.steal_beat(wav_path, start_sec, end_sec, outputs=outputs,
-                                 on_phase=self._set_beat_phase, stems=stems)
+                                 on_phase=self._set_beat_phase, stems=stems,
+                                 grid_tempo=grid_tempo, bars=bars)
         with self._beat_lock:
             self._beat_state["running"] = False
             if "error" in result:

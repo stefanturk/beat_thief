@@ -267,6 +267,11 @@ def build(
     # for the thirty-odd seconds this takes. None is a no-op, so nothing
     # else calling build() has to care that this exists.
     on_phase=None,
+    # The grid the picker showed when the section was marked: its tempo and
+    # how many of its bars were marked. Given, they are the loop - nothing
+    # is measured again. None (the CLI, a script) measures them as before.
+    grid_tempo: float | None = None,
+    bars: int | None = None,
 ) -> Loop:
     """Transcribe [start_sec, end_sec] of wav_path and return it as a
     quantized loop.
@@ -337,12 +342,22 @@ def build(
     # a fifth of a step of the halfway line - a coin toss for which sixteenth
     # they landed on. Refined off the same section's onsets it came out at
     # 105.2 and nothing was ambiguous.
-    loop_tempo = instrument_isolator.refine_tempo(
-        np.array(sorted({time_sec for time_sec, _, _ in inside})), tempo)
+    #
+    # Unless the picker says what grid the section was marked on. Measuring
+    # again then can only disagree with what was seen and heard: on Dry Rub
+    # it read 97.5 against a song at 101.4, so six bars "of the loop" held
+    # twenty-five beats of the music and it came back round on the wrong one.
+    # A short section is too little to beat the grid fitted on the kicks
+    # around it (pulse.grid_track).
+    if grid_tempo:
+        loop_tempo = float(grid_tempo)
+    else:
+        loop_tempo = instrument_isolator.refine_tempo(
+            np.array(sorted({time_sec for time_sec, _, _ in inside})), tempo)
 
     bar_sec = beat_writer.BEATS_PER_BAR * 60.0 / loop_tempo
     step_sec = bar_sec / STEPS_PER_BAR
-    bars = _bar_count(span, bar_sec)
+    bars = max(1, min(MAX_BARS, int(bars))) if bars else _bar_count(span, bar_sec)
 
     origin = _grid_origin([time_sec for time_sec, _, _ in inside], step_sec)
     total_steps = bars * STEPS_PER_BAR

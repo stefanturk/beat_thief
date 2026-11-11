@@ -373,7 +373,9 @@ class TestSongsOnly(unittest.TestCase):
         with mock.patch("instrument_isolator.splitter_installed", return_value=False):
             state = api.start("", {"source": "/songs/Track/Track.mp3", "bass": True})
 
-        self.assertIn("setup", state["error"])
+        # Says how to get it, not just that it's missing (8a44ae4).
+        self.assertIn("isn't installed", state["error"])
+        self.assertIn("Steezy Studio", state["error"])
 
     def test_the_app_starts_with_no_torch_or_demucs(self):
         # In a fresh interpreter, so modules this one already imported
@@ -787,6 +789,57 @@ class TestAudition(unittest.TestCase):
         self.assertNotIn("error", got)
 
 
+class TestRegrid(unittest.TestCase):
+    """Tap tempo: the picker's grid fitted again at the tempo tapped."""
+
+    def test_the_grid_is_fitted_at_the_tempo_asked_for(self):
+        # Kicks on every beat at 150; the stem is named for half that, which
+        # is the octave mistake tapping is there to fix.
+        kicks = [round(n * 0.4, 4) for n in range(96)]
+        prepared = {"audio": "data:x", "peaks": [0.1], "duration": 40.0, "kicks": kicks}
+        with mock.patch("audition.preview", return_value=prepared):
+            got = gui.Api().regrid("Drums Isolated - Song - 75 BPM.wav", 150.0)
+
+        self.assertTrue(got["grid"])
+        for segment in got["grid"]:
+            self.assertAlmostEqual(segment["tempo"], 150.0, delta=0.5)
+
+    def test_a_stem_that_will_not_load_says_why(self):
+        with mock.patch("audition.preview", side_effect=OSError("gone")):
+            got = gui.Api().regrid("x.wav", 120.0)
+        self.assertEqual(got["error"], "gone")
+
+
+class TestCheckSection(unittest.TestCase):
+    """The second opinion before Build: do the drums after the marked
+    section repeat it (loop_check)? Said in beats, because that is what's
+    heard - a beat out and it comes back round on the wrong one."""
+
+    def _check(self, found, grid_tempo=97.5, bars=6):
+        with mock.patch("loop_check.check", return_value=found) as check:
+            got = gui.Api().check_section("x.wav", 264.3, 279.1, grid_tempo, bars)
+        return got, check
+
+    def test_it_asks_about_the_marked_bars_at_the_grids_beat(self):
+        _, check = self._check({"beats": 24.0, "score": 0.9, "marked_score": 0.9, "off": False})
+        self.assertEqual(check.call_args.args, ("x.wav", 264.3, 60.0 / 97.5, 24))
+
+    def test_drums_that_repeat_where_marked_drift_by_nothing(self):
+        got, _ = self._check({"beats": 24.03, "score": 0.9, "marked_score": 0.88, "off": False})
+        self.assertEqual(got["drift"], 0.0)
+
+    def test_a_loop_a_beat_out_says_where_the_drums_repeat_and_the_tempo_that_fits(self):
+        # Dry Rub: a 97.5 grid on drums at 101.4 repeats after 23.1 of its beats.
+        got, _ = self._check({"beats": 23.08, "score": 0.6, "marked_score": 0.2, "off": True})
+        self.assertAlmostEqual(got["drift"], -0.92, places=2)
+        self.assertEqual(got["repeats"], 23.1)
+        self.assertAlmostEqual(got["tempo"], 101.4, delta=0.1)
+
+    def test_drums_that_dont_repeat_say_nothing(self):
+        got, _ = self._check(None)
+        self.assertIsNone(got["drift"])
+
+
 class TestAuditionSong(unittest.TestCase):
     """The song the picker swaps to, lined up with its stems."""
 
@@ -1077,7 +1130,7 @@ class TestStealBeatAsync(unittest.TestCase):
     def test_returns_immediately_and_reports_the_phase_as_it_goes(self):
         release = threading.Event()
 
-        def slow_build(wav_path, tempo, start_sec, end_sec, name="Stolen Beat", on_phase=None):
+        def slow_build(wav_path, tempo, start_sec, end_sec, name="Stolen Beat", on_phase=None, **_):
             on_phase("Listening for the hits...")
             release.wait(timeout=2)
             beat = beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0, 100),), bars=1)
@@ -1115,7 +1168,7 @@ class TestStealBeatAsync(unittest.TestCase):
         release = threading.Event()
         calls = []
 
-        def slow_build(wav_path, tempo, start_sec, end_sec, name="Stolen Beat", on_phase=None):
+        def slow_build(wav_path, tempo, start_sec, end_sec, name="Stolen Beat", on_phase=None, **_):
             calls.append(wav_path)
             release.wait(timeout=2)
             beat = beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0, 100),), bars=1)
@@ -1138,7 +1191,7 @@ class TestStealBeatAsync(unittest.TestCase):
     def test_a_second_build_while_one_is_running_is_flagged_busy(self):
         release = threading.Event()
 
-        def slow_build(wav_path, tempo, start_sec, end_sec, name="Stolen Beat", on_phase=None):
+        def slow_build(wav_path, tempo, start_sec, end_sec, name="Stolen Beat", on_phase=None, **_):
             release.wait(timeout=2)
             beat = beat_writer.Beat(tempo=120.0, hits=(beat_writer.Hit("kick", 0, 100),), bars=1)
             return beat_loop.Loop(
@@ -1157,6 +1210,15 @@ class TestStealBeatAsync(unittest.TestCase):
 
         self.assertFalse(first["busy"])
         self.assertTrue(second["busy"])
+
+    def test_the_grid_the_picker_showed_is_forwarded_to_steal_beat(self):
+        with mock.patch.object(gui.Api, "steal_beat", return_value={"bars": 1}) as mock_steal:
+            api = gui.Api()
+            api.steal_beat_start(self.stem, 0.0, 4.0, "wav", [], 101.4, 6)
+            self.assertTrue(_wait_until(lambda: not api.beat_status()["running"]))
+
+        self.assertEqual(mock_steal.call_args.kwargs.get("grid_tempo"), 101.4)
+        self.assertEqual(mock_steal.call_args.kwargs.get("bars"), 6)
 
     def test_the_outputs_choice_is_forwarded_to_steal_beat(self):
         with mock.patch.object(gui.Api, "steal_beat", return_value={"bars": 1}) as mock_steal:
@@ -1359,23 +1421,46 @@ class TestUiFile(unittest.TestCase):
             with self.subTest(method=name):
                 self.assertTrue(callable(getattr(gui.Api, name, None)))
 
-    def test_the_picker_marks_by_hand_first_or_4_8_16_bars(self):
+    def test_the_picker_counts_1_2_4_8_16_bars_and_8_is_the_default(self):
+        # A loop that drops into Ableton is a whole power-of-two count; odd
+        # ones were only a way round a grid at the wrong tempo.
         with open(gui.UI_FILE) as page:
             html = page.read()
         chips = re.findall(r'data-bars="(\d+)"', html)
 
-        self.assertEqual(chips, ["0", "4", "8", "16"])
-        self.assertIn("let barsWanted = 0;", html)
-        self.assertRegex(html, r'data-bars="0" class="on">By hand<')
+        self.assertEqual(chips, ["1", "2", "4", "8", "16", "0"])
+        self.assertIn("let barsWanted = 8;", html)
+        self.assertRegex(html, r'data-bars="8" class="on">8<')
 
-    def test_check_loop_starts_two_bars_before_the_end_and_wraps(self):
+    def test_a_marked_loop_plays_round_without_a_check_button(self):
         with open(gui.UI_FILE) as page:
             html = page.read()
-        self.assertIn('id="check"', html)
+        self.assertNotIn('id="check"', html)
+        self.assertIn("picker.loop = !trimming() && picker.start !== null && picker.end !== null", html)
+        # L still jumps to two bars before the join.
         self.assertIn("const CHECK_BARS = 2;", html)
-        self.assertIn("picker.end - CHECK_BARS * bar", html)
-        self.assertIn("picker.loop = (checking || countingBars())", html)   # it goes round
         self.assertIn('event.code === "KeyL"', html)
+
+    def test_tapping_snaps_to_a_ratio_of_the_grid_and_fits_it_again(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        self.assertIn('id="tap"', html)
+        self.assertIn('event.code === "KeyT"', html)
+        self.assertIn("const TAP_RATIOS = [1, 2, 1 / 2, 2 / 3, 3 / 2, 3 / 4, 4 / 3];", html)
+        self.assertIn("pywebview.api.regrid(", html)
+
+    def test_the_1_of_each_bar_has_its_own_colour(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        self.assertIn("--one:", html)
+        self.assertIn("ctx.fillStyle = bar ? ONE_COLOUR", html)
+
+    def test_build_is_handed_the_grid_on_screen_and_warns_before(self):
+        with open(gui.UI_FILE) as page:
+            html = page.read()
+        self.assertRegex(html, r"steal_beat_start\([^;]*gridTempoAt\(picker\.start\), barsMarked\(\)\)")
+        self.assertIn("pywebview.api.check_section(", html)
+        self.assertIn('id="picker-warn"', html)
 
     def test_s_swaps_the_drums_and_the_song(self):
         with open(gui.UI_FILE) as page:
@@ -1484,7 +1569,7 @@ class TestUiFile(unittest.TestCase):
     def test_a_steal_sends_the_armed_stem_loops_along(self):
         with open(gui.UI_FILE) as page:
             markup = page.read()
-        self.assertRegex(markup, r"steal_beat_start\([^)]*stemsFromPads\(\)\)")
+        self.assertRegex(markup, r"steal_beat_start\([^)]*stemsFromPads\(\),")
         self.assertIn("pywebview.api.loop_stems(", markup)
 
     def test_numbering_sits_beside_sanitize_and_starts_hidden_and_off(self):
@@ -1828,7 +1913,7 @@ class TestAPlaylistSurvivesTheAppGoingAway(unittest.TestCase):
                        "api.forget_unfinished()"):
             self.assertIn(needed, html)
         launch = html[html.index('addEventListener("pywebviewready"'):]
-        self.assertIn("offerResume()", launch[:400])
+        self.assertIn("offerResume()", launch[:launch.index("\n  });")])
 
 
 class TestAskingAtTheEndFromTheApp(unittest.TestCase):

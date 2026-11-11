@@ -401,6 +401,40 @@ class TestBuild(unittest.TestCase):
                 bar_sec = beat_writer.BEATS_PER_BAR * 60.0 / loop.tempo
                 self.assertLess(abs(loop.bars * bar_sec - span), bar_sec / 2 + 1e-6)
 
+    def _build_on_grid(self, notes, grid_tempo, bars, start=10.0, span=4.0):
+        lead = beat_loop._CONTEXT_SEC
+        shifted = [_note(n.pitch, n.start + lead, n.velocity) for n in notes]
+        with mock.patch("beat_loop._section_wav", return_value=lead), \
+             mock.patch("drum_transcriber.calibrate_hat_threshold", return_value=-5.0), \
+             mock.patch("drum_transcriber.transcribe", return_value=shifted):
+            return beat_loop.build(self.wav, self.TEMPO, start, start + span,
+                                   grid_tempo=grid_tempo, bars=bars)
+
+    def test_the_grid_the_picker_showed_sets_the_tempo(self):
+        # Dry Rub: measuring the tempo again off the marked hits gave 97.5
+        # against a song at 101.4, and the loop came back a beat late. The
+        # grid on screen is what the bars were counted on, so it wins.
+        with mock.patch("instrument_isolator.refine_tempo", return_value=97.5) as refine:
+            loop = self._build_on_grid(_straight(101.4, bars=8), grid_tempo=101.4, bars=6,
+                                       span=6 * 240 / 101.4)
+        refine.assert_not_called()
+        self.assertEqual(loop.tempo, 101.4)
+        self.assertEqual(loop.beat.tempo, 101.4)
+        self.assertEqual(loop.bars, 6)
+        self.assertAlmostEqual(loop.beat.duration_sec, 6 * 240 / 101.4, places=9)
+
+    def test_the_bars_the_picker_counted_are_kept_even_off_a_sloppy_end(self):
+        # 4 bars asked for; the end mark is most of a bar short.
+        loop = self._build_on_grid(_straight(self.TEMPO, bars=6), grid_tempo=self.TEMPO,
+                                   bars=4, span=4 * 2.0 - 0.9)
+        self.assertEqual(loop.bars, 4)
+
+    def test_without_a_grid_the_tempo_is_still_measured(self):
+        with mock.patch("instrument_isolator.refine_tempo", return_value=118.0) as refine:
+            loop = self._build(_sixteenths(self.TEMPO, bars=2))
+        refine.assert_called_once()
+        self.assertEqual(loop.tempo, 118.0)
+
     def test_the_loop_plays_all_the_way_to_its_end(self):
         # Marked two beats early, which is the ordinary way to click. The
         # loop moves on to the kick, and the bars it gains at the end have

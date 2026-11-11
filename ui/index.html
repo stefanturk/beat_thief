@@ -29,6 +29,8 @@
     --violet-dim: #38265f;
     --good: #5fd39a;
     --bad: #ff6b5e;
+    /* The 1 of every bar, wherever the grid is drawn. */
+    --one: #f5b84b;
     --radius: 6px;
 
     --display: "Avenir Next", "Avenir", -apple-system, sans-serif;
@@ -723,6 +725,15 @@
     color: var(--dim);
   }
   #picker-hint { color: #5b5d64; letter-spacing: 0.04em; text-transform: none; font-size: 11px; }
+  /* Said when the loop may come back round on the wrong beat. Its own line,
+     so the hint changing underneath it can't wipe it. */
+  #picker-warn {
+    margin: -4px 0 10px;
+    font-family: var(--display);
+    font-size: 11px;
+    color: var(--one);
+  }
+  #picker-warn[hidden] { display: none; }
 
   #wave {
     display: block;
@@ -1065,18 +1076,21 @@
         <span id="picker-title">Steal a beat</span>
         <span id="picker-hint">Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — stop at the next 1 to end it.</span>
       </div>
+      <p id="picker-warn" hidden></p>
       <canvas id="wave" width="1000" height="156"></canvas>
       <canvas id="detail" width="1000" height="104"></canvas>
       <div class="picker-controls">
         <button id="play" type="button">Play</button>
-        <button id="check" type="button" hidden title="Hear the end of the loop run into its start (L)">Check loop</button>
+        <button id="tap" type="button" title="Tap along on the beat (T) when the grid is at the wrong tempo - double, half, or 2:3 of it">Tap</button>
         <button id="fade" type="button" hidden>Fade here</button>
         <button id="keep" type="button" hidden>Leave it alone</button>
         <span class="seg" id="bars" role="group" aria-label="Bars to mark">
-          <button type="button" data-bars="0" class="on">By hand</button>
-          <button type="button" data-bars="4">4 bars</button>
-          <button type="button" data-bars="8">8</button>
+          <button type="button" data-bars="1">1 bar</button>
+          <button type="button" data-bars="2">2</button>
+          <button type="button" data-bars="4">4</button>
+          <button type="button" data-bars="8" class="on">8</button>
           <button type="button" data-bars="16">16</button>
+          <button type="button" data-bars="0">By hand</button>
         </span>
         <span class="seg" id="hear" role="group" aria-label="Listen to">
           <button type="button" data-hear="drums" class="on">Drums</button>
@@ -1736,10 +1750,12 @@
   // the same reason the grid is fitted locally at all: 16 bars at a tempo a
   // few tenths of a percent out ends well off the one.
   //
-  // 0 is "by hand" - stopping is what marks the end - and it's the default:
-  // you know where the phrase ends better than a bar count does. Kept across
-  // pickers, because it's a way of working rather than a per-song choice.
-  let barsWanted = 0;
+  // 0 is "by hand" - stopping is what marks the end. 8 is the default: a
+  // loop that drops into Ableton is 1, 2, 4, 8 or 16 bars, and odd counts
+  // were only ever a way round a grid at the wrong tempo (tap that instead).
+  // Kept across pickers, because it's a way of working rather than a
+  // per-song choice.
+  let barsWanted = 8;
 
   // --- checking the loop -----------------------------------------------------
   //
@@ -1778,10 +1794,6 @@
     if (checking) checkLoop(); else { sayWhatIsMarked(); drawWave(); drawDetail(); }
   }
 
-  function refreshCheck() {
-    el("check").hidden = !canCheck();
-  }
-
   function barsAfter(from, bars) {
     let at = from;
     for (let n = 0; n < bars * BEATS_PER_BAR; n++) at += beatAt(at);
@@ -1815,6 +1827,124 @@
     showClock();
     drawWave();
     drawDetail();
+  }
+
+  // --- what gets built, and whether it will come back on the 1 ---------------
+  //
+  // Build is handed the grid on screen and the bars counted on it, and cuts
+  // exactly that (beat_loop.build). It used to measure the tempo again off
+  // the marked hits, and on a short section that could land on a different
+  // grid from the one you'd marked on - six bars "of the loop" holding 25
+  // beats of the music, so it came back round on the wrong one.
+  function gridTempoAt(when) {
+    const grid = gridAt(when);
+    return grid ? grid.tempo : 60 / picker.beat;
+  }
+
+  function barsMarked() {
+    if (countingBars()) return barsWanted;
+    return Math.max(1, Math.round((picker.end - picker.start) / (beatAt(picker.start) * BEATS_PER_BAR)));
+  }
+
+  function showWarn(text) {
+    el("picker-warn").textContent = text;
+    el("picker-warn").hidden = !text;
+  }
+
+  // A second opinion, said and never acted on: the drums inside the marked
+  // section against the grid. Asked a moment after the marks stop moving,
+  // since nudging fires this on every press.
+  const CHECK_DELAY_MS = 300;
+  const WARN_LOOSE_BEATS = 0.25;
+  let checkTimer = null;
+
+  function checkSection() {
+    clearTimeout(checkTimer);
+    showWarn("");
+    if (!picker || trimming() || !picker.song || picker.start === null || picker.end === null) return;
+    const opened = picker, start = picker.start, end = picker.end;
+    const tempo = gridTempoAt(start), bars = barsMarked();
+    if (!countingBars()) {
+      const loose = (end - start) / beatAt(start) - bars * BEATS_PER_BAR;
+      if (Math.abs(loose) > WARN_LOOSE_BEATS) {
+        showWarn("That's " + ((end - start) / beatAt(start) / BEATS_PER_BAR).toFixed(1) +
+                 " bars of this grid — it will be cut to " + bars + ". If the grid looks wrong, tap the tempo (T).");
+      }
+    }
+    checkTimer = setTimeout(() => {
+      window.pywebview.api.check_section(opened.song.have.drums, start, end, tempo, bars).then((said) => {
+        if (picker !== opened || picker.start !== start || picker.end !== end) return;
+        // drift is only non-zero when the drums clearly repeat at another
+        // length (loop_check); null is "can't tell", which says nothing.
+        if (!said || !said.drift) return;
+        showWarn("The drums after this repeat after " + said.repeats + " beats, not " + bars * BEATS_PER_BAR +
+                 " — it may come back on the wrong beat. The grid would need about " + said.tempo +
+                 " BPM: tap along (T), or move the end.");
+      }).catch(() => {});
+    }, CHECK_DELAY_MS);
+  }
+
+  // --- tapping the tempo -------------------------------------------------------
+  //
+  // For a grid at the wrong tempo: the stem's name is a whole-song guess,
+  // and now and then it's double, half or 2:3 of the real one, which no
+  // amount of nudging fixes. Tapping only has to be roughly right - it picks
+  // which simple ratio of the grid's tempo you meant, and the grid is fitted
+  // again on the kicks at that (gui.Api.regrid), so the precision still
+  // comes from the drumming. A tap nowhere near a ratio is taken as it is.
+  const TAP_MIN = 4;
+  const TAP_RESET_MS = 2000;
+  const TAP_SNAP = 0.04;
+  const TAP_RATIOS = [1, 2, 1 / 2, 2 / 3, 3 / 2, 3 / 4, 4 / 3];
+  let taps = [];
+
+  function snapTapped(tapped, current) {
+    let best = null;
+    for (const ratio of TAP_RATIOS) {
+      const off = Math.abs(tapped / (current * ratio) - 1);
+      if (off <= TAP_SNAP && (best === null || off < best.off)) best = { ratio, off };
+    }
+    return best ? current * best.ratio : tapped;
+  }
+
+  function tapTempo() {
+    if (!picker || trimming() || !picker.song || el("play").disabled) return;
+    const now = performance.now();
+    if (taps.length && now - taps[taps.length - 1] > TAP_RESET_MS) taps = [];
+    taps.push(now);
+    if (taps.length < TAP_MIN) {
+      el("picker-hint").textContent = "Tapping — " + (TAP_MIN - taps.length) + " more on the beat...";
+      return;
+    }
+    const gaps = taps.slice(1).map((at, n) => at - taps[n]).sort((a, b) => a - b);
+    const tapped = 60000 / gaps[Math.floor(gaps.length / 2)];
+    const where = picker.start !== null ? picker.start : playhead();
+    const was = gridTempoAt(where);
+    const wanted = snapTapped(tapped, was);
+    if (Math.abs(wanted / was - 1) < 0.005) {
+      el("picker-hint").textContent = "Tapped " + tapped.toFixed(1) + " — the grid agrees, " + was.toFixed(1) + " BPM.";
+      return;
+    }
+    taps = [];
+    const opened = picker;
+    el("picker-hint").textContent = "Fitting the grid at " + wanted.toFixed(1) + " BPM...";
+    window.pywebview.api.regrid(picker.song.have.drums, wanted).then((got) => {
+      if (picker !== opened) return;
+      if (!got || got.error || !got.grid.length) {
+        el("picker-hint").textContent = "The kicks don't fit a grid at " + wanted.toFixed(1) + " BPM — tap again.";
+        return;
+      }
+      picker.grid = got.grid;
+      picker.beat = 60 / wanted;
+      picker.nudge = picker.beat / 4;
+      placeEnd();
+      el("picker-hint").textContent = "Grid now " + gridTempoAt(where).toFixed(1) + " BPM (was " + was.toFixed(1) +
+        ") — tap again to change it.";
+      checkSection();
+      if (playing) playFrom(picker.loop ? picker.start : playhead());
+      drawWave();
+      drawDetail();
+    }).catch(complain);
   }
 
   // --- the drums, or the whole song ------------------------------------------
@@ -1916,6 +2046,9 @@
 
   // --- drawing -------------------------------------------------------------
 
+  const ONE_COLOUR = getComputedStyle(document.documentElement).getPropertyValue("--one").trim() || "#f5b84b";
+  const ONE_TICK_MIN_PX = 4;
+
   function drawWave() {
     const ctx = wave.getContext("2d");
     const w = wave.width, h = wave.height;
@@ -1946,6 +2079,18 @@
     for (let i = 0; i < peaks.length; i++) {
       const bar = Math.max(1, peaks[i] * (h * 0.86));
       ctx.fillRect(i * barW, mid - bar / 2, Math.max(1, barW - 0.5), bar);
+    }
+
+    // The 1 of each bar, as a tick along the top - only where bars are far
+    // enough apart to be told apart, which on a whole song is usually not.
+    if (!trimming()) {
+      ctx.fillStyle = ONE_COLOUR;
+      for (const grid of picker.grid) {
+        const barSec = grid.step * 16;
+        if (barSec / picker.duration * w < ONE_TICK_MIN_PX) continue;
+        let at = grid.downbeat + Math.ceil((grid.start - grid.downbeat) / barSec) * barSec;
+        for (; at < grid.end; at += barSec) ctx.fillRect((at / picker.duration) * w - 0.5, 0, 1, h * 0.1);
+      }
     }
 
     for (const [time, colour] of trimming() ? [[picker.start, "#fab08b"]]
@@ -2063,7 +2208,7 @@
         const at = grid.downbeat + n * grid.step;
         const bar = ((n % 16) + 16) % 16 === 0;
         const beat = ((n % 4) + 4) % 4 === 0;
-        ctx.fillStyle = bar ? "rgba(233, 231, 226, 0.42)"
+        ctx.fillStyle = bar ? ONE_COLOUR
                             : beat ? "rgba(233, 231, 226, 0.20)"
                                    : "rgba(233, 231, 226, 0.07)";
         ctx.fillRect(x(at), bar ? 0 : h * 0.12, 1, bar ? h : h * 0.76);
@@ -2215,11 +2360,12 @@
     source.buffer = buffer;
     source.connect(ctx.destination);
     source.onended = () => { if (source) pausePlay(); };
-    // Counted bars play round and round, so what you hear is the loop you'd
-    // get - a start that's off the one is obvious the second time it comes
-    // round. By ear it plays on, because playing past the end is how the
-    // end gets moved.
-    picker.loop = (checking || countingBars()) && picker.start !== null && picker.end !== null &&
+    // Once there's a start and an end it plays round and round, so what you
+    // hear is the loop you'd get - a start that's off the one is obvious the
+    // second time it comes round. There's no button to ask for it: checking
+    // the loop is what listening to it is. Before an end is marked by hand
+    // it plays on, because stopping is how that end gets marked.
+    picker.loop = !trimming() && picker.start !== null && picker.end !== null &&
                   picker.at >= picker.start && picker.at < picker.end
       ? [picker.start, picker.end] : null;
     if (picker.loop) {
@@ -2254,10 +2400,10 @@
   // with a start marked, stopping marks the end there - so "Mark End".
   // Counting bars, the bars already mark the end, and it only pauses.
   function labelPlay() {
-    if (!playing) { el("play").textContent = "Play"; el("check").textContent = "Check loop"; return; }
-    const marks = picker && !trimming() && picker.start !== null && !countingBars() && !checking;
+    if (!playing) { el("play").textContent = "Play"; return; }
+    const marks = picker && !trimming() && picker.start !== null && picker.end === null &&
+                  !countingBars() && !checking;
     el("play").textContent = marks ? "Mark End" : "Pause";
-    el("check").textContent = checking ? "Stop check" : "Check loop";
   }
 
   function pausePlay() {
@@ -2324,6 +2470,7 @@
     el("picker-title").textContent = song.title;
     el("picker-hint").textContent = "Getting the audio...";
     el("bars").hidden = false;
+    el("tap").hidden = false;
     el("hear").hidden = false;
 
     window.pywebview.api.audition(song.have.drums).then((prepared) => {
@@ -2407,6 +2554,7 @@
     el("keep").hidden = false;
     // Nothing to count bars of or swap to: this is the song already.
     el("bars").hidden = true;
+    el("tap").hidden = true;
     el("hear").hidden = true;
     el("picker-title").textContent = review.filename;
     el("picker-hint").textContent = "Getting the audio...";
@@ -2504,7 +2652,8 @@
     stopSource();
     playing = false;
     checking = false;
-    el("check").hidden = true;
+    taps = [];
+    showWarn("");
     if (raf) { cancelAnimationFrame(raf); raf = null; }
     // A build still in flight is left to finish on the Python side - its
     // file still gets written - but nothing here should keep polling into a
@@ -2625,16 +2774,17 @@
 
   function sayWhatIsMarked() {
     labelPlay();
+    checkSection();
     if (!picker || picker.start === null) return;
     if (countingBars()) {
       el("picker-hint").textContent = picker.end === null
         ? "There aren't " + barsWanted + " bars left after here — start earlier, or count fewer."
-        : barsWanted + " bars, looping — ← → a sixteenth, ⇧ a beat, S drums/song, L to check the join — Build when it loops right.";
+        : barsWanted + " bar" + (barsWanted === 1 ? "" : "s") + ", looping — ← → a sixteenth, ⇧ a beat, S drums/song, L jumps to the join, T taps the tempo — Build when it loops right.";
       return;
     }
     if (picker.end === null) return;
     el("picker-hint").textContent = (picker.end - picker.start).toFixed(1) +
-      "s marked — L (Check loop) to hear the end run into the start, [ ] to move the end, ⇧← ⇧→ to slide it a beat, then Build.";
+      "s marked, looping — [ ] move the end, ⇧← ⇧→ slide it a beat, L jumps to the join, click to start over — then Build.";
   }
 
   function firstHint() {
@@ -2661,9 +2811,10 @@
     // Trimming has no phrase and no end to mark, and neither does a picker
     // with no start set yet - both just stop.
     if (trimming() || picker.start === null) { pausePlay(); return; }
-    // The bars already say where it ends, and a check is only listening;
-    // stopping either is only stopping.
-    if (countingBars() || checking) { pausePlay(); sayWhatIsMarked(); return; }
+    // The bars already say where it ends, a check is only listening, and an
+    // end already marked is looping; stopping any of them is only stopping.
+    // (A click sets a new start and lets the end go, to mark it again.)
+    if (countingBars() || checking || picker.end !== null) { pausePlay(); sayWhatIsMarked(); return; }
     pausePlay();
     if (end <= picker.start) {
       el("picker-hint").textContent = "That is before the start - click again and play on.";
@@ -2726,7 +2877,7 @@
 
   function refreshBuildEnabled() {
     if (!picker) return;
-    refreshCheck();
+    checkSection();
     el("build").disabled = !(picker.start !== null && picker.end !== null && outputsFromPads());
   }
 
@@ -2763,7 +2914,8 @@
     // jump straight from the click to the result with nothing shown between.
     el("message").textContent = "Building beat...";
 
-    window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end, outputs, stemsFromPads()).then((snapshot) => {
+    window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end, outputs, stemsFromPads(),
+                                         gridTempoAt(picker.start), barsMarked()).then((snapshot) => {
       if (snapshot.busy) {
         // A build was already running when this click landed - it's still
         // that one's result on the way, not this click's, so say so rather
@@ -3352,7 +3504,7 @@
   el("play").addEventListener("click", togglePlay);
 
   el("build").addEventListener("click", buildBeat);
-  el("check").addEventListener("click", () => { el("check").blur(); if (checking) pausePlay(); else checkLoop(); });
+  el("tap").addEventListener("click", () => { el("tap").blur(); tapTempo(); });
   for (const chip of document.querySelectorAll("#bars button")) {
     chip.addEventListener("click", () => chooseBars(Number(chip.dataset.bars)));
   }
@@ -3368,11 +3520,11 @@
   document.addEventListener("keydown", (event) => {
     if (el("picker").hidden) return;
     const keyed = event.code === "Space" || event.code === "ArrowLeft" || event.code === "ArrowRight" ||
-                  event.code === "KeyS" || event.code === "KeyL" ||
+                  event.code === "KeyS" || event.code === "KeyL" || event.code === "KeyT" ||
                   event.code === "BracketLeft" || event.code === "BracketRight";
     if (!keyed) return;
     // ⌘S and friends are the system's, not a swap.
-    if ((event.code === "KeyS" || event.code === "KeyL") && (event.metaKey || event.ctrlKey || event.altKey)) return;
+    if ((event.code === "KeyS" || event.code === "KeyL" || event.code === "KeyT") && (event.metaKey || event.ctrlKey || event.altKey)) return;
     // Somewhere you can type is the one place these are just keys. The link
     // box is autofocused, so without this the whole interaction is dead -
     // which is exactly how the spacebar came to do nothing for a while.
@@ -3395,6 +3547,10 @@
     }
     if (event.code === "KeyS") {
       toggleHearing();
+      return;
+    }
+    if (event.code === "KeyT") {
+      tapTempo();
       return;
     }
     if (event.code === "KeyL") {
