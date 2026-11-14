@@ -816,6 +816,15 @@
   }
   .picker-controls button:hover { border-color: var(--violet); color: var(--violet); }
   .picker-controls button:disabled { opacity: 0.4; cursor: default; border-color: var(--edge); color: var(--dim); }
+  /* The beats found in the song: one chip each, in the colour that paints
+     where it plays on the waveform. Picking one marks a loop of it; marking
+     by hand still works exactly as before. */
+  #beats { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+  #beats[hidden] { display: none; }
+  #beats .beat-chip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; }
+  #beats .beat-chip i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  #beats .beat-chip small { color: var(--dim); }
+  #beats .beat-chip.on { border-color: var(--violet); background: var(--violet-dim); }
   /* A row of joined buttons where one is lit: how many bars to mark, and
      whether you're hearing the drums or the whole song. */
   .seg { display: inline-flex; }
@@ -1079,6 +1088,7 @@
       <p id="picker-warn" hidden></p>
       <canvas id="wave" width="1000" height="156"></canvas>
       <canvas id="detail" width="1000" height="104"></canvas>
+      <div id="beats" role="group" aria-label="Beats found in this song" hidden></div>
       <div class="picker-controls">
         <button id="play" type="button">Play</button>
         <button id="tap" type="button" title="Tap along on the beat (T) when the grid is at the wrong tempo - double, half, or 2:3 of it">Tap</button>
@@ -1837,6 +1847,70 @@
       : " · Nothing repeats nearby — kept as played";
   }
 
+  // --- the beats found in the song (part_finder) ----------------------------
+  //
+  // Asked for once the audio is up, so the picker never waits on it. Each
+  // beat is a chip and a coloured band on the waveform; picking one marks a
+  // loop of it, on a bar line of the grid already on screen, and everything
+  // after that - nudging, the bar chips, Clean, Build - is the hand-marked
+  // path unchanged. Nothing is built until Build is pressed.
+  const BEAT_COLOURS = ["#a78bfa", "#5fd39a", "#f5b84b", "#6cb6ff", "#f28fb1", "#9be15d", "#ff9f6e", "#b0b8c6"];
+  const BEAT_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+  function beatColour(part) { return BEAT_COLOURS[part.id % BEAT_COLOURS.length]; }
+
+  function beatChipText(part) {
+    const plays = part.runs.length;
+    return "Beat " + (BEAT_LETTERS[part.id] || (part.id + 1)) + " · " + part.bars + " bars" +
+      (plays > 1 ? " · plays " + plays + "×" : "");
+  }
+
+  function showBeats(parts) {
+    const row = el("beats");
+    row.textContent = "";
+    row.hidden = !parts.length;
+    for (const part of parts) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "beat-chip";
+      chip.dataset.beat = String(part.id);
+      const dot = document.createElement("i");
+      dot.style.background = beatColour(part);
+      const label = document.createElement("span");
+      label.textContent = beatChipText(part);
+      chip.append(dot, label);
+      chip.title = "Mark a " + part.loop_bars + "-bar loop of this beat (" + part.runs.length +
+        (part.runs.length === 1 ? " place" : " places") + " in the song)";
+      chip.addEventListener("click", () => pickBeat(part));
+      row.append(chip);
+    }
+  }
+
+  function pickBeat(part) {
+    if (!picker || trimming()) return;
+    for (const chip of document.querySelectorAll("#beats .beat-chip")) {
+      chip.classList.toggle("on", chip.dataset.beat === String(part.id));
+      chip.blur();
+    }
+    chooseBars(part.loop_bars);
+    setStart(part.loop_start);
+  }
+
+  function findBeats(opened) {
+    window.pywebview.api.find_beats(opened.song.have.drums).then((got) => {
+      if (picker !== opened || !got || got.error) return;   // closed meanwhile, or none to offer
+      picker.parts = got.parts || [];
+      showBeats(picker.parts);
+      drawWave();
+    }).catch(() => { /* beats are a convenience; marking by hand needs none */ });
+  }
+
+  function clearBeats() {
+    const row = el("beats");
+    row.textContent = "";
+    row.hidden = true;
+  }
+
   function chooseBars(bars) {
     barsWanted = bars;
     labelPlay();
@@ -2098,6 +2172,16 @@
       const to = ((picker.end === null ? at : picker.end) / picker.duration) * w;
       ctx.fillStyle = "rgba(167, 139, 250, 0.16)";
       ctx.fillRect(Math.min(from, to), 0, Math.abs(to - from), h);
+    }
+
+    // Where each beat found in the song plays, behind the waveform.
+    if (!trimming() && picker.parts) {
+      for (const part of picker.parts) {
+        ctx.fillStyle = beatColour(part) + "2e";
+        for (const [from, to] of part.runs) {
+          ctx.fillRect((from / picker.duration) * w, 0, ((to - from) / picker.duration) * w, h);
+        }
+      }
     }
 
     ctx.fillStyle = "#3d414b";
@@ -2498,6 +2582,7 @@
     el("clean-seg").hidden = false;
     el("tap").hidden = false;
     el("hear").hidden = false;
+    clearBeats();
 
     window.pywebview.api.audition(song.have.drums).then((prepared) => {
       if (prepared.error) { el("picker-hint").textContent = prepared.error; return; }
@@ -2530,6 +2615,7 @@
         el("picker-hint").textContent = firstHint();
         drawDetail();
         loadSong(opened);
+        findBeats(opened);
       }).catch((e) => {
         el("picker-hint").textContent = "Could not read the audio: " + e;
       });
@@ -2583,6 +2669,7 @@
     el("clean-seg").hidden = true;
     el("tap").hidden = true;
     el("hear").hidden = true;
+    clearBeats();
     el("picker-title").textContent = review.filename;
     el("picker-hint").textContent = "Getting the audio...";
 
@@ -2697,6 +2784,7 @@
     el("fade").hidden = true;
     el("keep").hidden = true;
     el("marked").textContent = "";
+    clearBeats();
   }
 
   // Clicking is one intent - "start it here" - so it's one action. It used

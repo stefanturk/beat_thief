@@ -810,6 +810,50 @@ class TestRegrid(unittest.TestCase):
         self.assertEqual(got["error"], "gone")
 
 
+class TestFindBeats(unittest.TestCase):
+    """The picker's beat chips: part_finder's parts for this drum stem, found
+    on the same bars the picker draws."""
+
+    KICKS = [round(n * 0.5, 4) for n in range(200)]           # 120 BPM, 100 s
+    PREPARED = {"audio": "data:x", "peaks": [0.1], "duration": 100.0, "kicks": KICKS}
+    NAME = "Drums Isolated - Song - 120 BPM.wav"
+
+    def _find(self, parts, name=None, prepared=None):
+        import numpy as np
+        stem = (22050, np.zeros(22050, dtype=np.int16))
+        with mock.patch("audition.preview", return_value=prepared or self.PREPARED), \
+             mock.patch("scipy.io.wavfile.read", return_value=stem), \
+             mock.patch("part_finder.drum_features", return_value="features") as features, \
+             mock.patch("part_finder.find_parts", return_value=parts) as find:
+            got = gui.Api().find_beats(name or self.NAME)
+        return got, features, find
+
+    def test_the_parts_come_back_for_the_page_to_draw(self):
+        import part_finder
+        part = part_finder.Part(0, 16, [(0.0, 16.0)], (0.0, 4), 0.8)
+        got, features, find = self._find([part])
+
+        self.assertEqual(got, {"parts": [part.to_dict()]})
+        bars = find.call_args.args[1]
+        self.assertAlmostEqual(bars[1] - bars[0], 2.0, delta=0.05)     # a bar at 120 BPM
+        self.assertEqual(find.call_args.args[0], "features")
+
+    def test_a_stem_with_no_tempo_in_its_name_has_nothing_to_offer(self):
+        got, _, find = self._find([], name="Drums Isolated - Song.wav")
+        self.assertEqual(got, {"parts": []})
+        find.assert_not_called()
+
+    def test_a_stem_with_no_kicks_has_nothing_to_offer(self):
+        got, _, find = self._find([], prepared=dict(self.PREPARED, kicks=[]))
+        self.assertEqual(got, {"parts": []})
+        find.assert_not_called()
+
+    def test_a_stem_that_will_not_load_says_why(self):
+        with mock.patch("audition.preview", side_effect=OSError("gone")):
+            got = gui.Api().find_beats(self.NAME)
+        self.assertEqual(got["error"], "gone")
+
+
 class TestCheckSection(unittest.TestCase):
     """The second opinion before Build: do the drums after the marked
     section repeat it (loop_check)? Said in beats, because that is what's
@@ -1498,6 +1542,8 @@ class TestUiFile(unittest.TestCase):
         self.assertIn('event.code === "KeyT"', html)
         self.assertIn("const TAP_RATIOS = [1, 2, 1 / 2, 2 / 3, 3 / 2, 3 / 4, 4 / 3];", html)
         self.assertIn("pywebview.api.regrid(", html)
+        self.assertIn("pywebview.api.find_beats(", html)
+        self.assertIn('id="beats"', html)
 
     def test_the_1_of_each_bar_has_its_own_colour(self):
         with open(gui.UI_FILE) as page:

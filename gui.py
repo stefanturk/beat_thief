@@ -34,6 +34,7 @@ import history
 import instrument_isolator
 import loop_check
 import names
+import part_finder
 import pipeline
 import progress
 import pulse
@@ -808,6 +809,33 @@ class Api:
         except Exception as e:
             return {"error": str(e) or e.__class__.__name__}
         return {"grid": [grid._asdict() for grid in pulse.grid_track(kicks, float(tempo))]}
+
+    def find_beats(self, wav_path: str) -> dict:
+        """The distinct beats in the drum stem (part_finder), for the picker
+        to offer as chips: each says where it plays and one loop of it worth
+        taking, on a bar line of the grid the picker draws. {"parts": []}
+        when there is no grid to count bars on or nothing repeats; the user
+        can always mark a section by hand instead.
+
+        Reuses the kicks audition() already measured and cached, and the
+        same local grid fit, so the bars it counts are the ones on screen."""
+        try:
+            from scipy.io import wavfile   # lazy: only this path reads whole stems
+            prepared = audition.preview(wav_path)
+            basename = os.path.splitext(os.path.basename(wav_path))[0]
+            try:
+                tempo = instrument_isolator.parse_tempo_from_basename(basename)
+            except ValueError:
+                return {"parts": []}
+            bar_starts = beat_loop._bar_starts(prepared.get("kicks") or [], tempo)
+            if len(bar_starts) < part_finder.MIN_PART_BARS:
+                return {"parts": []}
+            rate, samples = wavfile.read(wav_path)
+            features = part_finder.drum_features(beat_loop._as_float(samples), float(rate), bar_starts)
+            parts = part_finder.find_parts(features, bar_starts)
+        except Exception as e:
+            return {"error": str(e) or e.__class__.__name__}
+        return {"parts": [part.to_dict() for part in parts]}
 
     def check_section(self, wav_path: str, start_sec: float, end_sec: float,
                       grid_tempo: float, bars: int) -> dict:
