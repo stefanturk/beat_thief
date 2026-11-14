@@ -890,6 +890,56 @@ class TestStealBeat(unittest.TestCase):
              mock.patch("beat_loop.write_wav") as self.mock_write_wav:
             return gui.Api().steal_beat(self.stem, start, end)
 
+    def _steal_clean(self, report, **kwargs):
+        notes = [(36, 0.0), (38, 0.5)]
+        import pretty_midi
+        shifted = [pretty_midi.Note(velocity=100, pitch=p, start=at + 3.0, end=at + 3.05)
+                   for p, at in notes]
+        def fake_write_wav(loop, wav, mid, clean=False, report=None):
+            if clean and report is not None:
+                report.update(self._report)
+            return os.path.splitext(mid)[0] + ".wav"
+        self._report = report
+        with mock.patch("beat_loop._section_wav", return_value=3.0), \
+             mock.patch("drum_transcriber.calibrate_hat_threshold", return_value=-5.0), \
+             mock.patch("drum_transcriber.transcribe", return_value=shifted), \
+             mock.patch("beat_loop.write_wav", side_effect=fake_write_wav) as write_wav:
+            result = gui.Api().steal_beat(self.stem, 10.0, 14.4, **kwargs)
+        return result, write_wav
+
+    def test_clean_is_passed_through_and_the_report_comes_back(self):
+        result, write_wav = self._steal_clean({"references": 7, "changed_db": 2.1}, clean=True)
+        self.assertIs(write_wav.call_args.kwargs["clean"], True)
+        self.assertEqual(result["clean"], {"references": 7, "changed_db": 2.1})
+        self.assertEqual(result["cleaned"], 7)
+
+    def test_nothing_repeating_reports_zero_references(self):
+        result, _ = self._steal_clean({"references": 0}, clean=True)
+        self.assertEqual(result["cleaned"], 0)
+
+    def test_without_clean_it_is_not_asked_for_and_not_reported(self):
+        result, write_wav = self._steal_clean({"references": 7})
+        self.assertIs(write_wav.call_args.kwargs["clean"], False)
+        self.assertNotIn("clean", result)
+        self.assertNotIn("cleaned", result)
+
+    def test_the_clean_flag_survives_the_background_build(self):
+        api = gui.Api()
+        with mock.patch.object(api, "steal_beat", return_value={"path": "x"}) as steal:
+            api._steal_beat_work("s.wav", 1.0, 2.0, "wav", [], 120.0, 2, True)
+        self.assertIs(steal.call_args.kwargs["clean"], True)
+        self.assertEqual(api.beat_status()["result"], {"path": "x"})
+
+    def test_the_page_has_a_clean_toggle_that_is_off_by_default_and_remembered(self):
+        markup = open(os.path.join(os.path.dirname(gui.__file__), "ui", "index.html")).read()
+        self.assertIn('id="clean"', markup)
+        self.assertNotIn('id="clean" class="on"', markup)
+        self.assertIn("let cleanWanted = false;", markup)
+        self.assertIn("beatThief.clean", markup)
+        self.assertIn("barsMarked(), cleanWanted)", markup)
+        self.assertIn("Cleaned against ", markup)
+        self.assertIn("Nothing repeats nearby — kept as played", markup)
+
     def test_it_says_where_the_cut_actually_landed(self):
         # The build is still allowed to move the start onto a kick when the
         # marking landed on nothing, so the page has to be able to say where
@@ -1458,7 +1508,7 @@ class TestUiFile(unittest.TestCase):
     def test_build_is_handed_the_grid_on_screen_and_warns_before(self):
         with open(gui.UI_FILE) as page:
             html = page.read()
-        self.assertRegex(html, r"steal_beat_start\([^;]*gridTempoAt\(picker\.start\), barsMarked\(\)\)")
+        self.assertRegex(html, r"steal_beat_start\([^;]*gridTempoAt\(picker\.start\), barsMarked\(\), cleanWanted\)")
         self.assertIn("pywebview.api.check_section(", html)
         self.assertIn('id="picker-warn"', html)
 

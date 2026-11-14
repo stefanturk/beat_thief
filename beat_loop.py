@@ -489,17 +489,98 @@ def cut(src_path: str, origin_sec: float, duration_sec: float, out_path: str) ->
     return out_path
 
 
-def write_wav(loop: Loop, wav_path: str, mid_path: str) -> str:
+def write_wav(loop: Loop, wav_path: str, mid_path: str, clean: bool = False,
+              report: dict | None = None) -> str:
     """Cut the loop's own span - origin_sec to origin_sec + duration_sec,
     the marking after it was nudged onto a kick, not the raw click - out of
-    wav_path and save it beside mid_path.
+    wav_path and save it beside mid_path. Returns the path written.
 
     Named to match the .mid rather than run through _free_path on its own,
     so the pair a second steal makes keeps its own " (2)" together instead
     of the two drifting out of sync should one ever be written without the
-    other."""
+    other.
+
+    clean=True repairs the cut against the drummer's other passes of the
+    same pattern (loop_clean). The raw cut is always made first, and stays
+    on disk if cleaning raises or finds nothing to compare against. The
+    outcome goes into `report` (an out-parameter, so the return value stays
+    the path every caller already uses): loop_clean's own report, or
+    {"references": 0} on a fallback (plus "error" if it raised). Left empty
+    when clean is False."""
     out_path = os.path.splitext(mid_path)[0] + ".wav"
-    return cut(wav_path, loop.origin_sec, loop.beat.duration_sec, out_path)
+    cut(wav_path, loop.origin_sec, loop.beat.duration_sec, out_path)
+    if clean:
+        outcome = _clean_cut(loop, wav_path, out_path)
+        if report is not None:
+            report.update(outcome)
+    return out_path
+
+
+def _bar_starts(kicks, tempo: float) -> list[float]:
+    """Every bar line, in seconds, of the grid pulse fits to `kicks` - the
+    same local fit the picker draws (gui.Api.audition). Each grid's
+    downbeat is one bar line; the rest of its span is that plus whole bars."""
+    import pulse
+    bars = set()
+    for grid in pulse.grid_track(kicks, tempo):
+        bar_sec = grid.step * pulse.SUBDIVISION * pulse.BEATS_PER_BAR
+        k = math.ceil((grid.start - grid.downbeat) / bar_sec)
+        at = grid.downbeat + k * bar_sec
+        while at < grid.end:
+            bars.add(round(at, 6))
+            at += bar_sec
+    return sorted(bars)
+
+
+def _clean_cut(loop: Loop, stem_path: str, out_path: str) -> dict:
+    """Overwrite the raw cut at out_path with its cleaned version, if
+    loop_clean finds anything to clean it against. Returns the report."""
+    try:
+        import loop_clean   # lazy: only the clean path needs it
+        import audition
+        import pulse
+        from scipy.io import wavfile
+
+        rate, stem = wavfile.read(stem_path)
+        cut_rate, raw = wavfile.read(out_path)
+        kicks = pulse.kicks(audition._mono_samples(stem_path).astype(np.float32),
+                            audition.PEAK_SAMPLE_RATE)
+        bar_starts = _bar_starts(kicks, loop.tempo)
+
+        cleaned, found = loop_clean.clean(
+            _as_float(stem), float(rate), float(loop.origin_sec),
+            float(loop.beat.duration_sec), bar_starts)
+        if not found or not found.get("references"):
+            return dict(found or {}, references=0)
+
+        cleaned = np.asarray(cleaned)
+        if cleaned.ndim != raw.ndim:
+            raise ValueError("cleaned audio has a different channel layout than the cut")
+        # Exactly the raw cut's length and format, whatever came back.
+        cleaned = cleaned[:len(raw)]
+        if len(cleaned) < len(raw):
+            pad = [(0, len(raw) - len(cleaned))] + [(0, 0)] * (raw.ndim - 1)
+            cleaned = np.pad(cleaned, pad)
+        wavfile.write(out_path, cut_rate, _from_float(cleaned, raw.dtype))
+        return found
+    except Exception as e:
+        return {"references": 0, "error": str(e) or e.__class__.__name__}
+
+
+def _as_float(samples) -> "np.ndarray":
+    """Integer PCM as float32 in [-1, 1]; float PCM as it is."""
+    if np.issubdtype(samples.dtype, np.integer):
+        return samples.astype(np.float32) / float(np.iinfo(samples.dtype).max)
+    return samples.astype(np.float32)
+
+
+def _from_float(samples, dtype) -> "np.ndarray":
+    """_as_float, undone: back to `dtype`, clipped rather than wrapped."""
+    dtype = np.dtype(dtype)
+    if np.issubdtype(dtype, np.integer):
+        top = float(np.iinfo(dtype).max)
+        return np.clip(np.round(samples.astype(np.float64) * top), -top - 1, top).astype(dtype)
+    return samples.astype(dtype)
 
 
 # --- loops of the other stems --------------------------------------------

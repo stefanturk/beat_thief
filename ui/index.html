@@ -1092,6 +1092,9 @@
           <button type="button" data-bars="16">16</button>
           <button type="button" data-bars="0">By hand</button>
         </span>
+        <span class="seg" id="clean-seg" role="group" aria-label="Clean the loop">
+          <button type="button" id="clean" aria-pressed="false" title="Clean the beat's audio against the drummer's other passes of the same pattern - hollow hits filled in, bleed turned down">Clean</button>
+        </span>
         <span class="seg" id="hear" role="group" aria-label="Listen to">
           <button type="button" data-hear="drums" class="on">Drums</button>
           <button type="button" data-hear="song" disabled title="Getting the song...">Song</button>
@@ -1812,6 +1815,28 @@
     refreshBuildEnabled();
   }
 
+  // Whether the loop's audio is cleaned against the drummer's other passes
+  // (loop_clean). Off until it has been rated by ear; remembered across
+  // pickers, and across launches where the browser lets it be.
+  let cleanWanted = false;
+  try { cleanWanted = localStorage.getItem("beatThief.clean") === "1"; } catch (e) { cleanWanted = false; }
+
+  function chooseClean(on) {
+    cleanWanted = on;
+    try { localStorage.setItem("beatThief.clean", on ? "1" : "0"); } catch (e) { /* not remembered */ }
+    el("clean").classList.toggle("on", on);
+    el("clean").setAttribute("aria-pressed", on ? "true" : "false");
+    el("clean").blur();
+  }
+
+  // What cleaning did, said after the loop's own summary.
+  function cleanSaid(result) {
+    if (!cleanWanted || result.cleaned === undefined) return "";
+    return result.cleaned > 0
+      ? " · Cleaned against " + result.cleaned + " repeat" + (result.cleaned === 1 ? "" : "s")
+      : " · Nothing repeats nearby — kept as played";
+  }
+
   function chooseBars(bars) {
     barsWanted = bars;
     labelPlay();
@@ -2470,6 +2495,7 @@
     el("picker-title").textContent = song.title;
     el("picker-hint").textContent = "Getting the audio...";
     el("bars").hidden = false;
+    el("clean-seg").hidden = false;
     el("tap").hidden = false;
     el("hear").hidden = false;
 
@@ -2554,6 +2580,7 @@
     el("keep").hidden = false;
     // Nothing to count bars of or swap to: this is the song already.
     el("bars").hidden = true;
+    el("clean-seg").hidden = true;
     el("tap").hidden = true;
     el("hear").hidden = true;
     el("picker-title").textContent = review.filename;
@@ -2915,7 +2942,7 @@
     el("message").textContent = "Building beat...";
 
     window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end, outputs, stemsFromPads(),
-                                         gridTempoAt(picker.start), barsMarked()).then((snapshot) => {
+                                         gridTempoAt(picker.start), barsMarked(), cleanWanted).then((snapshot) => {
       if (snapshot.busy) {
         // A build was already running when this click landed - it's still
         // that one's result on the way, not this click's, so say so rather
@@ -2949,7 +2976,7 @@
         // Notes worked out from the pattern rather than heard - say so.
         (loop.inferred ? " (" + loop.inferred + " put back)" : "") + ", " +
         loop.pieces.join(" / ") + " — set Ableton to " + loop.tempo + " BPM" +
-        tempoQuibble(loop) + cutMoved(loop) + stemLoopsSaid(loop);
+        tempoQuibble(loop) + cutMoved(loop) + cleanSaid(loop) + stemLoopsSaid(loop);
       refreshLibrary().then(() => {
         closePicker();
         el("message").textContent = summary;
@@ -3508,6 +3535,8 @@
   for (const chip of document.querySelectorAll("#bars button")) {
     chip.addEventListener("click", () => chooseBars(Number(chip.dataset.bars)));
   }
+  chooseClean(cleanWanted);
+  el("clean").addEventListener("click", () => chooseClean(!cleanWanted));
   for (const choice of document.querySelectorAll("#hear button")) {
     choice.addEventListener("click", () => { hear(choice.dataset.hear); choice.blur(); });
   }

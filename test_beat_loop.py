@@ -620,6 +620,124 @@ class TestWriteWav(unittest.TestCase):
         self.assertLess(loudest / rate, 0.015)
 
 
+class TestWriteWavClean(unittest.TestCase):
+    """write_wav(clean=True) hands the stem to loop_clean and writes what
+    comes back. loop_clean is the DSP's own module with its own tests, so a
+    fake is injected here: these check the plumbing - what it is called
+    with, and the fallback to the raw cut."""
+
+    def setUp(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.wav_path = os.path.join(self.tmp_dir, "stem.wav")
+        _click_wav(self.wav_path, seconds=20.0, tempo=120.0)
+        self.mid_path = os.path.join(self.tmp_dir, "Drum Beat - Some Song - 120 BPM.mid")
+        beat = beat_writer.Beat(
+            tempo=120.0, hits=(beat_writer.Hit("kick", 0, 100),),
+            steps_per_bar=16, bars=2, name="Stolen Beat",
+        )
+        self.loop = beat_loop.Loop(
+            beat=beat, bars=2, origin_sec=4.0, hits_used=1, hits_dropped=0,
+            hits_inferred=0, tempo=120.0, song_tempo=120.0,
+        )
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _raw(self):
+        out = beat_loop.write_wav(self.loop, self.wav_path, self.mid_path)
+        with open(out, "rb") as f:
+            return f.read()
+
+    def _fake(self, **kwargs):
+        fake = mock.Mock()
+        fake.clean = mock.Mock(**kwargs)
+        return fake
+
+    def test_the_default_never_imports_or_calls_loop_clean(self):
+        fake = self._fake()
+        with mock.patch.dict("sys.modules", {"loop_clean": fake}):
+            report = {}
+            beat_loop.write_wav(self.loop, self.wav_path, self.mid_path, report=report)
+        fake.clean.assert_not_called()
+        self.assertEqual(report, {})
+
+    def test_the_default_without_a_loop_clean_module_still_works(self):
+        with mock.patch.dict("sys.modules", {"loop_clean": None}):   # import raises
+            out = beat_loop.write_wav(self.loop, self.wav_path, self.mid_path)
+        self.assertTrue(os.path.exists(out))
+
+    def test_clean_calls_loop_clean_with_the_stem_the_span_and_bar_lines(self):
+        import numpy as np
+        raw = self._raw()
+        _, rate = _wav_samples(os.path.join(self.tmp_dir, "Drum Beat - Some Song - 120 BPM.wav"))
+        fake = self._fake(side_effect=lambda samples, rate, start, length, bars:
+                          (np.full(int(round(length * rate)), 0.25, dtype=np.float32),
+                           {"references": 3}))
+        report = {}
+        with mock.patch.dict("sys.modules", {"loop_clean": fake}):
+            out = beat_loop.write_wav(self.loop, self.wav_path, self.mid_path,
+                                      clean=True, report=report)
+
+        self.assertEqual(report, {"references": 3})
+        samples, start, length, bars = (fake.clean.call_args.args[0], fake.clean.call_args.args[2],
+                                        fake.clean.call_args.args[3], fake.clean.call_args.args[4])
+        self.assertEqual(fake.clean.call_args.args[1], 44100.0)
+        self.assertEqual(start, 4.0)
+        self.assertAlmostEqual(length, 4.0)
+        self.assertGreater(len(samples), 44100 * 19)          # the whole stem
+        self.assertTrue(bars, "bar lines come from the picker's grid")
+        self.assertAlmostEqual(bars[1] - bars[0], 2.0, delta=0.02)   # a bar at 120 BPM
+        written, written_rate = _wav_samples(out)
+        self.assertEqual(written_rate, rate)
+        self.assertNotEqual(open(out, "rb").read(), raw)
+        self.assertAlmostEqual(float(np.mean(written)), 0.25 * 32767, delta=5)   # int16, like the cut
+
+    def test_what_is_written_is_the_raw_cuts_length(self):
+        import numpy as np
+        raw_path = beat_loop.write_wav(self.loop, self.wav_path, self.mid_path)
+        raw_samples, _ = _wav_samples(raw_path)
+        # Short by a few samples: padded back to the raw length.
+        fake = self._fake(side_effect=lambda s, r, a, length, b:
+                          (np.zeros(int(length * r) - 5, dtype=np.float32), {"references": 2}))
+        with mock.patch.dict("sys.modules", {"loop_clean": fake}):
+            out = beat_loop.write_wav(self.loop, self.wav_path, self.mid_path, clean=True)
+        self.assertEqual(len(_wav_samples(out)[0]), len(raw_samples))
+
+    def test_no_references_keeps_the_raw_cut(self):
+        raw = self._raw()
+        fake = self._fake(return_value=(None, {"references": 0}))
+        report = {}
+        with mock.patch.dict("sys.modules", {"loop_clean": fake}):
+            out = beat_loop.write_wav(self.loop, self.wav_path, self.mid_path,
+                                      clean=True, report=report)
+        fake.clean.assert_called_once()
+        self.assertEqual(report["references"], 0)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), raw)
+
+    def test_a_cleaner_that_raises_keeps_the_raw_cut(self):
+        raw = self._raw()
+        fake = self._fake(side_effect=RuntimeError("boom"))
+        report = {}
+        with mock.patch.dict("sys.modules", {"loop_clean": fake}):
+            out = beat_loop.write_wav(self.loop, self.wav_path, self.mid_path,
+                                      clean=True, report=report)
+        self.assertEqual(report["references"], 0)
+        self.assertEqual(report["error"], "boom")
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), raw)
+
+    def test_a_missing_loop_clean_module_keeps_the_raw_cut(self):
+        raw = self._raw()
+        report = {}
+        with mock.patch.dict("sys.modules", {"loop_clean": None}):
+            out = beat_loop.write_wav(self.loop, self.wav_path, self.mid_path,
+                                      clean=True, report=report)
+        self.assertEqual(report["references"], 0)
+        with open(out, "rb") as f:
+            self.assertEqual(f.read(), raw)
+
+
 class TestStemLoops(unittest.TestCase):
     """Bass, harmony and vocal loops cut over exactly the drum loop's bars."""
 

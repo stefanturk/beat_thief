@@ -858,7 +858,7 @@ class Api:
 
     def steal_beat(self, wav_path: str, start_sec: float, end_sec: float,
                     outputs: str = "both", on_phase=None, stems=(),
-                    grid_tempo=None, bars=None) -> dict:
+                    grid_tempo=None, bars=None, clean=False) -> dict:
         """Turn the marked section into a loop and save it next to the stem.
 
         outputs picks what's kept: "wav" for just the trimmed loop audio,
@@ -889,7 +889,13 @@ class Api:
 
         grid_tempo and bars are the grid the picker showed and how many of
         its bars were marked. Given, the loop is exactly that many bars at
-        that tempo (see beat_loop.build): what you saw is what you get."""
+        that tempo (see beat_loop.build): what you saw is what you get.
+
+        clean repairs the loop's audio against the drummer's other passes
+        (loop_clean, via beat_loop.write_wav). Only the drum loop's WAV is
+        touched. The result then carries "clean": the report, and "cleaned":
+        how many repeats it was cleaned against (0 = kept as played)."""
+        clean_report = {}
         try:
             song_dir = os.path.dirname(wav_path)
             basename = os.path.splitext(os.path.basename(wav_path))[0]
@@ -904,7 +910,8 @@ class Api:
             mid_path = beat_loop.write(loop, song_dir, title)
             path = mid_path
             if outputs != "midi":
-                wav_path_out = beat_loop.write_wav(loop, wav_path, mid_path)
+                wav_path_out = beat_loop.write_wav(loop, wav_path, mid_path, clean=bool(clean),
+                                                   report=clean_report)
                 if outputs == "wav":
                     os.remove(mid_path)
                     path = wav_path_out
@@ -914,7 +921,7 @@ class Api:
         except Exception as e:
             return {"error": str(e) or e.__class__.__name__}
 
-        return {
+        result = {
             "path": path,
             "name": os.path.basename(path),
             "loops": loops,
@@ -936,9 +943,14 @@ class Api:
             "inferred": loop.hits_inferred,
             "pieces": sorted({hit.piece for hit in loop.beat.hits}),
         }
+        if clean and outputs != "midi":
+            result["clean"] = clean_report
+            result["cleaned"] = int(clean_report.get("references") or 0)
+        return result
 
     def steal_beat_start(self, wav_path: str, start_sec: float, end_sec: float,
-                          outputs: str = "both", stems=None, grid_tempo=None, bars=None) -> dict:
+                          outputs: str = "both", stems=None, grid_tempo=None, bars=None,
+                          clean=False) -> dict:
         """Like steal_beat, but returns immediately and reports progress
         through beat_status() - the page polls it exactly the way it polls
         status() for a run.
@@ -964,7 +976,7 @@ class Api:
 
         self._beat_thread = threading.Thread(
             target=self._steal_beat_work,
-            args=(wav_path, start_sec, end_sec, outputs, list(stems or []), grid_tempo, bars),
+            args=(wav_path, start_sec, end_sec, outputs, list(stems or []), grid_tempo, bars, clean),
             daemon=True,
         )
         self._beat_thread.start()
@@ -1018,10 +1030,10 @@ class Api:
             self._beat_state["phase"] = phase
 
     def _steal_beat_work(self, wav_path, start_sec, end_sec, outputs="both", stems=(),
-                         grid_tempo=None, bars=None):
+                         grid_tempo=None, bars=None, clean=False):
         result = self.steal_beat(wav_path, start_sec, end_sec, outputs=outputs,
                                  on_phase=self._set_beat_phase, stems=stems,
-                                 grid_tempo=grid_tempo, bars=bars)
+                                 grid_tempo=grid_tempo, bars=bars, clean=clean)
         with self._beat_lock:
             self._beat_state["running"] = False
             if "error" in result:
