@@ -161,6 +161,32 @@ class TestClean(unittest.TestCase):
         # very band, so the donors are noisier. Still ~20 dB better than raw.
         self.assertLess(abs(_band_db(cleaned, 450, 700, *window) - wanted), 5.0)
 
+    def test_a_long_loop_is_cleaned_where_it_repeats_and_its_one_off_fill_is_kept(self):
+        bars = 44
+        stem = _stem(bars=bars)
+        starts = [k * BAR for k in range(bars)]
+        loop_bars = 8                                    # two pieces of four bars
+        first = 12
+        # an ad lib in bar 14 (first piece), a fill that is nobody else's in bar 19
+        t = np.arange(int(0.6 * RATE)) / RATE
+        at = int((14 * BAR + 1.0) * RATE)
+        stem[at:at + len(t)] += 0.2 * np.sin(2 * np.pi * 440 * t)
+        rng = np.random.default_rng(7)
+        fill = _noise(rng, int(0.5 * RATE), 0.5, 6)
+        at = int((19 * BAR + 1.5 * BEAT) * RATE)
+        stem[at:at + len(fill)] += fill
+
+        cleaned, report = loop_clean.clean(stem.astype(np.float32), RATE, first * BAR, loop_bars * BAR, starts)
+        raw = stem.astype(np.float32)[int(first * BAR * RATE):int(first * BAR * RATE) + int(loop_bars * BAR * RATE)]
+
+        self.assertEqual(len(cleaned), len(raw))
+        self.assertEqual(report["pieces"], 2)
+        self.assertGreaterEqual(report["references"], 2)
+        ad_lib = (2 * BAR + 1.1, 2 * BAR + 1.5)
+        self.assertLessEqual(_band_db(cleaned, 400, 480, *ad_lib), _band_db(raw, 400, 480, *ad_lib) - 10)
+        kept = (7 * BAR + 1.5 * BEAT, 7 * BAR + 1.5 * BEAT + 0.4)
+        self.assertLess(abs(_band_db(cleaned, 150, 9000, *kept) - _band_db(raw, 150, 9000, *kept)), 1.0)
+
     def test_nothing_that_repeats_is_left_exactly_as_it_was(self):
         stem = np.random.default_rng(1).normal(0, 0.2, int((BARS * BAR + 3) * RATE))
 

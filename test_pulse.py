@@ -228,6 +228,46 @@ class TestDownbeat(unittest.TestCase):
         self.assertGreater(confidence, 0.9)
 
 
+class TestBackbeat(unittest.TestCase):
+    """The 1 is where the kick falls only if the kick is on the 1. A funk
+    kick on the "and" and on the 3 would make the most-kicked sixteenth the
+    wrong place; the snare on 2 and 4 says where the 1 really is."""
+    TEMPO = 100.0
+    STEP = 60.0 / TEMPO / 4
+
+    def _song(self, kick_steps, snare_steps, bars=24):
+        bar = 16 * self.STEP
+        kicks = [b * bar + k * self.STEP for b in range(bars) for k in kick_steps]
+        snares = [b * bar + k * self.STEP for b in range(bars) for k in snare_steps]
+        return kicks, snares
+
+    def _line_in_bar(self, grid):
+        """Which sixteenth of the real bar (bar lines at multiples of 16
+        steps from zero) the grid's bar line sits on."""
+        return int(round(grid.downbeat / self.STEP)) % 16
+
+    def test_a_kick_on_the_and_does_not_pull_the_one_onto_the_and(self):
+        kicks, snares = self._song([2, 8], [4, 12])
+        without = pulse.grid_track(kicks, self.TEMPO)[0]
+        self.assertEqual(self._line_in_bar(without), 2)             # the old answer
+        with_snare = pulse.grid_track(kicks, self.TEMPO, backbeat=snares)[0]
+        self.assertEqual(self._line_in_bar(with_snare), 0)
+
+    def test_a_plain_backbeat_is_unchanged(self):
+        kicks, snares = self._song([0, 8, 10], [4, 12])
+        grid = pulse.grid_track(kicks, self.TEMPO, backbeat=snares)[0]
+        self.assertEqual(self._line_in_bar(grid), 0)
+
+    def test_four_on_the_floor_with_a_backbeat_snare_keeps_the_one(self):
+        kicks, snares = self._song([0, 4, 8, 12], [4, 12])
+        grid = pulse.grid_track(kicks, self.TEMPO, backbeat=snares)[0]
+        self.assertEqual(self._line_in_bar(grid), 0)
+
+    def test_without_snares_it_is_exactly_what_it_was(self):
+        kicks, _ = self._song([2, 8], [4, 12])
+        self.assertEqual(pulse.grid_track(kicks, self.TEMPO), pulse.grid_track(kicks, self.TEMPO, backbeat=[]))
+
+
 class TestGridTrack(unittest.TestCase):
     def test_it_covers_the_recording_in_segments(self):
         _, times = _four_on_the_floor(120.0, bars=64, offset=0.37)

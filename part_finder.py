@@ -19,8 +19,9 @@ finder serves every stem.
   4. Consecutive bars of one group make a run. A run shorter than MIN_RUN
      bars is a fill or a transition, not a beat. A group with at least
      MIN_PART_BARS bars left in its runs is a part.
-  5. Each part gets one loop: 1, 2 or 4 bars starting on a bar line, from the
-     bars most like the rest of the part, starting where its phrase starts.
+  5. Each part gets one loop: its longest stretch of whole 4-bar phrases from
+     a bar line (up to MAX_LOOP_SEC), so the loop runs through the passes and
+     keeps the fill that ends each one.
 
 What it can't do: say what a part is (verse, chorus), or tell two parts
 apart that differ only in loudness or in what isn't in the features.
@@ -53,8 +54,15 @@ MAX_PARTS = 8
 MERGE_GAP = 2
 # A part has at least this many bars across all its runs.
 MIN_PART_BARS = 4
-# Loops are this long, longest first; the longest that fits a run is used.
-LOOP_BARS = (4, 2, 1)
+# A loop is a whole stretch of a beat's bars, fills and all: a multiple of
+# LOOP_PHRASE bars (never fewer than that), as long as the stretch lasts but
+# no longer than MAX_LOOP_SEC. A fill of up to MERGE_GAP bars after a stretch
+# is part of it, so the loop ends on its fill.
+LOOP_PHRASE = 4
+MAX_LOOP_SEC = 60.0
+# The bar position where the pattern changes most must beat the typical one by
+# this much to be called a phrase's one.
+PHASE_CONTRAST = 1.3
 
 # Drum features: this many positions per bar (sixteenths).
 STEPS = 16
@@ -66,6 +74,7 @@ class Part(NamedTuple):
     runs: list                          # [(start_sec, end_sec)]
     loop: tuple                         # (start_sec, bars): a loop worth taking
     confidence: float                   # 0..1: how clearly it is its own beat
+    loop_sec: float = 0.0               # how long that loop is
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +83,7 @@ class Part(NamedTuple):
             "runs": [[round(a, 3), round(b, 3)] for a, b in self.runs],
             "loop_start": round(self.loop[0], 3),
             "loop_bars": self.loop[1],
+            "loop_sec": round(self.loop_sec, 3),
             "confidence": round(self.confidence, 3),
         }
 
@@ -152,21 +162,73 @@ def _joined(runs: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return out
 
 
-def _loop(runs: list[tuple[int, int]], similarity: np.ndarray) -> tuple[int, int]:
-    """(first bar, bars): the longest of LOOP_BARS that fits a run, starting
-    where a phrase of that length would (the run's start plus whole loops),
-    from the window most like the rest of the part."""
-    longest = max(b - a for a, b in runs)
-    bars = next((n for n in LOOP_BARS if n <= longest), 1)
-    best, best_score = None, -np.inf
-    for a, b in runs:
-        for first in range(a, b - bars + 1, bars):
-            score = float(similarity[first:first + bars].mean())
-            # Earlier wins a tie, and a longer run is the steadier one.
-            score += 1e-6 * (b - a) - 1e-9 * first
-            if score > best_score:
-                best, best_score = first, score
-    return best, bars
+def _gap(runs: list[tuple[int, int]], bar: int) -> int:
+    """How many bars `bar` is past the end of the last run before it."""
+    ends = [b for _, b in runs if b <= bar]
+    return bar - max(ends) + 1 if ends else 10 ** 6
+
+
+def _phrase_phase(rows: np.ndarray, active: np.ndarray) -> int:
+    """Which bar number (mod LOOP_PHRASE) is a phrase's "one". Beats change
+    on the one, and the bar before it is the fill: so of every 8 bars, the
+    position where the pattern changes most is where a phrase starts. A song
+    that changes nowhere in particular (a drummer who varies every bar) says
+    nothing, and the grid's own first bar is taken as the one (0)."""
+    n = len(rows)
+    centred = rows - rows.mean(axis=1, keepdims=True)
+    unit = centred / np.maximum(np.linalg.norm(centred, axis=1, keepdims=True), 1e-12)
+    change = np.full(n, np.nan)
+    both = active[1:] & active[:-1]
+    change[1:] = np.where(both, 1.0 - (unit[1:] * unit[:-1]).sum(axis=1), np.nan)
+    means = np.full(2 * LOOP_PHRASE, np.nan)
+    for k in range(2 * LOOP_PHRASE):
+        seen = change[k::2 * LOOP_PHRASE]
+        seen = seen[~np.isnan(seen)]
+        if len(seen) >= 2:
+            means[k] = seen.mean()
+    if np.isnan(means).all():
+        return 0
+    best = int(np.nanargmax(means))
+    if means[best] < PHASE_CONTRAST * np.nanmedian(means):
+        return 0
+    # A fill changes the pattern going in and coming out: the bar after a fill
+    # that is nearly as changed as the fill is the one.
+    after = means[(best + 1) % (2 * LOOP_PHRASE)]
+    if not np.isnan(after) and after >= 0.8 * means[best]:
+        best = (best + 1) % (2 * LOOP_PHRASE)
+    return best % LOOP_PHRASE
+
+
+def _loop(stretches: list[tuple[int, int]], similarity: np.ndarray, member: np.ndarray,
+          cap_bars: int, phase: int = 0) -> tuple[int, int]:
+    """(first bar, bars). A stretch is bars [a, e) of one beat with its
+    fills. The loop is the longest run of whole phrases that fits one (and
+    the cap), starting a whole number of phrases in; among equal lengths the
+    window with the most variety - a fill is unlike the groove, so it counts
+    for a window rather than against it. With no stretch of a phrase (a
+    drummer who never plays it twice running), the phrase-long window with
+    the most of the beat's bars in it."""
+    best, best_key = None, None
+    for aligned in (True, False):      # a stretch too short to start on a one still gets a loop
+        for a, e in stretches:
+            if aligned:
+                a += (phase - a) % LOOP_PHRASE        # start on a phrase's one
+            bars = min((e - a) // LOOP_PHRASE * LOOP_PHRASE, cap_bars)
+            if bars < LOOP_PHRASE:
+                continue
+            for first in range(a, e - bars + 1, LOOP_PHRASE):
+                variety = float((1.0 - similarity[first:first + bars]).mean())
+                key = (bars, variety, -first)
+                if best_key is None or key > best_key:
+                    best, best_key = (first, bars), key
+        if best is not None:
+            break
+    if best is not None:
+        return best
+    n = len(member)
+    first = max(range(phase, max(phase + 1, n - LOOP_PHRASE + 1), LOOP_PHRASE),
+                key=lambda i: (int(member[i:i + LOOP_PHRASE].sum()), -i))
+    return first, LOOP_PHRASE
 
 
 def find_parts(features, bar_starts) -> list[Part]:
@@ -223,10 +285,23 @@ def find_parts(features, bar_starts) -> list[Part]:
         centroids[g] = centre
         within[g] = float((unit[bars] @ centre).mean())
 
+    owner = np.full(n, -1)
+    for g, r in kept.items():
+        for a, b in r:
+            owner[a:b] = g
+    cap_bars = max(LOOP_PHRASE, int(MAX_LOOP_SEC / bar_len) // LOOP_PHRASE * LOOP_PHRASE)
+
+    phase = _phrase_phase(rows, active)
     parts = []
     for g, r in kept.items():
         similarity = unit @ centroids[g]
-        first, bars = _loop(r, similarity)
+        stretches = []
+        for a, b in _joined(r):
+            # The fill that ends a pass belongs to it.
+            while b < n and active[b] and owner[b] == -1 and _gap(r, b) <= MERGE_GAP:
+                b += 1
+            stretches.append((a, b))
+        first, bars = _loop(stretches, similarity, owner == g, cap_bars, phase)
         others = [float(centroids[g] @ centroids[h]) for h in kept if h != g]
         gap = within[g] - (max(others) if others else 0.0)
         end = lambda i: float(bar_starts[i]) if i < n else float(bar_starts[-1] + bar_len)
@@ -236,8 +311,9 @@ def find_parts(features, bar_starts) -> list[Part]:
             [(float(bar_starts[a]), end(b)) for a, b in _joined(r)],
             (float(bar_starts[first]), bars),
             float(np.clip(gap, 0.0, 1.0)),
+            end(first + bars) - float(bar_starts[first]),
         ))
     parts.sort(key=lambda p: (-p[0], p[1]))
     parts = parts[:MAX_PARTS]
-    return [Part(i, total, runs_sec, loop, conf)
-            for i, (total, _, runs_sec, loop, conf) in enumerate(parts)]
+    return [Part(i, total, runs_sec, loop, conf, sec)
+            for i, (total, _, runs_sec, loop, conf, sec) in enumerate(parts)]

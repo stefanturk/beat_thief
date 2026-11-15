@@ -429,6 +429,19 @@ class TestBuild(unittest.TestCase):
                                    bars=4, span=4 * 2.0 - 0.9)
         self.assertEqual(loop.bars, 4)
 
+    def test_a_long_loop_the_picker_counted_is_not_cut_to_sixteen_bars(self):
+        # A beat chip offers a whole stretch of a beat, up to a minute: 40 bars
+        # at 171.8 BPM must come back 40 bars, not the 16 that used to be the cap.
+        loop = self._build_on_grid(_straight(171.8, bars=2), grid_tempo=171.8, bars=40,
+                                   span=40 * 240 / 171.8)
+        self.assertEqual(loop.bars, 40)
+        self.assertAlmostEqual(loop.beat.duration_sec, 40 * 240 / 171.8, places=6)
+
+    def test_nothing_is_longer_than_a_minute(self):
+        loop = self._build_on_grid(_straight(100.0, bars=2), grid_tempo=100.0, bars=200,
+                                   span=100.0)
+        self.assertLessEqual(loop.beat.duration_sec, beat_loop.MAX_LOOP_SEC + 1e-6)
+
     def test_without_a_grid_the_tempo_is_still_measured(self):
         with mock.patch("instrument_isolator.refine_tempo", return_value=118.0) as refine:
             loop = self._build(_sixteenths(self.TEMPO, bars=2))

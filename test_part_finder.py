@@ -87,15 +87,39 @@ class TestFindParts(unittest.TestCase):
         for part in parts:
             start, bars = part.loop
             self.assertIn(round(start, 6), [round(b, 6) for b in bar_starts])
-            self.assertIn(bars, (1, 2, 4, 8, 16))
+            self.assertGreaterEqual(bars, 4)
+            self.assertEqual(bars % 4, 0)
             self.assertTrue(any(a - 1e-6 <= start and start + bars * BAR <= b + 1e-6 for a, b in part.runs))
 
-    def test_a_short_part_gets_a_short_loop(self):
+    def test_a_loop_is_never_shorter_than_four_bars(self):
         parts, _ = _parts()
-        short = [p for p in parts if p.bars == 4][0]
-        self.assertEqual(short.loop[1], 4)
+        self.assertEqual(sorted(p.loop[1] for p in parts), [4, 8, 8])
+        # a beat that only ever plays two bars at a time still gets four
         parts, _ = _parts([(A, 8), (B, 2), (A, 8), (B, 2)])
-        self.assertTrue(all(p.loop[1] in (2, 4) for p in parts))
+        self.assertTrue(all(p.loop[1] >= 4 for p in parts))
+
+    def test_a_loop_runs_through_the_passes_and_ends_on_the_fill(self):
+        fill2 = dict(kick=(0, 1), snare=(2, 2.5, 3, 3.5), hats=())
+        plan = [(A, 7), (FILL, 1), (A, 7), (fill2, 1), (A, 7), (FILL, 1)]
+        parts, _ = _parts(plan)
+        self.assertEqual(len(parts), 1)
+        start, bars = parts[0].loop
+        self.assertEqual((start, bars), (0.0, 24))          # three passes, three fills
+        self.assertAlmostEqual(parts[0].loop_sec, 24 * BAR, places=3)
+
+    def test_a_loop_is_never_longer_than_a_minute(self):
+        parts, _ = _parts([(A, 40)])
+        self.assertLessEqual(parts[0].loop_sec, part_finder.MAX_LOOP_SEC)
+        self.assertEqual(parts[0].loop[1] % 4, 0)
+        self.assertGreaterEqual(parts[0].loop[1], 20)
+
+    def test_a_loop_starts_on_a_phrases_one_not_where_the_run_happened_to_start(self):
+        # the beat changes on bars 8, 16, 24 (the ones); A's last run starts at
+        # 27, three bars after the one, so its loop must wait for bar 28
+        parts, _ = _parts([(B, 8), (A, 8), (B, 8), (C, 3), (A, 12)])
+        a_loops = [_bar_of(p.loop[0]) for p in parts if any(_bar_of(x) == 27 for x, _ in p.runs)]
+        self.assertEqual(len(a_loops), 1)
+        self.assertEqual(a_loops[0] % 4, 0)
 
     def test_a_few_milliseconds_of_timing_does_not_split_a_beat(self):
         for seed in (1, 2, 3):
@@ -124,7 +148,7 @@ class TestFindParts(unittest.TestCase):
     def test_a_part_serialises_for_the_page(self):
         parts, _ = _parts()
         d = parts[0].to_dict()
-        self.assertEqual(set(d), {"id", "bars", "runs", "loop_start", "loop_bars", "confidence"})
+        self.assertEqual(set(d), {"id", "bars", "runs", "loop_start", "loop_bars", "loop_sec", "confidence"})
 
     def test_numpy_and_scipy_only(self):
         with open(part_finder.__file__) as source:

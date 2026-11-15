@@ -231,6 +231,10 @@ def preview(wav_path: str) -> dict:
         # page plays, which is what makes it usable as ground truth for
         # lining the two up (see the page's calibration).
         "kicks": [round(at, 4) for at in pulse.kicks(samples.astype(np.float32), PEAK_SAMPLE_RATE)],
+        # The snare's hits too, so the grid can tell which kick-heavy
+        # sixteenth is the 1 (pulse.fit_grid, backbeat).
+        "snares": [round(at, 4) for at in pulse.kicks(samples.astype(np.float32), PEAK_SAMPLE_RATE,
+                                                      band=pulse.SNARE_BAND)],
         "duration": duration_sec(wav_path),
         "path": wav_path,
     }

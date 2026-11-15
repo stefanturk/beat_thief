@@ -74,6 +74,10 @@ SENSITIVITY = 4.0
 WARMUP_SEC = 0.0
 
 
+# Where a snare lives, for the backbeat the 1 is found from.
+SNARE_BAND = (250.0, 1800.0)
+
+
 def _design(rate: float, band) -> np.ndarray:
     """The band-pass, as second-order sections."""
     low, high = band
@@ -387,7 +391,14 @@ class Grid(NamedTuple):
 
 
 def fit_grid(onsets, tempo: float, tolerance: float = TOLERANCE,
-             subdivision: int = SUBDIVISION, beats_per_bar: int = BEATS_PER_BAR):
+             subdivision: int = SUBDIVISION, beats_per_bar: int = BEATS_PER_BAR,
+             backbeat=()):
+    return _fit(onsets, tempo, tolerance, subdivision, beats_per_bar, backbeat)[:4]
+
+
+def _fit(onsets, tempo, tolerance, subdivision, beats_per_bar, backbeat):
+    """fit_grid, plus how much of the snare backs the 1 it chose (the fifth
+    value), for a caller deciding which of two windows to believe."""
     """The sixteenth grid `onsets` agree on, searched around `tempo`.
 
     Returns (step_sec, phase_sec, confidence, downbeat_sec), or a zero
@@ -409,10 +420,16 @@ def fit_grid(onsets, tempo: float, tolerance: float = TOLERANCE,
     Ties go to the earliest. A grid with the lines in the right places and
     the accent on the wrong one is still useful; lines in the wrong places
     are not.
+
+    `backbeat` is a second opinion on which sixteenth is the 1: the times of
+    the snare (or whatever else lands on 2 and 4). A funk kick on the "and"
+    and on the 3 makes the most-kicked sixteenth the wrong one, but a snare
+    on 2 and 4 puts the 1 four sixteenths before it. Used only when there
+    are enough of them; without, the answer is exactly the kick-only one.
     """
     onsets = [float(at) for at in onsets]
     if tempo <= 0 or len(onsets) < MIN_ONSETS:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0
 
     times = np.asarray(onsets)
     guess = 60.0 / tempo / subdivision
@@ -425,12 +442,44 @@ def fit_grid(onsets, tempo: float, tolerance: float = TOLERANCE,
     confidence = float(abs(vectors[best]))
     phase = (math.atan2(vectors[best].imag, vectors[best].real) / (2.0 * math.pi) % 1.0) * step
     if confidence < MIN_CONFIDENCE:
-        return step, phase, confidence, 0.0
+        return step, phase, confidence, 0.0, 0.0
 
     steps_per_bar = beats_per_bar * subdivision
     weight = np.bincount(np.round((times - phase) / step).astype(int) % steps_per_bar,
                          minlength=steps_per_bar)
-    return step, phase, confidence, phase + int(weight.argmax()) * step
+    first = int(weight.argmax())
+    evidence = 0.0
+    backbeat = np.asarray(backbeat, dtype=float)
+    if len(backbeat) >= MIN_ONSETS:
+        snares = np.bincount(np.round((backbeat - phase) / step).astype(int) % steps_per_bar,
+                             minlength=steps_per_bar)
+        first = _one_from_backbeat(weight, snares, first)
+        # How much of the snare sits on 2 and 4 of the 1 it chose: a window
+        # with a clear backbeat is one to trust about where the 1 is.
+        quarter = steps_per_bar // 4
+        evidence = float((snares[(first + quarter) % steps_per_bar]
+                          + snares[(first + 3 * quarter) % steps_per_bar]) / max(snares.sum(), 1))
+    return step, phase, confidence, phase + first * step, evidence
+
+
+def _one_from_backbeat(kick_weight, snare_weight, by_kicks: int) -> int:
+    """Which of the bar's sixteenths is the 1, given how many kicks and how
+    many snares fall on each. Snares on 2 and 4 count most (the 1 is four
+    sixteenths before the first and twelve before the second), kicks on 1 and
+    3 count half as much, and the kick-only answer breaks ties."""
+    n = len(kick_weight)
+    half, quarter = n // 2, n // 4
+    kicks = kick_weight / max(float(kick_weight.sum()), 1.0)
+    snares = snare_weight / max(float(snare_weight.sum()), 1.0)
+    best, best_score = by_kicks, None
+    for s in range(n):
+        score = (snares[(s + quarter) % n] + snares[(s + 3 * quarter) % n]
+                 + 0.5 * (kicks[s] + kicks[(s + half) % n]))
+        near = min((s - by_kicks) % n, (by_kicks - s) % n)
+        score -= 0.001 * near
+        if best_score is None or score > best_score + 1e-12:
+            best, best_score = s, score
+    return best
 
 
 def downbeat(onsets, tempo: float, **options) -> float:
@@ -441,7 +490,7 @@ def downbeat(onsets, tempo: float, **options) -> float:
 
 def grid_track(onsets, tempo: float, window_bars: int = WINDOW_BARS,
                subdivision: int = SUBDIVISION, beats_per_bar: int = BEATS_PER_BAR,
-               tolerance: float = TOLERANCE) -> list[Grid]:
+               tolerance: float = TOLERANCE, backbeat=()) -> list[Grid]:
     """The grid across a whole recording, as a run of local fits.
 
     One fit per half-window, each covering the half it starts on, because no
@@ -453,6 +502,7 @@ def grid_track(onsets, tempo: float, window_bars: int = WINDOW_BARS,
     if tempo <= 0 or len(onsets) < MIN_ONSETS:
         return []
 
+    backbeat = sorted(float(b) for b in backbeat)
     times = np.asarray(onsets)
     span = window_bars * beats_per_bar * 60.0 / tempo
     hop = span / 2.0
@@ -460,7 +510,9 @@ def grid_track(onsets, tempo: float, window_bars: int = WINDOW_BARS,
     at = times[0]
     while at < times[-1]:
         inside = times[(times >= at) & (times < at + span)]
-        step, _, confidence, bar = fit_grid(inside, tempo, tolerance, subdivision, beats_per_bar)
+        under = [b for b in backbeat if at <= b < at + span]
+        step, _, confidence, bar, _ = _fit(inside, tempo, tolerance, subdivision,
+                                                 beats_per_bar, under)
         if confidence >= MIN_CONFIDENCE:
             track.append(Grid(
                 start=float(at), end=float(at + hop),
@@ -469,6 +521,7 @@ def grid_track(onsets, tempo: float, window_bars: int = WINDOW_BARS,
             ))
         at += hop
     return track
+
 
 
 def grid_at(track, when: float):

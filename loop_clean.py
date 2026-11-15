@@ -42,6 +42,14 @@ UNIT_BARS = (1, 2, 4)
 SEARCH_BARS = 32
 MAX_REFERENCES = 24
 MIN_REFERENCES = 2
+# A long loop is cleaned in pieces this many bars long, each against the same
+# bars of the other passes, so a fill that only one pass has finds no match
+# and is left as it was. With more than LONG_LOOP_PIECES pieces the work is
+# kept in check by using fewer references per piece.
+PIECE_BARS = 4
+LONG_LOOP_PIECES = 3
+LONG_LOOP_REFERENCES = 12
+
 # A candidate has to sound this much like the loop (envelope correlation).
 MIN_MATCH = 0.5
 
@@ -126,7 +134,8 @@ def _align(loop: np.ndarray, region: np.ndarray, rate: float, start: int, length
     return (best_lag - slack) * hop
 
 
-def _references(stem: np.ndarray, rate: float, first: int, length: int, bar_starts) -> list[int]:
+def _references(stem: np.ndarray, rate: float, first: int, length: int, bar_starts,
+                limit: int = MAX_REFERENCES) -> list[int]:
     """Start samples of the passes that sound like the loop, best first."""
     bars = np.asarray(sorted(bar_starts), dtype=float)
     if len(bars) < 2 or length < 1:
@@ -161,7 +170,7 @@ def _references(stem: np.ndarray, rate: float, first: int, length: int, bar_star
                 found.append((score, start))
         if len(found) >= MIN_REFERENCES:
             found.sort(reverse=True)
-            return [start for _, start in found[:MAX_REFERENCES]]
+            return [start for _, start in found[:limit]]
     return []
 
 
@@ -270,8 +279,8 @@ def _correct(channels: np.ndarray, others: list[np.ndarray], rate: float):
     return out, db
 
 
-def clean(samples: np.ndarray, rate: float, loop_start_sec: float, loop_len_sec: float,
-          bar_starts) -> tuple[np.ndarray, dict]:
+def _clean_piece(samples: np.ndarray, rate: float, loop_start_sec: float, loop_len_sec: float,
+                 bar_starts, limit: int = MAX_REFERENCES) -> tuple[np.ndarray, dict]:
     """The loop out of `samples` (a whole drum stem, float, (n,) or (n, ch)),
     repaired against the passes on either side of it. bar_starts are the
     stem's bar lines, in seconds.
@@ -291,7 +300,7 @@ def clean(samples: np.ndarray, rate: float, loop_start_sec: float, loop_len_sec:
         raw[:have] = stem[max(first, 0):max(first, 0) + have]
     shaped = raw if samples.ndim > 1 else raw[:, 0]
 
-    starts = _references(stem, rate, first, length, bar_starts) if first >= 0 else []
+    starts = _references(stem, rate, first, length, bar_starts, limit) if first >= 0 else []
     if len(starts) < MIN_REFERENCES:
         return shaped, {"references": 0}
 
@@ -311,3 +320,51 @@ def clean(samples: np.ndarray, rate: float, loop_start_sec: float, loop_len_sec:
         "cleaned_fraction": round(float(touched.mean()), 3),
     }
     return (out if samples.ndim > 1 else out[:, 0]), report
+
+
+def clean(samples: np.ndarray, rate: float, loop_start_sec: float, loop_len_sec: float,
+          bar_starts) -> tuple[np.ndarray, dict]:
+    """As _clean_piece, for a loop of any length. One that is longer than
+    PIECE_BARS bars is cleaned a piece at a time (each piece against the
+    other passes of that stretch of the groove, never against itself), so a
+    16-bar loop with a different fill in each pass is repaired where it
+    repeats and left alone where it doesn't.
+
+    report: {"references": the most any piece found (0: nothing changed),
+    "pieces": n, "pieces_cleaned": n, "changed_db", "cleaned_fraction"}."""
+    bars = np.asarray(sorted(bar_starts), dtype=float)
+    if len(bars) < 2:
+        return _clean_piece(samples, rate, loop_start_sec, loop_len_sec, bar_starts)
+    piece_sec = PIECE_BARS * float(np.median(np.diff(bars)))
+    count = int(loop_len_sec // piece_sec)
+    if count < 2:
+        return _clean_piece(samples, rate, loop_start_sec, loop_len_sec, bar_starts)
+    limit = MAX_REFERENCES if count <= LONG_LOOP_PIECES else LONG_LOOP_REFERENCES
+
+    cuts = [loop_start_sec + k * piece_sec for k in range(count)] + [loop_start_sec + loop_len_sec]
+    pieces, reports = [], []
+    for a, b in zip(cuts, cuts[1:]):
+        out, report = _clean_piece(samples, rate, a, b - a, bar_starts, limit)
+        pieces.append(out)
+        reports.append(report)
+    cleaned = np.concatenate(pieces, axis=0)
+    # Pieces are cut at rounded sample positions; the total must be exact.
+    length = int(round(loop_len_sec * rate))
+    if len(cleaned) != length:
+        fixed = np.zeros((length,) + cleaned.shape[1:], dtype=cleaned.dtype)
+        n = min(length, len(cleaned))
+        fixed[:n] = cleaned[:n]
+        cleaned = fixed
+
+    done = [r for r in reports if r["references"] > 0]
+    if not done:
+        return cleaned, {"references": 0, "pieces": len(reports), "pieces_cleaned": 0}
+    weights = [b - a for (a, b), r in zip(zip(cuts, cuts[1:]), reports) if r["references"] > 0]
+    total = cuts[-1] - cuts[0]
+    return cleaned, {
+        "references": max(r["references"] for r in done),
+        "pieces": len(reports),
+        "pieces_cleaned": len(done),
+        "changed_db": round(float(np.average([r["changed_db"] for r in done], weights=weights)), 2),
+        "cleaned_fraction": round(float(sum(r["cleaned_fraction"] * w for r, w in zip(done, weights)) / total), 3),
+    }

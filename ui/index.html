@@ -1863,8 +1863,8 @@
 
   function beatChipText(part) {
     const plays = part.runs.length;
-    return "Beat " + (BEAT_LETTERS[part.id] || (part.id + 1)) + " · " + part.bars + " bars" +
-      (plays > 1 ? " · plays " + plays + "×" : "");
+    return "Beat " + (BEAT_LETTERS[part.id] || (part.id + 1)) + " · " + part.loop_bars + " bars, " +
+      Math.round(part.loop_sec) + "s" + (plays > 1 ? " · plays " + plays + "×" : "");
   }
 
   // Below this share of the song counted into bars, the grid is too patchy
@@ -1893,7 +1893,7 @@
       const label = document.createElement("span");
       label.textContent = beatChipText(part);
       chip.append(dot, label);
-      chip.title = "Mark a " + part.loop_bars + "-bar loop of this beat (" + part.runs.length +
+      chip.title = "Mark a " + part.loop_bars + "-bar loop of this beat, fills included (" + part.runs.length +
         (part.runs.length === 1 ? " place" : " places") + " in the song)";
       chip.addEventListener("click", () => pickBeat(part));
       row.append(chip);
@@ -1925,8 +1925,25 @@
     row.hidden = true;
   }
 
+  // A beat chip can offer a loop of any length (24 bars, 28...) that has no
+  // button of its own: show it as one more, so the length that is marked is
+  // always the one lit.
+  function showCustomBars(bars) {
+    const group = document.getElementById("bars");
+    for (const old of group.querySelectorAll("button.custom")) old.remove();
+    if (bars <= 0 || group.querySelector('button[data-bars="' + bars + '"]')) return;
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "custom";
+    chip.dataset.bars = String(bars);
+    chip.textContent = String(bars);
+    chip.addEventListener("click", () => chooseBars(bars));
+    group.insertBefore(chip, group.lastElementChild);        // "By hand" stays last
+  }
+
   function chooseBars(bars) {
     barsWanted = bars;
+    showCustomBars(bars);
     labelPlay();
     for (const chip of document.querySelectorAll("#bars button")) {
       chip.classList.toggle("on", Number(chip.dataset.bars) === bars);

@@ -830,10 +830,11 @@ class TestFindBeats(unittest.TestCase):
 
     def test_the_parts_come_back_for_the_page_to_draw(self):
         import part_finder
-        part = part_finder.Part(0, 16, [(0.0, 16.0)], (0.0, 4), 0.8)
+        part = part_finder.Part(0, 16, [(0.0, 16.0)], (0.0, 8), 0.8, 16.0)
         got, features, find = self._find([part])
 
         self.assertEqual(got["parts"], [part.to_dict()])
+        self.assertEqual((got["parts"][0]["loop_bars"], got["parts"][0]["loop_sec"]), (8, 16.0))
         self.assertGreater(got["coverage"], 0.9)        # kicks all through the 100 s
         bars = find.call_args.args[1]
         self.assertAlmostEqual(bars[1] - bars[0], 2.0, delta=0.05)     # a bar at 120 BPM

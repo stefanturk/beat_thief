@@ -96,6 +96,10 @@ _SPARE_BARS = 1
 # minutes onto a step grid is the thing we just stopped doing.
 MAX_BARS = 16
 
+# A loop the picker counted bars for (a beat chip's whole stretch, fills and
+# all) may run longer than MAX_BARS, up to this many seconds.
+MAX_LOOP_SEC = 60.0
+
 # What drum_transcriber's notes mean, by name, so a loop can be handed to
 # beat_writer in its vocabulary rather than in raw note numbers.
 _PIECE_FOR_NOTE = {
@@ -357,7 +361,8 @@ def build(
 
     bar_sec = beat_writer.BEATS_PER_BAR * 60.0 / loop_tempo
     step_sec = bar_sec / STEPS_PER_BAR
-    bars = max(1, min(MAX_BARS, int(bars))) if bars else _bar_count(span, bar_sec)
+    longest = max(MAX_BARS, int(MAX_LOOP_SEC // bar_sec))
+    bars = max(1, min(longest, int(bars))) if bars else _bar_count(span, bar_sec)
 
     origin = _grid_origin([time_sec for time_sec, _, _ in inside], step_sec)
     total_steps = bars * STEPS_PER_BAR
@@ -516,13 +521,13 @@ def write_wav(loop: Loop, wav_path: str, mid_path: str, clean: bool = False,
     return out_path
 
 
-def _bar_starts(kicks, tempo: float) -> list[float]:
+def _bar_starts(kicks, tempo: float, backbeat=()) -> list[float]:
     """Every bar line, in seconds, of the grid pulse fits to `kicks` - the
     same local fit the picker draws (gui.Api.audition). Each grid's
     downbeat is one bar line; the rest of its span is that plus whole bars."""
     import pulse
     bars = set()
-    for grid in pulse.grid_track(kicks, tempo):
+    for grid in pulse.grid_track(kicks, tempo, backbeat=backbeat):
         bar_sec = grid.step * pulse.SUBDIVISION * pulse.BEATS_PER_BAR
         k = math.ceil((grid.start - grid.downbeat) / bar_sec)
         at = grid.downbeat + k * bar_sec
@@ -545,7 +550,9 @@ def _clean_cut(loop: Loop, stem_path: str, out_path: str) -> dict:
         cut_rate, raw = wavfile.read(out_path)
         kicks = pulse.kicks(audition._mono_samples(stem_path).astype(np.float32),
                             audition.PEAK_SAMPLE_RATE)
-        bar_starts = _bar_starts(kicks, loop.tempo)
+        snares = pulse.kicks(audition._mono_samples(stem_path).astype(np.float32),
+                             audition.PEAK_SAMPLE_RATE, band=pulse.SNARE_BAND)
+        bar_starts = _bar_starts(kicks, loop.tempo, snares)
 
         cleaned, found = loop_clean.clean(
             _as_float(stem), float(rate), float(loop.origin_sec),

@@ -797,7 +797,8 @@ class Api:
         # Fitted here rather than in the page so the arithmetic lives in one
         # place (pulse.py) that can be lifted out whole.
         prepared["grid"] = [grid._asdict() for grid in
-                            pulse.grid_track(prepared.get("kicks") or [], prepared["tempo"])]
+                            pulse.grid_track(prepared.get("kicks") or [], prepared["tempo"],
+                                              backbeat=prepared.get("snares") or [])]
         return prepared
 
     def regrid(self, wav_path: str, tempo: float) -> dict:
@@ -806,10 +807,12 @@ class Api:
         the real one. The same kicks and the same local fit as audition();
         only the starting tempo is new."""
         try:
-            kicks = audition.preview(wav_path).get("kicks") or []
+            prepared = audition.preview(wav_path)
+            kicks = prepared.get("kicks") or []
         except Exception as e:
             return {"error": str(e) or e.__class__.__name__}
-        return {"grid": [grid._asdict() for grid in pulse.grid_track(kicks, float(tempo))]}
+        return {"grid": [grid._asdict() for grid in
+                         pulse.grid_track(kicks, float(tempo), backbeat=prepared.get("snares") or [])]}
 
     def find_beats(self, wav_path: str) -> dict:
         """The distinct beats in the drum stem (part_finder), for the picker
@@ -828,7 +831,7 @@ class Api:
                 tempo = instrument_isolator.parse_tempo_from_basename(basename)
             except ValueError:
                 return {"parts": []}
-            bar_starts = beat_loop._bar_starts(prepared.get("kicks") or [], tempo)
+            bar_starts = beat_loop._bar_starts(prepared.get("kicks") or [], tempo, prepared.get("snares") or [])
             coverage = self._bar_coverage(bar_starts, prepared.get("duration"))
             if len(bar_starts) < part_finder.MIN_PART_BARS:
                 return {"parts": [], "coverage": coverage}
