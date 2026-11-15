@@ -823,7 +823,8 @@
   #beats[hidden] { display: none; }
   #beats .beat-chip { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; }
   #beats .beat-chip i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-  #beats .beat-chip small { color: var(--dim); }
+  #beats .beat-chip small, #beats .beats-note { color: var(--dim); }
+  #beats .beats-note { align-self: center; font-size: 12px; }
   #beats .beat-chip.on { border-color: var(--violet); background: var(--violet-dim); }
   /* A row of joined buttons where one is lit: how many bars to mark, and
      whether you're hearing the drums or the whole song. */
@@ -1826,10 +1827,11 @@
   }
 
   // Whether the loop's audio is cleaned against the drummer's other passes
-  // (loop_clean). Off until it has been rated by ear; remembered across
-  // pickers, and across launches where the browser lets it be.
-  let cleanWanted = false;
-  try { cleanWanted = localStorage.getItem("beatThief.clean") === "1"; } catch (e) { cleanWanted = false; }
+  // (loop_clean). On unless it was turned off - rated by ear and liked -
+  // and remembered across pickers, and across launches where the browser
+  // lets it be.
+  let cleanWanted = true;
+  try { cleanWanted = localStorage.getItem("beatThief.clean") !== "0"; } catch (e) { cleanWanted = true; }
 
   function chooseClean(on) {
     cleanWanted = on;
@@ -1865,10 +1867,22 @@
       (plays > 1 ? " · plays " + plays + "×" : "");
   }
 
-  function showBeats(parts) {
+  // Below this share of the song counted into bars, the grid is too patchy
+  // to trust the beats found, or the lack of them (gui.Api.find_beats).
+  const PATCHY_GRID = 0.6;
+
+  function showBeats(parts, coverage) {
     const row = el("beats");
     row.textContent = "";
-    row.hidden = !parts.length;
+    const patchy = typeof coverage === "number" && coverage < PATCHY_GRID;
+    row.hidden = !parts.length && !patchy;
+    if (patchy) {
+      const note = document.createElement("small");
+      note.className = "beats-note";
+      note.textContent = (parts.length ? "Beats found only where bars could be counted" : "Couldn't count bars on this song") +
+        " (" + Math.round(coverage * 100) + "% of it) — tap the tempo, or mark by hand.";
+      row.append(note);
+    }
     for (const part of parts) {
       const chip = document.createElement("button");
       chip.type = "button";
@@ -1900,7 +1914,7 @@
     window.pywebview.api.find_beats(opened.song.have.drums).then((got) => {
       if (picker !== opened || !got || got.error) return;   // closed meanwhile, or none to offer
       picker.parts = got.parts || [];
-      showBeats(picker.parts);
+      showBeats(picker.parts, got.coverage);
       drawWave();
     }).catch(() => { /* beats are a convenience; marking by hand needs none */ });
   }

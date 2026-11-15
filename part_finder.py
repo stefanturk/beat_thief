@@ -44,6 +44,11 @@ REST_FRACTION = 0.15
 GROUP_DISTANCE = 0.5
 # Fewer consecutive bars than this is a fill, not a beat.
 MIN_RUN = 2
+# A pattern that never plays two bars running (a live drummer who varies it
+# every bar) still counts as a beat if it comes back this many times.
+MIN_SCATTERED_BARS = 6
+# At most this many parts, biggest first: past it they are slight variations.
+MAX_PARTS = 8
 # A fill of up to this many bars between two runs of one beat doesn't end it.
 MERGE_GAP = 2
 # A part has at least this many bars across all its runs.
@@ -195,11 +200,16 @@ def find_parts(features, bar_starts) -> list[Part]:
                          GROUP_DISTANCE, "distance")
         labels[index] = found
 
-    runs = [r for r in _runs(labels, active) if r[1] - r[0] >= MIN_RUN]
-    by_group: dict[int, list[tuple[int, int]]] = {}
-    for a, b, label in runs:
-        by_group.setdefault(label, []).append((a, b))
-    kept = {g: r for g, r in by_group.items() if sum(b - a for a, b in r) >= MIN_PART_BARS}
+    every: dict[int, list[tuple[int, int]]] = {}
+    for a, b, label in _runs(labels, active):
+        every.setdefault(label, []).append((a, b))
+    kept = {}
+    for g, r in every.items():
+        long_runs = [x for x in r if x[1] - x[0] >= MIN_RUN]
+        if sum(b - a for a, b in long_runs) >= MIN_PART_BARS:
+            kept[g] = long_runs                        # a fill or two is dropped
+        elif sum(b - a for a, b in r) >= MIN_SCATTERED_BARS:
+            kept[g] = r                                # comes back, never twice running
     if not kept:
         return []
 
@@ -228,5 +238,6 @@ def find_parts(features, bar_starts) -> list[Part]:
             float(np.clip(gap, 0.0, 1.0)),
         ))
     parts.sort(key=lambda p: (-p[0], p[1]))
+    parts = parts[:MAX_PARTS]
     return [Part(i, total, runs_sec, loop, conf)
             for i, (total, _, runs_sec, loop, conf) in enumerate(parts)]

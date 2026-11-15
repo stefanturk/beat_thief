@@ -36,10 +36,11 @@ import loop_check
 # The repeat unit is tried at these many bars, shortest first.
 UNIT_BARS = (1, 2, 4)
 # Passes this many bars either side of the loop are candidates, and no more
-# than MAX_REFERENCES (the best matching) are used: a median needs a handful,
-# not sixty.
+# than MAX_REFERENCES (the best matching) are used. 24 rather than 12: measured
+# on the library loops it changes the sound by a little (-10 to -30 dB under
+# the loop) for about 1.5x the time; 48 is 3-4x the time (up to 30 s).
 SEARCH_BARS = 32
-MAX_REFERENCES = 12
+MAX_REFERENCES = 24
 MIN_REFERENCES = 2
 # A candidate has to sound this much like the loop (envelope correlation).
 MIN_MATCH = 0.5

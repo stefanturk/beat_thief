@@ -833,7 +833,8 @@ class TestFindBeats(unittest.TestCase):
         part = part_finder.Part(0, 16, [(0.0, 16.0)], (0.0, 4), 0.8)
         got, features, find = self._find([part])
 
-        self.assertEqual(got, {"parts": [part.to_dict()]})
+        self.assertEqual(got["parts"], [part.to_dict()])
+        self.assertGreater(got["coverage"], 0.9)        # kicks all through the 100 s
         bars = find.call_args.args[1]
         self.assertAlmostEqual(bars[1] - bars[0], 2.0, delta=0.05)     # a bar at 120 BPM
         self.assertEqual(find.call_args.args[0], "features")
@@ -845,8 +846,14 @@ class TestFindBeats(unittest.TestCase):
 
     def test_a_stem_with_no_kicks_has_nothing_to_offer(self):
         got, _, find = self._find([], prepared=dict(self.PREPARED, kicks=[]))
-        self.assertEqual(got, {"parts": []})
+        self.assertEqual(got, {"parts": [], "coverage": 0.0})
         find.assert_not_called()
+
+    def test_a_grid_that_covers_little_of_the_song_says_so(self):
+        # Kicks only in the first fifth of the stem: the rest has no bars.
+        patchy = dict(self.PREPARED, kicks=self.KICKS[:40])
+        got, _, _ = self._find([], prepared=patchy)
+        self.assertLess(got["coverage"], 0.4)
 
     def test_a_stem_that_will_not_load_says_why(self):
         with mock.patch("audition.preview", side_effect=OSError("gone")):
@@ -974,11 +981,12 @@ class TestStealBeat(unittest.TestCase):
         self.assertIs(steal.call_args.kwargs["clean"], True)
         self.assertEqual(api.beat_status()["result"], {"path": "x"})
 
-    def test_the_page_has_a_clean_toggle_that_is_off_by_default_and_remembered(self):
+    def test_the_page_has_a_clean_toggle_that_is_on_by_default_and_remembered(self):
         markup = open(os.path.join(os.path.dirname(gui.__file__), "ui", "index.html")).read()
         self.assertIn('id="clean"', markup)
         self.assertNotIn('id="clean" class="on"', markup)
-        self.assertIn("let cleanWanted = false;", markup)
+        self.assertIn("let cleanWanted = true;", markup)
+        self.assertIn('getItem("beatThief.clean") !== "0"', markup)   # only an explicit off is kept
         self.assertIn("beatThief.clean", markup)
         self.assertIn("barsMarked(), cleanWanted)", markup)
         self.assertIn("Cleaned against ", markup)

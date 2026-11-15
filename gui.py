@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import threading
@@ -828,14 +829,26 @@ class Api:
             except ValueError:
                 return {"parts": []}
             bar_starts = beat_loop._bar_starts(prepared.get("kicks") or [], tempo)
+            coverage = self._bar_coverage(bar_starts, prepared.get("duration"))
             if len(bar_starts) < part_finder.MIN_PART_BARS:
-                return {"parts": []}
+                return {"parts": [], "coverage": coverage}
             rate, samples = wavfile.read(wav_path)
             features = part_finder.drum_features(beat_loop._as_float(samples), float(rate), bar_starts)
             parts = part_finder.find_parts(features, bar_starts)
         except Exception as e:
             return {"error": str(e) or e.__class__.__name__}
-        return {"parts": [part.to_dict() for part in parts]}
+        return {"parts": [part.to_dict() for part in parts], "coverage": coverage}
+
+    @staticmethod
+    def _bar_coverage(bar_starts, duration) -> float:
+        """The share of the stem the grid managed to put bars on, 0..1. Kicks
+        that don't agree on a tempo leave stretches with no bars (measured:
+        27 of 30 library stems are covered above 0.9, JB's Out! only 0.4),
+        and the beats can only be found where there are bars to count."""
+        if len(bar_starts) < 2 or not duration:
+            return 0.0
+        bar_sec = statistics.median(b - a for a, b in zip(bar_starts, bar_starts[1:]))
+        return round(min(1.0, len(bar_starts) * bar_sec / float(duration)), 2)
 
     def check_section(self, wav_path: str, start_sec: float, end_sec: float,
                       grid_tempo: float, bars: int) -> dict:
