@@ -1008,7 +1008,7 @@
             same one separation makes it, so it costs no more than Vocals.
           -->
           <button class="pad" id="pad-instrumental" data-stem="instrumental" aria-pressed="false">Instrumental</button>
-          <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Beat</button>
+          <button class="pad" id="pad-beat" data-stem="beat" data-again="true" aria-pressed="false">Drum beat</button>
           <!--
             A loop of each stem over the drum loop's bars - the same marking,
             so they stack in Ableton without lining anything up. With a drum
@@ -1083,13 +1083,13 @@
     -->
     <section class="picker" id="picker" hidden>
       <div class="picker-head">
-        <span id="picker-title">Steal a beat</span>
+        <span id="picker-title">Steal a drum beat</span>
         <span id="picker-hint">Click at the 1 of the phrase — ← → a sixteenth, ⇧ a beat — stop at the next 1 to end it.</span>
       </div>
       <p id="picker-warn" hidden></p>
       <canvas id="wave" width="1000" height="156"></canvas>
       <canvas id="detail" width="1000" height="104"></canvas>
-      <div id="beats" role="group" aria-label="Beats found in this song" hidden></div>
+      <div id="beats" role="group" aria-label="Drum beats found in this song" hidden></div>
       <div class="picker-controls">
         <button id="play" type="button">Play</button>
         <button id="tap" type="button" title="Tap along on the beat (T) when the grid is at the wrong tempo - double, half, or 2:3 of it">Tap</button>
@@ -1104,7 +1104,7 @@
           <button type="button" data-bars="0">By hand</button>
         </span>
         <span class="seg" id="clean-seg" role="group" aria-label="Clean the loop">
-          <button type="button" id="clean" aria-pressed="false" title="Clean the beat's audio against the drummer's other passes of the same pattern - hollow hits filled in, bleed turned down">Clean</button>
+          <button type="button" id="clean" aria-pressed="false" title="Clean the drum beat's audio against the drummer's other passes of the same pattern - hollow hits filled in, bleed turned down">Clean</button>
         </span>
         <span class="seg" id="hear" role="group" aria-label="Listen to">
           <button type="button" data-hear="drums" class="on">Drums</button>
@@ -1113,7 +1113,7 @@
         <button id="picker-close" type="button">Close</button>
         <span id="marked"></span>
         <span id="clock">0:00</span>
-        <button id="build" type="button" disabled>Build beat</button>
+        <button id="build" type="button" disabled>Build drum beat</button>
       </div>
     </section>
 
@@ -1437,7 +1437,7 @@
                        "instrumental", "bass_beat", "harmony_beat", "vocals_beat",
                        "instrumental_beat"];
   const LABELS = {
-    song: "Song", drums: "Drums", beat: "Beat", midi: "Midi",
+    song: "Song", drums: "Drums", beat: "Drum beat", midi: "Midi",
     bass: "Bass", harmony: "Harmony", vocals: "Vocals", instrumental: "Instrumental",
     bass_beat: "Bass beat", harmony_beat: "Harmony beat", vocals_beat: "Vocals beat",
     instrumental_beat: "Instrumental beat",
@@ -1863,7 +1863,7 @@
 
   function beatChipText(part) {
     const plays = part.runs.length;
-    return "Beat " + (BEAT_LETTERS[part.id] || (part.id + 1)) + " · " + part.loop_bars + " bars, " +
+    return "Drum beat " + (BEAT_LETTERS[part.id] || (part.id + 1)) + " · " + part.loop_bars + " bars, " +
       Math.round(part.loop_sec) + "s" + (plays > 1 ? " · plays " + plays + "×" : "");
   }
 
@@ -1879,7 +1879,7 @@
     if (patchy) {
       const note = document.createElement("small");
       note.className = "beats-note";
-      note.textContent = (parts.length ? "Beats found only where bars could be counted" : "Couldn't count bars on this song") +
+      note.textContent = (parts.length ? "Drum beats found only where bars could be counted" : "Couldn't count bars on this song") +
         " (" + Math.round(coverage * 100) + "% of it) — tap the tempo, or mark by hand.";
       row.append(note);
     }
@@ -1893,7 +1893,7 @@
       const label = document.createElement("span");
       label.textContent = beatChipText(part);
       chip.append(dot, label);
-      chip.title = "Mark a " + part.loop_bars + "-bar loop of this beat, fills included (" + part.runs.length +
+      chip.title = "Mark a " + part.loop_bars + "-bar loop of this drum beat, fills included (" + part.runs.length +
         (part.runs.length === 1 ? " place" : " places") + " in the song)";
       chip.addEventListener("click", () => pickBeat(part));
       row.append(chip);
@@ -2480,6 +2480,10 @@
     }
   } catch (e) { /* no device events here; the Play fallback below covers it */ }
 
+  function logAudio(message) {
+    try { window.pywebview.api.log_audio(message); } catch (e) { /* no bridge */ }
+  }
+
   function playFrom(seconds) {
     if (!picker || !picker.buffer) return;
     // Starting from silence always gets a fresh context: the device events
@@ -2520,6 +2524,9 @@
 
     startedAt = ctx.currentTime;
     startedFrom = picker.at;
+    logAudio("play state=" + ctx.state + " rate=" + ctx.sampleRate + " buf=" +
+             buffer.duration.toFixed(1) + "s/" + buffer.sampleRate + " hearing=" + picker.hearing +
+             " gesture=" + (navigator.userActivation ? navigator.userActivation.isActive : "?"));
     playing = true;
     labelPlay();
     if (!raf) tick();
@@ -2530,6 +2537,8 @@
     const began = ctx.currentTime;
     setTimeout(() => {
       if (!playing || source === null) return;
+      logAudio("after " + WAKE_GRACE_MS + "ms state=" + ctx.state + " clock+=" +
+               (ctx.currentTime - began).toFixed(3));
       if (ctx.currentTime - began >= CLOCK_MOVED_SEC) return;
       pausePlay();
       sayInPicker("Audio did not start — click again.");
@@ -3058,7 +3067,7 @@
     // Set before the call even returns, not after - a fast build can finish
     // before the first 250ms poll fires, and without this the page would
     // jump straight from the click to the result with nothing shown between.
-    el("message").textContent = "Building beat...";
+    el("message").textContent = "Building drum beat...";
 
     window.pywebview.api.steal_beat_start(picker.song.have.drums, picker.start, end, outputs, stemsFromPads(),
                                          gridTempoAt(picker.start), barsMarked(), cleanWanted).then((snapshot) => {
@@ -3077,7 +3086,7 @@
   function pollBeat() {
     window.pywebview.api.beat_status().then((state) => {
       if (state.running) {
-        el("message").textContent = state.phase || "Building beat...";
+        el("message").textContent = state.phase || "Building drum beat...";
         return;
       }
       clearInterval(beatPolling);

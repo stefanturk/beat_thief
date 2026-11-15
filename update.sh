@@ -71,7 +71,7 @@ say "2. Updating yt-dlp and the other packages"
 say "3. Rebuilding the app"
 # Same Python setup.sh installed the packages into - see the note there.
 PYTHON="$PY" "$REPO/make_app.sh"
-
+"$PY" "$REPO/finder_shortcut.py" || true
 say "Up to date."
 note "Beat Thief is in your Applications folder, same as before. If it was"
 note "open, quit it and open it again to get the new version."

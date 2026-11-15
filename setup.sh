@@ -233,6 +233,9 @@ done
 say "5. Building the app"
 PYTHON="$PY" "$REPO/make_app.sh"
 
+# A Finder sidebar entry for the folder songs land in. Never fails the install.
+"$PY" "$REPO/finder_shortcut.py" || true
+
 say "Done."
 note "Beat Thief is in your Applications folder (the one in your home"
 note "folder, which Finder shows under Go > Home > Applications)."

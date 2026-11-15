@@ -880,6 +880,11 @@ class Api:
             "tempo": round(float(grid_tempo) * beats / found["beats"], 1),
         }
 
+    def log_audio(self, message: str) -> None:
+        """One line from the page into ~/Library/Logs/beat_thief.log, so a
+        picker that is silent leaves evidence of why."""
+        print("[audio] " + str(message)[:300], flush=True)
+
     def audition_song(self, song_path: str) -> dict:
         """The whole song, to swap in for the drum stem while marking.
 
@@ -1038,7 +1043,7 @@ class Api:
             beat_path = pipeline._newest_stolen_beat(files, ".wav") or pipeline._newest_stolen_beat(files, ".mid")
             span = beat_loop.read_span(beat_path) if beat_path else None
             if span is None:
-                return {"error": "That drum loop doesn't remember its bars — mark the beat again to loop the other stems over it."}
+                return {"error": "That drum loop doesn't remember its bars — mark the drum beat again to loop the other stems over it."}
             loops, missing = self._cut_stem_loops(
                 song_dir, beat_path, span["origin_sec"], span["duration_sec"], stems)
         except Exception as e:
