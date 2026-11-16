@@ -33,7 +33,11 @@ elif [ -w /Applications ]; then
 else
     DEST="$HOME/Applications"
 fi
+# Shared build helpers (Dock-safe install, tidy of an old copy) live in Steezy Studio; optional here.
+. "${STEEZY_BUILD:-$REPO/../steezy_studio/build}/lib.sh" 2>/dev/null || true
 APP="$DEST/Beat Thief.app"
+FINAL_APP="$APP"
+APP="$DEST/.$(basename "$FINAL_APP").building"      # built beside, swapped in at the end
 # Where setup.sh puts Beat Thief's own Python and ffmpeg.
 RUNTIME="$HOME/Library/Application Support/Beat Thief"
 # Which Python the app will run: the one setup.sh installed the packages
@@ -109,17 +113,6 @@ case "$DEST" in
         exit 1
         ;;
 esac
-
-# A second copy anywhere else is how the Dock silently goes stale: it's
-# pinned to whichever bundle it was dragged from, and only $APP ever gets
-# rebuilt. One drifted to /Applications once already and every rebuild after
-# that landed on the one nothing was pointing at. Sweep it away here so
-# there's only ever the one bundle to launch or pin.
-if [ "$DEST" = "/Applications" ] && [ -e "$HOME/Applications/Beat Thief.app" ]; then
-    echo "Removing an old copy at ~/Applications/Beat Thief.app - the Dock" >&2
-    echo "should only ever point at $APP." >&2
-    rm -rf "$HOME/Applications/Beat Thief.app"
-fi
 
 mkdir -p "$DEST"
 rm -rf "$APP"
@@ -241,6 +234,12 @@ LAUNCHER
 chmod +x "$APP/Contents/MacOS/Beat Thief"
 codesign --force --deep --sign - "$APP" 2>/dev/null || true
 
+# Swap the finished app in with no gap (a Dock pin that looks while it's half-built shows a ?),
+# then move any old copy's Dock pin across and remove it.
+if declare -F steezy_install_app >/dev/null; then steezy_install_app "$APP" "$FINAL_APP"
+else rm -rf "$FINAL_APP"; mv "$APP" "$FINAL_APP"; fi
+APP="$FINAL_APP"
+declare -F steezy_sweep_old_copy >/dev/null && steezy_sweep_old_copy "$DEST" "Beat Thief"
 echo "Built $APP"
 if [ "$PYTHON" != "$RUNTIME/python/bin/python3" ] && [ ! -x "$RUNTIME/python/bin/python3" ]; then
     # An update from before Beat Thief brought its own Python runs the old
