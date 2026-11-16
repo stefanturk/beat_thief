@@ -359,6 +359,12 @@ class TestSongsOnly(unittest.TestCase):
         with mock.patch("instrument_isolator.splitter_installed", return_value=False):
             self.assertFalse(gui.Api().splitter_installed())
 
+    def test_an_intel_mac_is_told_it_will_be_slow_and_nobody_else_is(self):
+        with mock.patch("sys.platform", "darwin"), mock.patch("platform.machine", return_value="x86_64"):
+            self.assertIn("processor alone", gui.Api().splitter_speed_note())
+        with mock.patch("sys.platform", "darwin"), mock.patch("platform.machine", return_value="arm64"):
+            self.assertEqual(gui.Api().splitter_speed_note(), "")
+
     def test_stems_armed_without_the_splitter_are_dropped_and_the_song_still_comes(self):
         calls = {}
         api = gui.Api(run_pipeline=lambda url, **k: calls.update(k) or {"outputs": []})

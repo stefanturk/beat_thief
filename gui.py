@@ -495,11 +495,8 @@ class Api:
         so it runs on the processor alone and takes several times as long as on an
         M-series Mac. Empty everywhere else. (An Intel-built Python on an M-series
         Mac reports x86_64 too and is just as slow, so the same words fit.)"""
-        import platform
-        if sys.platform == "darwin" and platform.machine() == "x86_64":
-            return ("This Mac splits songs on its processor alone, so expect roughly 5-10 minutes "
-                    "per song, and closing other apps helps.")
-        return ""
+        from music_detector import splitter
+        return splitter.speed_note()
 
     def is_playlist(self, url: str) -> bool:
         """Whether the page should offer to number the songs this link
