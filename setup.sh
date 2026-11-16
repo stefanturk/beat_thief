@@ -237,8 +237,8 @@ PYTHON="$PY" "$REPO/make_app.sh"
 "$PY" "$REPO/finder_shortcut.py" || true
 
 say "Done."
-note "Beat Thief is in your Applications folder (the one in your home"
-note "folder, which Finder shows under Go > Home > Applications)."
+note "Beat Thief is in your Applications folder (it is listed in the line"
+note "above if your Mac put it in the one inside your home folder)."
 note "Open it once from there, then drag it to your Dock."
 note
 note "Songs land in ~/Music/Beat Thief."

@@ -55,11 +55,11 @@ from, so every update means another full download. Cloning is the reason
 For the everyday job — one link, get its drums — there's a window:
 
 ```
-./make_app.sh /Applications
+./make_app.sh
 ```
 
-That builds `Beat Thief.app` (leave off the path and it goes to
-`~/Applications` instead). Double-click it, or drag it to your Dock, and you
+That builds `Beat Thief.app` into `/Applications` (or `~/Applications` if your
+account can't write there; pass a folder to put it anywhere else). Double-click it, or drag it to your Dock, and you
 get a real Mac window: paste a link, arm the parts you want, press Steal it.
 Progress runs in the window, and each finished file has a Reveal button that
 opens it in Finder ready to drag into Ableton. When a run finishes the big

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Build "Beat Thief.app" - the double-clickable launcher for the GUI.
 #
-#   ./make_app.sh              -> builds into ~/Applications
+#   ./make_app.sh              -> builds into /Applications (~/Applications if that isn't writable)
 #   ./make_app.sh /some/dir    -> builds somewhere else
 #
 # Why the app carries a copy of the code instead of just pointing at this
@@ -15,7 +15,7 @@
 # time with "Operation not permitted".
 #
 # So the bundle copies in what it needs and runs from inside itself, which
-# needs no permission at all, and it's installed to ~/Applications, which
+# needs no permission at all, and it's installed to /Applications, which
 # isn't a protected folder. The GUI's downloads go to ~/Music/Beat Thief for
 # the same reason (see gui.py) - ~/Downloads would be blocked.
 #
@@ -26,7 +26,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEST="${1:-$HOME/Applications}"
+if [ -n "${1:-}" ]; then
+    DEST="$1"
+elif [ -w /Applications ]; then
+    DEST="/Applications"      # where people look for apps (an admin account can write there)
+else
+    DEST="$HOME/Applications"
+fi
 APP="$DEST/Beat Thief.app"
 # Where setup.sh puts Beat Thief's own Python and ffmpeg.
 RUNTIME="$HOME/Library/Application Support/Beat Thief"
@@ -109,10 +115,10 @@ esac
 # rebuilt. One drifted to /Applications once already and every rebuild after
 # that landed on the one nothing was pointing at. Sweep it away here so
 # there's only ever the one bundle to launch or pin.
-if [ "$DEST" != "/Applications" ] && [ -e "/Applications/Beat Thief.app" ]; then
-    echo "Removing a stray copy at /Applications/Beat Thief.app - the Dock" >&2
+if [ "$DEST" = "/Applications" ] && [ -e "$HOME/Applications/Beat Thief.app" ]; then
+    echo "Removing an old copy at ~/Applications/Beat Thief.app - the Dock" >&2
     echo "should only ever point at $APP." >&2
-    rm -rf "/Applications/Beat Thief.app"
+    rm -rf "$HOME/Applications/Beat Thief.app"
 fi
 
 mkdir -p "$DEST"
