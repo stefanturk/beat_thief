@@ -46,7 +46,7 @@ import spotify
 UI_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui", "index.html")
 
 APP_NAME = "Beat Thief"
-WINDOW_SIZE = (560, 840)
+WINDOW_SIZE = (560, 780)  # fits a 13-inch laptop screen with the menu bar and dock
 
 # Not the CLI's ~/Downloads/Song Downloads: macOS blocks apps from writing to
 # Downloads (as it does Desktop and Documents) without a permission grant that

@@ -120,8 +120,14 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
-    flex: none;
+    /* Natural height, but allowed to shrink and scroll (2026-11-19): an open queue, the
+       recording list or the how-to used to push Stop and the folder bar off the bottom of the
+       window with no way to reach them. */
+    flex: 0 1 auto;
+    min-height: 0;
+    overflow-y: auto;
   }
+  main > * { flex-shrink: 0; }
 
   input[type="url"] {
     width: 100%;
@@ -366,6 +372,8 @@
     text-align: center;
   }
 
+  /* Nothing running and nothing to show: the empty ··· only took the room of three songs. */
+  body[data-state="idle"] #figure[data-blank="true"] { display: none; }
   #figure {
     font-family: var(--display);
     font-size: 46px;
@@ -562,7 +570,7 @@
      stolen songs pushes the file list, never the controls, off screen. */
   .files {
     flex: 1;
-    min-height: 0;
+    min-height: 150px;   /* a few songs always show, however much is open above */
     overflow-y: auto;
     border-top: 1px solid var(--edge);
     padding: 18px 22px 22px;
@@ -620,11 +628,12 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 10px 12px;
+    padding: 6px 12px;
     background: var(--raised);
     border: 1px solid var(--edge);
     border-radius: var(--radius);
   }
+  #outputs { gap: 4px; }
   .song:hover { border-color: #3d414b; }
 
   .song-open {
@@ -769,7 +778,8 @@
   .choice[hidden] { display: none; }
   #choice-hint { color: #5b5d64; letter-spacing: 0.04em; text-transform: none; font-size: 11px; }
 
-  #choice-list { list-style: none; margin: 0; padding: 0; }
+  /* Its own scroll, so Skip and Cancel under it stay on screen with a dozen recordings. */
+  #choice-list { list-style: none; margin: 0; padding: 0; max-height: 38vh; overflow-y: auto; }
   #choice-list button {
     display: block;
     width: 100%;
@@ -1192,6 +1202,7 @@
 
   function setFigure(text, unit, openable) {
     el("figure").textContent = text;
+    el("figure").dataset.blank = text === "···" ? "true" : "false";
     el("figure").dataset.openable = openable ? "true" : "false";
     el("message").dataset.openable = openable ? "true" : "false";
     el("unit").textContent = unit;

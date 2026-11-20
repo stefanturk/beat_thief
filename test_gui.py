@@ -2378,8 +2378,13 @@ class TestTheNewLayout(unittest.TestCase):
         with open(gui.UI_FILE) as page:
             self.html = page.read()
 
-    def test_the_window_is_taller(self):
-        self.assertEqual(gui.WINDOW_SIZE, (560, 840))
+    def test_the_window_fits_a_laptop(self):
+        # Tall enough for the files list, short enough for a 13-inch laptop (about 800 usable).
+        self.assertEqual(gui.WINDOW_SIZE[0], 560)
+        self.assertLessEqual(gui.WINDOW_SIZE[1], 800)
+
+    def test_the_controls_scroll_rather_than_push_the_folder_bar_off(self):
+        self.assertIn("overflow-y: auto;", self.html.split("  main {", 1)[1].split("}", 1)[0])
 
     def test_steal_it_is_above_the_status_and_stop_below(self):
         go, readout, stop = (self.html.index(f'id="{name}"') for name in ("go", "readout", "stop"))
